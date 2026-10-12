@@ -22,6 +22,7 @@ src/Config.lua       constants (PROTOCOL, intervals, radii, sprite list)
 src/Gen.lua          generation 1|2|3 + family/version; every per-generation helper
 src/Gen3.lua         the only door into game3 engine modules (lazy, gen-3-gated, Gen3.wrapFn)
 src/Gen3Ui.lua       the mod.ui surface on the game3 modal stack (240x160 screens)
+src/Borrow3.lua      ledger of party/bag a Gen 3 fight borrows from the save; save.write gives back or vetoes
 src/Wire.lua         message-type vocabulary + the sanitiser every inbound field passes
 src/Transport.lua    hub connection, built on src/link/Net.lua's TCP framing
 src/Roster.lua       who is online and where

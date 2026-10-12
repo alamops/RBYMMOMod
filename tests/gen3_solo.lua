@@ -45,11 +45,20 @@ local T = require("tests.modkit")
 local check, eq = T.check, T.eq
 
 local MOD_PATH = "mods/rby_mmo"
-if not io.open(MOD_PATH .. "/src/SoloBattle.lua", "rb") then
+do
+  -- Prefer this suite's checkout: the engine's installed mod symlink may
+  -- point at an older tree with SoloBattle but without the Gen 3 modules.
   local src = debug.getinfo(1, "S").source
   if type(src) == "string" and src:sub(1, 1) == "@" then
     local dir = src:sub(2):match("(.+)[/\\]")
-    if dir then MOD_PATH = dir:gsub("[/\\]tests$", "") end
+    if dir then
+      local candidate = dir:gsub("[/\\]tests$", "")
+      local h = io.open(candidate .. "/src/Sheet3.lua", "rb")
+      if h then
+        h:close()
+        MOD_PATH = candidate
+      end
+    end
   end
 end
 
@@ -2055,14 +2064,7 @@ do
   solo:reset()
 end
 
--- (i) A draw against a trainer the player is still standing after (a
---     referee's own clock).  The trainerbattle opcode has no answer for it:
---     anything but a loss sets the trainer flag and runs the beaten script,
---     and a loss sets no flag but lets the VM run on into the bytes after the
---     command (a gym leader's TM without the badge) -- the cart's loss only
---     stops there because its whiteout halts the script.  So the waiting
---     script is halted, the opcode is never answered, nobody is whited out,
---     nothing is paid, and the save says B_OUTCOME_DREW -- CoopField's rule.
+-- (i) A timeout draw with the party standing halts the trainer script.
 do
   newGame()
   local lead = monOf(4, 20, { moves = { 10 }, pp = { 35 }, maxPp = { 35 } })
@@ -2075,21 +2077,21 @@ do
   solo.sim:_finish("draw", nil, nil, "timeout")
   local ok, fight = drive(solo, function(f) f:pickMove(1) end)
   check(ok, "draw: the fight ended")
-  eq(op.answered, nil, "draw: the trainerbattle opcode is never answered")
-  eq(op.postBytes, false, "draw: no post-battle bytes run (no TM without the badge)")
-  eq(op.flag, false, "draw: the trainer stays unbeaten")
-  eq(FakeVm.halted, 1, "draw: the waiting script is halted instead")
-  eq(FakeVm.aborted, true, "draw: ...as aborted, the whiteout's own ending for it")
-  eq(SESSION.battleOutcome, FakeNatives.outcome_to_code("draw"), "draw: the save's outcome is DREW")
+  eq(op.answered, nil, "draw: the trainerbattle opcode is not answered")
+  eq(op.postBytes, false, "draw: the beaten trainer script does not run")
+  eq(op.flag, false, "draw: the trainer is not beaten")
+  eq(FakeVm.halted, 1, "draw: the waiting script is halted")
+  eq(FakeVm.aborted, true, "draw: the script is aborted where it waits")
+  eq(SESSION.battleOutcome, FakeNatives.outcome_to_code("draw"), "draw: the save records DREW")
   eq(SESSION.money, 500, "draw: no prize")
   eq(#fieldCalls, 0, "draw: nobody still standing is whited out")
   check(spaceCalls >= 1, "draw: the field comes back")
-  check(not textOf(fight):find("STRINGID_PLAYERGOTMONEY", 1, true), "draw: no money line")
+  eq(textOf(fight):find("STRINGID_PLAYERGOTMONEY", 1, true), nil, "draw: no prize is announced")
   local ended = effectsOf("emit")[1]
-  eq(ended and ended[3].result, "draw", "draw: battle.ended says 'draw'")
+  eq(ended and ended[3].result, "draw", "draw: battle.ended records the draw")
 
-  -- The same draw with no script waiting (a fight nothing is waiting on):
-  -- nothing to halt, nothing answered.
+  -- The same draw with no script waiting: nothing is halted, and the caller
+  -- is not told it won.
   newGame()
   SESSION.party = { monOf(4, 20, { moves = { 10 }, pp = { 35 }, maxPp = { 35 } }) }
   local free = newSolo()
@@ -2098,7 +2100,24 @@ do
   free.sim:_finish("draw", nil, nil, "timeout")
   drive(free, function(f) f:pickMove(1) end)
   eq(FakeVm.halted, 0, "draw (no script): nothing running, nothing halted")
-  eq(op2.answered, nil, "draw (no script): and nothing answered")
+  eq(op2.answered, nil, "draw (no script): the caller is not told it won")
+
+  -- A knockout the referee called while a sheet still stands disagrees with
+  -- the save the fight will write, and completes as a win.
+  newGame()
+  SESSION.party = { monOf(4, 20, { moves = { 10 }, pp = { 35 }, maxPp = { 35 } }) }
+  SESSION.money = 500
+  local ko = newSolo()
+  local opk = trainerOpcode()
+  FakeVm.running = true
+  check(ko:fromGen3Trainer(GAME, 900, { trainerId = 900, done = opk.done }), "ko draw: taken")
+  ko.sim:_finish("draw", nil, nil, "ko", "ko")
+  drive(ko, function(f) f:pickMove(1) end)
+  eq(opk.answered, "win", "ko draw: sheets still standing complete the trainer")
+  eq(opk.flag, true, "ko draw: the trainer is beaten")
+  eq(FakeVm.halted, 0, "ko draw: the waiting script continues")
+  eq(SESSION.battleOutcome, FakeNatives.outcome_to_code("win"), "ko draw: the save records victory")
+  check(SESSION.money > 500, "ko draw: the prize is paid")
 
   -- A win still answers the opcode, which sets the flag; a whiteout's loss
   -- answers it after the whiteout has halted the script.
@@ -2372,6 +2391,78 @@ do
   local emEnded = effectsOf("emit")[1]
   eq(emEnded and emEnded[3].result, "catch", "effects (rse): battle.ended says 'catch', the engine's word")
   eq(emEnded and emEnded[3].battle.enemy.mon, emWild, "effects (rse): ...naming the caught monster")
+end
+
+-- (p2) The tutorials' endings (wave 4b): FireRed's quest log keeps no scene
+--      of the old man's or the POKe DUDE's battles (pret quest_log_battle.c:14
+--      TrySetQuestLogBattleEvent: OLD_MAN_TUTORIAL | POKEDUDE); a kind that
+--      does not end on the field (`noFieldReturn`) runs no map resume
+--      scripts; and M:quit3 ends a fight on the spot -- no further turn,
+--      nothing brought home or reported, the cart's outcome code written,
+--      the screen off, `done(word)`.
+do
+  Solo.registerKind3("tutorial", {})
+  for _, key in ipairs({ "oldManTutorial", "pokedude" }) do
+    newGame()
+    SESSION.party = { monOf(4, 20, { moves = { 10 }, pp = { 35 }, maxPp = { 35 } }) }
+    local solo = newSolo()
+    check(solo:fromGen3Encounter(GAME, { species = 16, level = 2 }, { [key] = true, wild = true }),
+          "tutorial ql: a " .. key .. " fight is taken")
+    drive(solo, function(f) f:pickMove(1) end)
+    eq(#effectsOf("questlog"), 0, "tutorial ql: no quest-log scene for a " .. key .. " fight")
+    check(#effectsOf("emit") >= 1, "tutorial ql: ...the rest of the ending still runs (" .. key .. ")")
+  end
+  Solo.unregisterKind3("tutorial")
+
+  -- noFieldReturn: no map resume scripts, `done` all the same.
+  local heard = {}
+  Solo.registerKind3("tutorial", { takes = function(_, ctx) ctx.noFieldReturn = true; return true end })
+  newGame()
+  SESSION.party = { monOf(4, 20, { moves = { 10 }, pp = { 35 }, maxPp = { 35 } }) }
+  local solo = newSolo()
+  check(solo:fromGen3Encounter(GAME, { species = 16, level = 2 },
+    { pokedude = true, wild = true, done = function(w) heard[#heard + 1] = w end }), "noFieldReturn: taken")
+  drive(solo, function(f) f:pickMove(1) end)
+  eq(spaceCalls, 0, "noFieldReturn: no map resume scripts")
+  eq(table.concat(heard, ","), "win", "noFieldReturn: ...and done('win')")
+
+  -- quit3: ended between two frames of the referee.
+  newGame()
+  local lead = monOf(4, 20, { moves = { 10 }, pp = { 35 }, maxPp = { 35 } })
+  SESSION.party = { lead }
+  local hp0, exp0 = lead.hp, lead.exp
+  heard = {}
+  local quitter = newSolo()
+  check(quitter:fromGen3Encounter(GAME, { species = 16, level = 2 },
+    { pokedude = true, wild = true, done = function(w) heard[#heard + 1] = w end }), "quit: taken")
+  local sim, fight = quitter.sim, quitter.fight
+  for _ = 1, 40 do
+    quitter:update(0.5, GAME)
+    fight:update(2.0)
+    if fight.phase == "choose" then break end
+  end
+  eq(fight.phase, "choose", "quit: the menu is up")
+  local turn, phase = sim.turn, sim.phase
+  eq(quitter:quit3("draw"), true, "quit: the fight is ended")
+  eq(quitter.fight, nil, "quit: ...the core holds no fight")
+  eq(quitter.sim, nil, "quit: ...nor a referee")
+  eq(sim.turn, turn, "quit: no further turn")
+  eq(sim.phase, phase, "quit: ...the referee left where it stood")
+  eq(sim:outcome(), nil, "quit: ...with no outcome of its own")
+  eq(Gen3Ui.has(fight), false, "quit: the screen is off the stack")
+  eq(table.concat(heard, ","), "draw", "quit: done('draw')")
+  eq(SESSION.battleOutcome, FakeNatives.outcome_to_code("draw"),
+     "quit: the save's outcome is DREW (pret gBattleOutcome = B_OUTCOME_DREW)")
+  eq(lead.hp, hp0, "quit: nothing brought home")
+  eq(lead.exp, exp0, "quit: ...no EXP")
+  eq(#effectsOf("questlog"), 0, "quit: no quest log")
+  eq(#effectsOf("emit"), 0, "quit: no battle.ended")
+  eq(spaceCalls, 0, "quit: no map resume scripts")
+  for _ = 1, 3 do quitter:update(0.5, GAME) end
+  eq(sim.turn, turn, "quit: ...and no turn on later frames")
+  eq(quitter:quit3("draw"), false, "quit: once")
+  eq(table.concat(heard, ","), "draw", "quit: done heard once")
+  Solo.unregisterKind3("tutorial")
 end
 
 -- (q) A screen the modal stack will not take is not a fight: the caller is
@@ -3348,7 +3439,7 @@ do
     check(text:find("STRINGID_PLAYERGOTMONEY", 1, true) == nil, "loss: no prize")
   end
 
-  -- (h) a double drawn with the player standing: the script is halted -----
+  -- (h) a standing double timeout draw halts the trainer script -----
   do
     newGame()
     SESSION.party = party2(strong(4, 30), strong(151, 30))
@@ -3363,14 +3454,14 @@ do
     solo:update(0.5, GAME)
     check(s.outcome ~= nil, "draw: the screen was told the outcome")
     s:leave()
-    eq(calls, 0, "draw: the trainer opcode is never answered")
-    eq(result, nil, "draw: ...so no flag, no beaten script")
-    eq(FakeVm.halted, 1, "draw: the waiting script is halted instead")
-    eq(FakeVm.aborted, true, "draw: ...as aborted, the whiteout's own ending for it")
+    eq(calls, 0, "draw: the trainer opcode is not answered")
+    eq(result, nil, "draw: the beaten trainer script does not run")
+    eq(FakeVm.halted, 1, "draw: the waiting script is halted")
+    eq(FakeVm.aborted, true, "draw: the script is aborted where it waits")
     eq(#fieldCalls, 0, "draw: nobody is whited out (the player stands)")
-    eq(SESSION.money, 500, "draw: nothing is paid")
-    eq(SESSION.battleOutcome, FakeNatives.outcome_to_code("draw"), "draw: the save says DREW")
-    check(not table.concat(s.lines, " | "):find("STRINGID_PLAYERGOTMONEY", 1, true), "draw: no money line")
+    eq(SESSION.money, 500, "draw: no prize")
+    eq(SESSION.battleOutcome, FakeNatives.outcome_to_code("draw"), "draw: the save records DREW")
+    eq(table.concat(s.lines, " | "):find("STRINGID_PLAYERGOTMONEY", 1, true), nil, "draw: no prize is announced")
   end
 
   -- (i) a move learned mid-fight reaches the second seat's battler ----------
@@ -4479,7 +4570,9 @@ do
     PROFILE.family = "frlg"
     PROFILE.rules.teleportOutcome = nil
 
-    -- A kind's own word: a facility's draw is "draw" (no halt), a pair's "lose".
+    -- Facilities retain draws. A timeout is not a knockout, so a pair is
+    -- not completed as a win: the kind's word is what the caller hears, and
+    -- the save stays DREW.
     for _, row in ipairs({ { "facility", "draw" }, { "pair", "lose" } }) do
       newGame()
       SESSION.party = { monOf(4, 20, { moves = { 10 }, pp = { 35 }, maxPp = { 35 } }) }
@@ -4499,7 +4592,7 @@ do
       drive(s, function(f) f:pickMove(1) end)
       eq(op.answered, row[2], "C5 (" .. row[1] .. "): the kind's word reaches its caller")
       eq(FakeVm.halted, 0, "C5 (" .. row[1] .. "): ...and nothing is halted")
-      eq(SESSION.battleOutcome, 3, "C5 (" .. row[1] .. "): the save still says DREW")
+      eq(SESSION.battleOutcome, 3, "C5 (" .. row[1] .. "): the save records DREW")
       Solo.unregisterKind3(row[1])
       FakeVm.running = false
     end
@@ -4963,6 +5056,282 @@ do
 
   Turn3.create, Mediated.new = realCreate, realNew
   FakeNatives.outcome_to_code = realCode
+end
+
+-- ===================================================================
+-- the Battle Arena's judged monsters, as the core reads them (pret
+-- battle_script_commands.c:3534 Cmd_checkteamslost skips arenaLost*Mons; the
+-- referee's `judged`, BattleSim3/Arena.lua)
+-- ===================================================================
+
+do
+  -- gen3Standing: a judged monster is down, whatever HP it kept -- marked on
+  -- the monster, or named by its party position (a save party never carries
+  -- the mark).
+  local party = { { species = 4, hp = 0 }, { species = 5, hp = 30 } }
+  eq(Solo.gen3Standing(party), true, "judged: a party with HP left stands")
+  party[2].judged = true
+  eq(Solo.gen3Standing(party), false, "judged: ...not when the monster with HP was judged")
+  party[2].judged = nil
+  eq(Solo.gen3Standing(party, { [1] = true }), false, "judged: ...nor when the referee names its position")
+  eq(Solo.gen3Standing(party, { [0] = true }), true, "judged: ...a fainted one named changes nothing")
+  local slots = Solo.judgedSlots3({ mons = { sheet(), sheet({ slot = 3, judged = true }) } })
+  check(slots[3] and not slots[0], "judged: the referee's judged sheets, by party position")
+  eq(next(Solo.judgedSlots3(nil)), nil, "judged: ...none for no fighter")
+
+  -- refusalText3: in the Arena a switch is the party menu's
+  -- PARTY_ACTION_CANT_SWITCH (battle_main.c:4241), its line
+  -- gText_PkmnCantSwitchOut; anywhere else, a free switch has no line.
+  local function arenaField(rules)
+    local battle = assert(Sim.Turn.create({
+      id = "arena", mode = "coop_npc", seed = 3, typeTable = CHART, rules = rules,
+      sides = {
+        a = { { playerId = "p", name = "P", mons = { sheet(), sheet({ slot = 1 }) } } },
+        b = { { playerId = "n", name = "N", mons = { sheet() } } },
+      },
+    }))
+    battle:drainEvents()
+    return battle
+  end
+  local arena = arenaField({ arena = true })
+  local line = Solo.refusalText3(arena, "p", { action = "switch", slot = 1 })
+  check(type(line) == "string" and line:find("gText_PkmnCantSwitchOut", 1, true) ~= nil,
+        "arena refusal: a switch is the party menu's 'can't be switched out'")
+  eq(Solo.refusalText3(arenaField(nil), "p", { action = "switch", slot = 1 }), nil,
+     "arena refusal: ...outside the Arena a free switch has no refusal line")
+
+  -- The ending: a trainer fight whose last monster of the player's the
+  -- judge took (its HP kept) is a loss nobody is left standing in -- the
+  -- whiteout, not the halt of a fight the player "still stands" in.
+  newGame()
+  local lead = monOf(4, 20, { moves = { 10 }, pp = { 35 }, maxPp = { 35 } })
+  SESSION.party = { lead }
+  SESSION.money = 500
+  local solo = newSolo()
+  local op = trainerOpcode()
+  FakeVm.running = true
+  check(solo:fromGen3Trainer(GAME, 900, { trainerId = 900, done = op.done }), "judged ending: taken")
+  local sim = solo.sim
+  sim.byId["solo_player"].mons[1].judged = true
+  sim:_finish("win", sim:_sidePlayers("b"), sim:_sidePlayers("a"), "ko", "judge", "b")
+  local ok = drive(solo, function(f) f:pickMove(1) end)
+  check(ok, "judged ending: the fight ended")
+  eq(op.answered, "lose", "judged ending: the trainer's script is answered 'lose'")
+  eq(FakeVm.halted, 0, "judged ending: ...not halted")
+  eq(fieldCalls[1], "respawn", "judged ending: nobody of the player's can fight -- the whiteout")
+  FakeVm.running = false
+end
+
+-- ===================================================================
+-- the single screen's refusal lines: the cart checks each command as it is
+-- chosen and keeps that menu up with its line -- a move's limitation in the
+-- battle box, the move list behind it (pret battle_main.c
+-- HandleTurnActionSelectionState, TrySetCantSelectMoveBattleScript); a
+-- switch the party menu refuses inside the party menu (party_menu.c
+-- PARTY_ACTION_CANT_SWITCH gText_PkmnCantSwitchOut, ABILITY_PREVENTS
+-- gText_PkmnsXPreventsSwitching).  Worded by the solo transport
+-- (`transport.refusal`, refusalText3), said by MediatedBattle `sendChoice`.
+-- ===================================================================
+
+do
+  local MOVES3 = { moves = { 10, 45, 33 }, pp = { 35, 40, 35 }, maxPp = { 35, 40, 35 } }
+  -- A wild fight up to its first command menu: a three-move lead, one benched.
+  local function refusalFight(wild, lead, items)
+    newGame()
+    SESSION.party = { monOf(4, 30, lead or MOVES3), monOf(5, 30) }
+    if items then SESSION.bag.pockets.ITEMS = items end
+    local solo = newSolo()
+    check(solo:fromGen3Encounter(GAME, wild or { species = 16, level = 3 }, {}), "refusal: taken")
+    local f = solo.fight
+    for _ = 1, 40 do f:update(2.0); solo:update(0.5, GAME); if f.phase == "choose" then break end end
+    eq(f.phase, "choose", "refusal: the command menu is up")
+    local b = solo.sim.byId["solo_player"].b
+    -- Every choice that reaches the referee, counted.
+    local reached = 0
+    local choose = solo._choose
+    solo._choose = function(...) reached = reached + 1; return choose(...) end
+    return solo, f, b, function() return reached end
+  end
+  local function count(f, needle)
+    local n = 0
+    for _, line in ipairs(f.textLog or {}) do
+      if tostring(line):find(needle, 1, true) then n = n + 1 end
+    end
+    return n
+  end
+  -- Read the box out (big steps: the queue only), the menu it came from back.
+  local function readOut(f)
+    for _ = 1, 20 do
+      f:update(2.0)
+      if f.shown == nil and #f.lines == 0 then break end
+    end
+  end
+  local function pressA(f)
+    local saved = GAME.input
+    GAME.input = { pressed = {}, wasPressed = function(_, k) return k == "a" end,
+                   isDown = function() return false end }
+    f:update(0)
+    GAME.input = saved
+  end
+
+  -- A move the referee will not take: its line once, in the box, the move
+  -- list behind it, the turn not spent.
+  local moveCases = {
+    { "disabled", "STRINGID_PKMNMOVEISDISABLED", 1, function(b) b.disabledNum = 10 end },
+    { "torment", "STRINGID_PKMNCANTUSEMOVETORMENT", 1,
+      function(b) b.tormented = true; b.lastMoveNum = 10 end },
+    { "taunt", "STRINGID_PKMNCANTUSEMOVETAUNT", 2, function(b) b.tauntTurns = 2 end },
+    { "imprison", "STRINGID_PKMNCANTUSEMOVESEALED", 3, function(b, sim)
+        local foe = sim:foes(b)[1]
+        foe.imprison = true
+        foe.moves[#foe.moves + 1] = { num = 33, pp = 35, maxPp = 35, power = 40 }
+      end },
+    -- (the fixture's item 127 held, made to carry HOLD_EFFECT_CHOICE_BAND, the referee's 29)
+    { "choice band", "STRINGID_ITEMALLOWSONLYYMOVE", 1, function(b)
+        b.mon.heldItem, b.mon.holdEffect, b.choicedMove = 127, 29, 45
+      end },
+  }
+  for _, case in ipairs(moveCases) do
+    local name, key, index, set = case[1], case[2], case[3], case[4]
+    local tag = "refusal (" .. name .. "): "
+    local solo, f, b, reached = refusalFight()
+    set(b, solo.sim)
+    local turn = solo.sim.turn
+    f:runCommand("FIGHT")
+    eq(f.phase, "move", tag .. "FIGHT opens the moves")
+    eq(f:pickMove(index), false, tag .. "the pick is refused")
+    eq(reached(), 1, tag .. "...by the referee (the screen has no gate for it)")
+    eq(f.phase, "move", tag .. "the move list stays up")
+    eq(f.answeredTurn, false, tag .. "...the turn not answered")
+    eq(count(f, key), 1, tag .. "the cart's line, once")
+    eq(f.transport.refusal, nil, tag .. "...taken off the transport as it is said")
+    f:update(2.0)
+    -- (a long key wraps in the box: compared with its breaks taken out)
+    check(tostring(f.shown):gsub("%s", ""):find(key, 1, true) ~= nil, tag .. "...in the box over the list")
+    readOut(f)
+    eq(f.phase, "move", tag .. "the list again once it is read (stateIdAfterSelScript)")
+    eq(count(f, key), 1, tag .. "...nothing said twice")
+    eq(solo.sim.turn, turn, tag .. "the turn not spent")
+    solo:reset()
+  end
+
+  -- No PP: the screen's own gate answers first (nothing reaches the referee),
+  -- in the cart's words, once.
+  do
+    local tag = "refusal (no PP): "
+    local solo, f, _, reached = refusalFight(nil,
+      { moves = { 10, 45, 33 }, pp = { 0, 40, 35 }, maxPp = { 35, 40, 35 } })
+    f:runCommand("FIGHT")
+    eq(f:pickMove(1), false, tag .. "refused")
+    eq(reached(), 0, tag .. "...by the screen: nothing reached the referee")
+    eq(count(f, "STRINGID_NOPPLEFT"), 1, tag .. "STRINGID_NOPPLEFT, once")
+    readOut(f)
+    eq(f.phase, "move", tag .. "the list stays")
+    solo:reset()
+  end
+
+  -- A medicine that would do nothing (a HYPER POTION on a full monster): the
+  -- Gen 3 screen has no gate of its own for it (`itemNoEffect` is Red's and
+  -- Gold's), so the referee refuses it and the line is the bag's
+  -- gText_WontHaveEffect, said once inside the party menu, which stays up.
+  do
+    local tag = "refusal (no effect): "
+    local solo, f, _, reached = refusalFight(nil, nil, { { id = 21, qty = 1 } })
+    f:runCommand("ITEM")
+    eq(f.phase, "item", tag .. "ITEM opens the bag")
+    local at = nil
+    for i, row in ipairs(f:usableItems()) do if tonumber(row.id) == 21 then at = i end end
+    check(at ~= nil, tag .. "...with the HYPER POTION in it")
+    f.itemIndex = at or 1
+    pressA(f)
+    for _ = 1, 30 do if f.phase == "item_party" then break end; f:update(1 / 60) end
+    eq(f.phase, "item_party", tag .. "it asks for a monster")
+    f.switchIndex = 1
+    pressA(f)
+    eq(reached(), 1, tag .. "the use goes to the referee")
+    eq(count(f, "gText_WontHaveEffect"), 1, tag .. "the bag's gText_WontHaveEffect, once")
+    eq(f.phase, "item_party", tag .. "...the party menu still up")
+    f:update(2.0)
+    check(tostring(f.shown):gsub("%s", ""):find("gText_WontHaveEffect", 1, true) ~= nil,
+          tag .. "...its line printed over it")
+    eq(f.pendingItem, nil, tag .. "nothing spent")
+    solo:reset()
+  end
+
+  -- A trapped monster's switch: refused inside the party menu, which stays.
+  local trapCases = {
+    { "wrapped", function(b) b.trapTurns = 3 end },
+    { "mean look", function(b, sim) b.trappedBy = sim:foes(b)[1] end },
+    { "ingrain", function(b) b.ingrain = true end },
+  }
+  for _, case in ipairs(trapCases) do
+    local tag = "refusal (" .. case[1] .. "): "
+    local solo, f, b, reached = refusalFight()
+    case[2](b, solo.sim)
+    local turn = solo.sim.turn
+    f:runCommand("SWITCH")
+    eq(f.phase, "switch", tag .. "SWITCH opens the party menu")
+    pressA(f)
+    eq(reached(), 1, tag .. "SHIFT goes to the referee")
+    eq(count(f, "gText_PkmnCantSwitchOut"), 1, tag .. "gText_PkmnCantSwitchOut, once")
+    eq(f.phase, "switch", tag .. "...the party menu still up")
+    f:update(2.0)
+    check(tostring(f.shown):find("gText_PkmnCantSwitchOut", 1, true) ~= nil,
+          tag .. "...its line printed over it")
+    eq(solo.sim.turn, turn, tag .. "the turn not spent")
+    solo:reset()
+  end
+
+  -- A foe's SHADOW TAG: the ability's own line, inside the party menu.
+  do
+    local tag = "refusal (shadow tag): "
+    local solo, f, _, reached = refusalFight({ species = 16, level = 3, ability = 23 })
+    f:runCommand("SWITCH")
+    pressA(f)
+    eq(reached(), 1, tag .. "SHIFT goes to the referee")
+    eq(count(f, "gText_PkmnsXPreventsSwitching"), 1, tag .. "gText_PkmnsXPreventsSwitching, once")
+    eq(count(f, "gText_PkmnCantSwitchOut"), 0, tag .. "...not the trapped line")
+    eq(f.phase, "switch", tag .. "the party menu stays")
+    solo:reset()
+  end
+
+  -- A choice the fight's kind turned down is the kind's to word: no line of
+  -- the referee's beside it.
+  do
+    local tag = "refusal (kind): "
+    local solo, f, b = refusalFight()
+    b.disabledNum = 10
+    solo.gen3.hooks3 = { choose = function() return true, false end }
+    f:runCommand("FIGHT")
+    eq(f:pickMove(1), false, tag .. "refused by the kind")
+    eq(count(f, "STRINGID_PKMNMOVEISDISABLED"), 0, tag .. "...and the referee's line is not said")
+    eq(f.transport.refusal, nil, tag .. "...nor left on the transport")
+    solo.gen3.hooks3 = nil
+    solo:reset()
+  end
+
+  -- The transport, by generation: a single Gen 3 screen is handed the line,
+  -- the lone double too (kind-refused or not, as before), Red and Gold never.
+  do
+    local Wire = need("Wire")
+    local function transportOf(gen3, kindRefuses)
+      local s = setmetatable({ generation = gen3 and 3 or 1, gen3 = gen3 }, { __index = Solo })
+      s._choose = function(self)
+        self.kindRefused3 = kindRefuses or nil
+        return false
+      end
+      s._refusal3 = function() return "THE LINE" end
+      local t = s:_transport({})
+      t.refusal = "STALE"
+      eq(t:send(Wire.BATTLE_CHOICE, { action = "fight", move = 0 }), false, "transport: refused")
+      return t.refusal
+    end
+    eq(transportOf({}), "THE LINE", "transport: a single Gen 3 screen is handed the refusal line")
+    eq(transportOf({}, true), nil, "transport: ...not when the kind refused it itself")
+    eq(transportOf({ double = true }), "THE LINE", "transport: the lone double as before")
+    eq(transportOf({ double = true }, true), "THE LINE", "transport: ...kind-refused too, as before")
+    eq(transportOf(nil), nil, "transport: Red and Gold read no line (and a stale one is cleared)")
+  end
 end
 
 -- Nothing of Gen 1's engine was reached on a Gen 3 boot.

@@ -3563,6 +3563,31 @@ function M.gen3TrainerBackPic(which)
   return nil
 end
 
+-- The player's own FRONT pic id (pret pokemon.c PlayerGenderToFrontTrainerPicId:
+-- TRAINER_PIC_BRENDAN / TRAINER_PIC_MAY on Emerald, by the save's gender --
+-- what the cart draws for the player beside a frontier partner,
+-- battle_controller_player.c:2304), read through the engine's constants for
+-- the running cart (the engine's own hall_of_fame.lua / dome_tourney.lua
+-- spelling).  FireRed / LeafGreen name RED / LEAF.  nil off Gen 3, or when
+-- the cart names no such pic; draw it with M.gen3TrainerPic.
+M.PLAYER_FRONT_PICS3 = {
+  rse = { [0] = "TRAINER_PIC_BRENDAN", [1] = "TRAINER_PIC_MAY" },
+  frlg = { [0] = "TRAINER_PIC_RED", [1] = "TRAINER_PIC_LEAF" },
+}
+function M.gen3PlayerFrontPicId(gender)
+  local C = Gen3.engine("src.core.game3.constants")
+  if not (type(C) == "table" and type(C.of) == "function") then return nil end
+  local okSet, set = pcall(C.of, Gen3.version and Gen3.version() or nil)
+  if not (okSet and type(set) == "table" and type(set.id) == "function") then return nil end
+  local family = (Gen3.family and Gen3.family()) == "frlg" and "frlg" or "rse"
+  local g = (Gen3.genderOf and Gen3.genderOf(gender)) or ((gender == 1) and 1 or 0)
+  local name = M.PLAYER_FRONT_PICS3[family][g == 1 and 1 or 0]
+  local okId, id = pcall(set.id, set, "trainer_classes", name)
+  id = okId and tonumber(id) or nil
+  if id == nil or id < 0 then return nil end
+  return math.floor(id)
+end
+
 -- A seat's `elevation`: how far the cart floats this species over its
 -- platform (pret gEnemyMonElevation -- Gastly, the Magnemite line...), or nil.
 -- Read from the engine's PicCoords, which is per version (Emerald's comes out

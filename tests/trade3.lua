@@ -633,6 +633,104 @@ end
 -- ------- FireRed <-> Emerald
 
 do
+  local original = Family.gameProgressForLinkTrade
+  local helpers = {
+    { name = "engine rules", fn = original },
+    { name = "missing helper" },
+    { name = "failed helper", fn = function() error("unavailable") end },
+    { name = "empty answer", fn = function() return nil end },
+  }
+  for _, helper in ipairs(helpers) do
+    Family.gameProgressForLinkTrade = helper.fn
+    for _, mine in ipairs({ "firered", "leafgreen", "emerald" }) do
+      for _, theirs in ipairs({ "firered", "leafgreen", "emerald" }) do
+        for _, mineReady in ipairs({ false, true }) do
+          for _, theirsReady in ipairs({ false, true }) do
+            local s = newSession({ version = mine, national = true, linkRegions = mineReady })
+            local peer = newSession({ version = theirs, national = true, linkRegions = theirsReady })
+            local tr = Trade3.TradeSession.new({ session = s })
+            tr.theirInfo = Trade3.sanitizeInfo(Trade3.localInfo(peer, theirs))
+            local expected
+            if Family.of(mine) ~= Family.of(theirs) then
+              if not mineReady then expected = "You can't trade\nwith that game yet."
+              elseif not theirsReady then expected = "The other game\ncan't trade with\nyou yet." end
+            end
+            eq(tr:versionGate(), expected,
+              helper.name .. ": " .. mine .. " -> " .. theirs
+                .. " readiness " .. tostring(mineReady) .. "/" .. tostring(theirsReady))
+          end
+        end
+      end
+    end
+  end
+  Family.gameProgressForLinkTrade = original
+end
+
+-- localInfo's last resort (localLinkPlayer missing, or it throws) rebuilds
+-- the high nibble from Family.canLinkNationally, so the gate -- which
+-- enforces that nibble whatever gameProgressForLinkTrade says -- still lets
+-- an unlocked save across and still stops a locked one.  When even that
+-- cannot answer, the side is marked linkUnknown (it rides the wire) and is
+-- not refused for a nibble nobody could read.
+do
+  local originalLLP, originalCan = Family.localLinkPlayer, Family.canLinkNationally
+  local paths = {
+    { name = "missing localLinkPlayer" },
+    { name = "throwing localLinkPlayer", fn = function() error("unavailable") end },
+  }
+  for _, path in ipairs(paths) do
+    Family.localLinkPlayer = path.fn
+    for _, pair in ipairs({ { "firered", "emerald" }, { "emerald", "leafgreen" } }) do
+      for _, ready in ipairs({ false, true }) do
+        local s = newSession({ version = pair[1], national = true, linkRegions = ready })
+        local peer = newSession({ version = pair[2], national = true, linkRegions = true })
+        local me = Trade3.localInfo(s, pair[1])
+        eq(me.progressFlags, ready and 0x11 or 0x01,
+          path.name .. ": " .. pair[1] .. " rebuilds both nibbles, unlocked " .. tostring(ready))
+        eq(me.linkUnknown, nil, path.name .. ": the unlock was read, so it is known")
+        local tr = Trade3.TradeSession.new({ session = s })
+        tr.theirInfo = Trade3.sanitizeInfo(Json.decode(Json.encode(Trade3.localInfo(peer, pair[2]))))
+        eq(tr:versionGate(), (not ready) and "You can't trade\nwith that game yet." or nil,
+          path.name .. ": " .. pair[1] .. " -> " .. pair[2] .. " unlocked " .. tostring(ready))
+        -- And the same save as the partner: a locked one is the other side's refusal.
+        local other = Trade3.TradeSession.new({ session = peer })
+        other.theirInfo = Trade3.sanitizeInfo(Json.decode(Json.encode(me)))
+        eq(other:versionGate(), (not ready) and "The other game\ncan't trade with\nyou yet." or nil,
+          path.name .. ": " .. pair[2] .. " <- " .. pair[1] .. " unlocked " .. tostring(ready))
+      end
+    end
+  end
+
+  -- Neither helper answers: the unlock is unknown, said so on the wire, and
+  -- not held against either side -- while a known, locked partner still is.
+  Family.localLinkPlayer = nil
+  Family.canLinkNationally = function() error("unavailable") end
+  local s = newSession({ version = "firered", national = true })
+  local me = Trade3.localInfo(s, "firered")
+  eq(me.progressFlags, 0x01, "no unlock could be read: the low nibble alone")
+  eq(me.linkUnknown, true, "and the info says the unlock is unknown")
+  local wire = Json.decode(Json.encode(Trade3.TradeSession.new({ session = s }):partyMessage().gen3))
+  eq(wire.linkUnknown, true, "linkUnknown rides the party message")
+  eq(Trade3.sanitizeInfo(wire).linkUnknown, true, "and survives sanitizeInfo")
+  eq(Trade3.sanitizeInfo({ version = 4, progressFlags = 1, linkUnknown = "yes" }).linkUnknown, nil,
+    "only a literal true reads as unknown")
+  local tr = Trade3.TradeSession.new({ session = s })
+  Family.canLinkNationally = originalCan
+  tr.theirInfo = Trade3.sanitizeInfo(Trade3.localInfo(
+    newSession({ version = "emerald", national = true, linkRegions = true }), "emerald"))
+  eq(tr:versionGate(), nil, "an unknown unlock on this side is not refused")
+  tr.theirInfo = Trade3.sanitizeInfo(Trade3.localInfo(
+    newSession({ version = "emerald", national = true }), "emerald"))
+  eq(tr:versionGate(), "The other game\ncan't trade with\nyou yet.",
+    "a known, locked partner still is")
+  local em = Trade3.TradeSession.new({
+    session = newSession({ version = "emerald", national = true, linkRegions = true }) })
+  em.theirInfo = Trade3.sanitizeInfo(wire)
+  eq(em:versionGate(), nil, "and a partner whose unlock is unknown is not refused either")
+  Family.localLinkPlayer, Family.canLinkNationally = originalLLP, originalCan
+end
+
+do
   -- Before FireRed may link with the other region: both sides refuse.
   local sa = newSession({ name = "ANN", national = true, party = { mon(16, 5), mon(19, 4) } })
   local sb = newSession({ name = "MAY", version = "emerald", national = true, linkRegions = true,

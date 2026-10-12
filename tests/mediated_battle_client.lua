@@ -2765,6 +2765,46 @@ do
   eq(pp.liveMoves[1].id, "TACKLE", "...and is what FIGHT reads until a send")
   eq(pp:bandMoveRows()[1].right, "10/35",
      "...including the live PP of the copied move")
+
+  -- Red and Gold keep this memory exactly: the d-pad moves the cursor and
+  -- remembers nothing (that is Gen 3's gMoveSelectionCursor, MediatedBattle
+  -- `keepMoveCursor3`), a Transform's form event resets nothing of it, and
+  -- only a move sent is remembered, per monster.
+  for _, gen in ipairs({ 1, 2 }) do
+    local tag = (gen == 1 and "Red" or "Gold") .. " move memory: "
+    local r = client()
+    r._generation = gen
+    r.battle, r.seq, r.lines = "b1", 0, {}
+    local inp = fakeInput()
+    inp.press("down"); r:updateMoveMenu(inp)
+    inp.press("down"); r:updateMoveMenu(inp)
+    eq(r.cursor, 3, tag .. "the d-pad moves the cursor")
+    eq(r.moveCursor3, nil, tag .. "...and keeps no Gen 3 cursor")
+    eq(r:rememberedMove(), 1, tag .. "...nor any memory: FIGHT again opens on the first move")
+    r.sendChoice = function() return true end
+    check(r:pickMove(2), tag .. "a move sent")
+    eq(r.moveMemory[1], 2, tag .. "...is what is remembered")
+    r.moveCursor3 = 3
+    eq(r:rememberedMove(), 2, tag .. "the memory is read, never a Gen 3 cursor")
+    r:onEvent({ battle = "b1", seq = 1, t = "form", slot = 0, speciesId = "4" })
+    eq(r.moveMemory[1], 2, tag .. "a Transform's form event leaves the memory")
+    eq(r.moveCursor3, 3, tag .. "...and drops no Gen 3 cursor")
+  end
+
+  -- Red and Gold read no refusal line off the transport (Gen 3's
+  -- `sayRefusal3`): a refused send says nothing new, as before.
+  for _, gen in ipairs({ 1, 2 }) do
+    local tag = (gen == 1 and "Red" or "Gold") .. " refusal: "
+    local r = client()
+    r._generation = gen
+    r.battle, r.lines = "b1", {}
+    r.transport = { isReady = function() return true end, send = function() return false end,
+                    refusal = "A LINE" }
+    eq(r:sendChoice({ action = "fight", move = 0 }), false, tag .. "the refused send reports it")
+    eq(#r.lines, 0, tag .. "...and nothing is said")
+    eq(r.transport.refusal, "A LINE", tag .. "...the transport's field never read")
+    eq(r.phase, "move", tag .. "the menu stays")
+  end
 end
 
 -- ------------------------------------------------------------------
@@ -2858,6 +2898,37 @@ do
   eq(handed.bagEntries, nil, "Red: a `bag` option is not read (the save's inventory goes up)")
   eq(handed.victorySong, nil, "Red: a `victorySong` option is not read")
   eq(handed:safariBalls3(), nil, "Red: there is no SAFARI BALLS box")
+
+  -- Wave 4 (UM4): a tutorial's script and the Battle Palace's pick are Gen 3's
+  -- alone too -- a Red screen handed them takes input, fields its battler and
+  -- opens its move list on FIGHT as ever.
+  local picked = 0
+  local tut = Mediated.new({ game = { data = DATA }, battle = "g1t", mode = "wild",
+    tutorial = { kind = "oldMan", name = "OLD MAN" },
+    palace = { pick = function() picked = picked + 1; return true end } })
+  eq(tut.tutorial, nil, "Red: a `tutorial` option is not read")
+  eq(tut.noOwnBattler, nil, "Red: ...the old man's no-battler is not implied")
+  eq(tut.palace, nil, "Red: a `palace` option is not read")
+  tut.phase = "choose"
+  tut:runCommand("FIGHT")
+  eq(picked, 0, "Red: FIGHT never calls a Palace pick")
+  check(not tut:throwsWithTrainer3(), "Red: no throw with the trainer")
+  eq(tut:classicBallView3(), nil, "Red: no GBA-page ball")
+  -- Gen 3 keeps the action menu's cursor between turns (gActionSelectionCursor,
+  -- tests/gen3_mediated.lua (t)); Red opens on FIGHT every turn as it always did.
+  local red = Mediated.new({ game = { data = DATA }, battle = "g1c", mode = "wild" })
+  red.phase, red.commandIndex, red.pendingTurn, red.lines = "play", 4, true, {}
+  red:update(0)
+  eq(red.phase, "choose", "Red: the turn's menu opens")
+  eq(red.commandIndex, 1, "Red: ...on FIGHT, every turn")
+  -- Wave 4b: the GBA page's opening slide and the POKé DUDE's quit are Gen 3's.
+  local opening = Mediated.new({ game = { data = DATA }, battle = "g1o", mode = "wild",
+    tutorial = { kind = "pokedude", quit = function() end } })
+  opening:onReady({ battle = "g1o", mode = "wild", sides = { a = { "me" }, b = { "wild" } } })
+  eq(type(opening.lines[1]), "string", "Red: the opening line comes first, no slide row")
+  eq(opening:introSlideDx3(), 0, "Red: ...and nothing slides")
+  eq(opening:stepQuit3({ wasPressed = function() return true end, isDown = function() return true end }),
+     false, "Red: B held quits nothing")
 
   local sent = {}
   local trainer = setmetatable({

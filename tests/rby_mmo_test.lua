@@ -1215,6 +1215,68 @@ end)()
   eq(ev("arena", { text = "judge", amount = -1 }, 3).amount, nil, "wave 3: an amount is unsigned on every kind")
 end)()
 
+-- ------- Wire: WALLY's `wallyThrow` action and event (wave 4b of
+-- docs/plans/gen3-solo-remaining-fights.md, contract C-W)
+--
+-- Emerald's catching tutorial: WALLY's turn-3 command is B_ACTION_WALLY_THROW
+-- (pret src/battle_controller_wally.c WallyHandleActions), filed with no data
+-- -- an action that needs nothing, as RUN needs nothing -- and the referee
+-- says it ran with a `wallyThrow` event naming WALLY's `slot` / `side` (only
+-- side a's first seat may throw, so no seat id rides -- a stray one drops).
+-- Both Gen 3 words: a Red / Gold reader (and a choice reader naming no
+-- generation) refuses them whole.  No hub seats a tutorial, so neither moves PROTOCOL.
+;(function()
+  eq(Wire.BATTLE_ACTIONS3.wallyThrow, true, "C-W: wallyThrow is a Gen 3 action that needs nothing")
+  eq(Wire.BATTLE_ACTIONS.wallyThrow, nil, "C-W: ...and no shared action")
+  local function throw(extra, gen)
+    local raw = { battle = "b1", action = "wallyThrow" }
+    for k, v in pairs(extra or {}) do raw[k] = v end
+    return Wire.battleChoice(raw, gen)
+  end
+  for _, gen in ipairs({ 3, "3" }) do
+    local got = throw(nil, gen)
+    check(got ~= nil and got.action == "wallyThrow" and got.battle == "b1",
+          "C-W: a generation " .. tostring(gen) .. " reader takes a wallyThrow")
+    local n = 0
+    for _ in pairs(got or {}) do n = n + 1 end
+    eq(n, 2, "C-W: ...and it carries nothing but the battle and the action")
+  end
+  for _, gen in ipairs({ 1, 2, false, 4 }) do
+    eq(throw(nil, gen or nil), nil,
+       "C-W: a reader for generation " .. tostring(gen or nil) .. " refuses a wallyThrow whole")
+  end
+  for i, bad in ipairs({ "WALLYTHROW", "wallythrow", "wally", "throw", "wallyThrow " }) do
+    eq(Wire.battleChoice({ battle = "b1", action = bad }, 3), nil, "C-W: no such action (" .. i .. ")")
+  end
+  local stray = throw({ throw = "ball", block = 3 }, 3)
+  check(stray ~= nil and stray.throw == nil and stray.block == nil,
+        "C-W: the Safari dialect is not read on a wallyThrow")
+
+  check(Wire.BATTLE_EVENTS3.wallyThrow == true, "C-W: wallyThrow is a Gen 3 event kind")
+  check(Wire.BATTLE_EVENTS.wallyThrow == nil and Wire.BATTLE_EVENTS2.wallyThrow == nil,
+        "C-W: ...and in neither older vocabulary")
+  local function ev(extra, gen)
+    local raw = { battle = "b1", seq = 5, t = "wallyThrow", side = "a", slot = 0 }
+    for k, v in pairs(extra or {}) do raw[k] = v end
+    return Wire.battleEvent(raw, gen)
+  end
+  for _, gen in ipairs({ 3, false }) do
+    local got = ev(nil, gen or nil)
+    check(got ~= nil, "C-W: a wallyThrow reads for generation " .. tostring(gen or nil))
+    eq(got and got.side, "a", "C-W: ...its side")
+    eq(got and got.slot, 0, "C-W: ...and its slot")
+  end
+  for _, gen in ipairs({ 1, 2 }) do
+    eq(ev(nil, gen), nil, "C-W: a Gen " .. gen .. " reader refuses a wallyThrow whole")
+  end
+  for i, stray in ipairs({ "solo_player", "p1", "p1#2", "", 7, { "p1" } }) do
+    local got = ev({ seat = stray }, 3)
+    check(got ~= nil and got.seat == nil, "C-W: a seat is a stray field: dropped, the event kept (" .. i .. ")")
+  end
+  local older = Wire.battleEvent({ battle = "b1", seq = 5, t = "run", seat = "p1", side = "a", slot = 0 }, 2)
+  check(older ~= nil and older.seat == nil, "C-W: an older reader reads no seat on any kind")
+end)()
+
 -- ------- Wire.partyEvent: what your partner just did, off the wire
 --
 -- The fighter never sends their own name and the hub stamps it from the

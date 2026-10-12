@@ -47,6 +47,7 @@
 --
 --   active()                        is this a Gen 3 boot at all
 --   engine(moduleName)              the guarded lazy require every arm shares
+--   loaded(moduleName)              the same gate, package.loaded only (never requires)
 --   session() version() family()    live session; "firered"|"leafgreen"|"emerald"; "frlg"|"rse"
 --   player()                        { name, gender (0/1), trainerId, secretId }
 --   position()                      { mapId, x, y, facing, moving }
@@ -129,6 +130,24 @@ local function engine(name)
   return nil
 end
 M.engine = engine
+
+-- An engine module *only if something already required it*: package.loaded,
+-- never require.  For the engine's own singletons whose state only matters
+-- once they are up -- a bag or START menu that was never loaded cannot be
+-- open (battle/pokedude.lua hide_menus reads them the same way) -- so asking
+-- must not be what loads them, and a miss is not remembered (the next ask may
+-- find it loaded).  The same gate as `engine`: a Gen 3 boot, and a name in the
+-- game3 families (src.core.game3.* / src.ui.game3.* ...), so a caller can
+-- never use it to reach a Gen 1 / Gen 2 module round the loader's
+-- cross-generation denial.
+local function loaded(name)
+  if not M.active() then return nil end
+  if type(name) ~= "string" or not name:find("^src%.[%w_]+%.game3%.") then return nil end
+  local value = package.loaded[name]
+  if type(value) == "table" then return value end
+  return nil
+end
+M.loaded = loaded
 
 -- Call an engine function that may throw (most of them raise on a missing ROM
 -- row: Pokemon.name, Moves.get, Constants:require).  First value, or nil.

@@ -1127,7 +1127,7 @@ end
 --                   roster string "oosx" or a list of { hp, status }); drawn
 --                   when mode is not a wild one
 --   mode            "wild" / "coop_wild" suppress the ball row
---   trainer         { pic | picId = TRAINER_PIC id, x?, dx? } -- the foe
+--   trainer         { pic | picId = TRAINER_PIC id, x?, dx?, leaving? } -- the foe
 --                   trainer, drawn where the foe stands (centre x
 --                   TRAINER_X, or `x`: a trainer back in for its end speech
 --                   stands at 208, pret OpponentHandleTrainerSlide; `dx` is
@@ -1143,8 +1143,33 @@ end
 --                   rock and POKéBLOCK) arcing from the thrower's side to
 --                   the target's pic, then a small burst there; singles
 --                   geometry, drawn over the healthboxes
---   playerBack      { gender = 0|1 } -- the player's own back pic, drawn
---                   while `showPlayer` is true or no ally seat is up
+--   playerBack      { gender = 0|1, pic?, frame?, nudge?, dx?, leaving? } -- the
+--                   player's own back pic, drawn while `showPlayer` is true
+--                   or no ally seat is up; `pic` another trainer's strip in
+--                   its place (a tutorial's old man / WALLY / POKé DUDE: a
+--                   TrainerPic.back entry), `frame` the strip's frame (a
+--                   throw's pose), `nudge` / `dx` px to the right of its place
+--                   (the pose's sPlayerThrowXTranslation; WALLY's slide-in,
+--                   negative)
+--   trainer.leaving / playerBack.leaving   the trainer sliding back out as
+--                   its first monster comes (MediatedBattle queueSlideOut3):
+--                   drawn though the seat in front of it is up
+--   hideBoxes       true while the battle's opening slide brings the
+--                   sprites in (MediatedBattle introSlideDx3): no healthbox,
+--                   no SAFARI BALLS box, no foe ball row yet; the sliding is
+--                   the seats' and figures' own `dx`
+--   ball3           { x, y, rock } -- a thrown POKé BALL (MediatedBattle
+--                   classicBallView3): its centre, tilted by `rock` (-1..1)
+--                   while it shakes; drawn over the battlers
+--   refBox          true while the Battle Arena referee speaks: `message`
+--                   prints in his box (the dialogue frame) in place of the
+--                   textbox (pret DrawArenaRefereeTextBox)
+--   arena3          { names = { mine, foe }, vs, labels = { mind, skill,
+--                   body }, judgment, score = { mine, foe }, marks = { { cat,
+--                   mine, foe } }, fade = 0..8, shown } -- the Battle Arena's
+--                   judgment window over the field darkened `fade` / 16
+--                   (BattleArena_ShowJudgmentWindow); its contents once
+--                   `shown`
 --   weather         "RAIN" | "SUN" | "SAND" | "HAIL" (any case; "sandstorm",
 --                   "sunny" too): the arena's weather painter over the field
 --   evolveFront, evolveFlash   a bench evolution: a front pic mid-field
@@ -2411,6 +2436,171 @@ local function drawVoiceover(gfx, F, text, hint)
   gfx.setColor(1, 1, 1, 1)
 end
 
+-- ------- the Battle Arena's judgment window (MediatedBattle arenaView3)
+--
+-- pret pokeemerald battle_arena.c:383 BattleArena_ShowJudgmentWindow: the
+-- field darkens 8/16 of the way to black, a window opens over it
+-- (HandleBattleWindow(5, 0, 24, 13): the frame around tiles 6..23 x 1..12),
+-- and its windows (battle_bg.c sBattleArenaWindowTemplates; battle_message.c
+-- sTextOnWindowsInfo_Arena, every text centred, row 1) carry the two names
+-- with "VS" between, Mind / Skill / Body down the middle, and the score in
+-- the title, "<a> Judgment <b>" with {CLEAR 13} either side of the word.
+-- ShowJudgmentSprite puts each category's marks at x 80 (the player's) and
+-- 160 (the opponent's), y 40 / 56 / 72 -- a circle for 2 points, a triangle
+-- for 1, a cross for 0 -- and a rule of eight 16-px dashes at y 84 above the
+-- title.  Layout constants from the pret lines cited, never a byte of ROM;
+-- the marks are the player's cart's own sheet when the engine's frontier
+-- graphics are there (the engine's facility_arena.lua iconImage), else drawn
+-- here.
+M.G3A = {
+  FRAME = { tx = 6, ty = 1, tw = 18, th = 12 },
+  WIN = {
+    mine = { 6, 1, 8, 2 }, vs = { 14, 1, 2, 2 }, foe = { 16, 1, 8, 2 },
+    mind = { 12, 4, 6, 2 }, skill = { 12, 6, 6, 2 }, body = { 12, 8, 6, 2 },
+    title = { 8, 11, 14, 2 },
+  },
+  TEXT_Y = 1,
+  ICON_X = { mine = 80, foe = 160 }, ICON_Y = { mind = 40, skill = 56, body = 72 },
+  ICON = 16,
+  LINE_X = 64, LINE_Y = 84, LINE_DX = 16, LINE_N = 8,
+  CLEAR = 13,
+  -- the window texts' colours in the window palette (fgColor / shadowColor):
+  -- the player's name 1 / 15, the rest 13 / 15, the fill 14
+  NAME_FG = 1, FG = 13, SHADOW = 15, FILL = 14,
+}
+local GA = M.G3A
+local CATS3 = { "mind", "skill", "body" }
+
+-- The window palette's colours (the engine's frontier data, Data.dome()'s
+-- windowText, through pokeblock_gfx's color), or nil without them.
+local function arenaColors3()
+  local Data = g3eng("src.core.game3.rse.frontier.f2_data")
+  local Gfx = g3eng("src.ui.game3.rse.pokeblock_gfx")
+  if not (Data and Gfx and type(Data.dome) == "function" and type(Gfx.color) == "function") then
+    return nil
+  end
+  local ok, pal = pcall(function() return Data.dome().palettes.windowText end)
+  if not (ok and type(pal) == "table") then return nil end
+  local function c(i)
+    local okC, col = pcall(Gfx.color, pal[i + 1])
+    return okC and col or nil
+  end
+  return {
+    name = { fg = c(GA.NAME_FG), shadow = c(GA.SHADOW) },
+    text = { fg = c(GA.FG), shadow = c(GA.SHADOW) },
+    fill = c(GA.FILL),
+  }
+end
+
+-- One judgment mark off the cart's sheet (anim 0 cross, 1 triangle, 2 circle,
+-- 3 the rule's dash -- the same numbers as the points), or nil.
+local arenaIcons3 = {}
+local function arenaIcon3(anim)
+  if arenaIcons3[anim] ~= nil then return arenaIcons3[anim] or nil end
+  local img = nil
+  pcall(function()
+    local Data = g3eng("src.core.game3.rse.frontier.f2_data")
+    local Gfx = g3eng("src.ui.game3.rse.pokeblock_gfx")
+    if not (Data and Gfx and type(Gfx.of) == "function") then return end
+    local pal = Data.arena().judgmentPal
+    img = Gfx.of("rse/frontier_f2"):sprite("judgment", anim * 4, GA.ICON, GA.ICON, pal)
+  end)
+  arenaIcons3[anim] = img or false
+  return img
+end
+
+-- A mark drawn here when the sheet is not there: original vector shapes.
+local function drawMarkShape3(gfx, anim, cx, cy)
+  local r = GA.ICON / 2 - 2
+  if anim == 3 then
+    gfx.setColor(0.35, 0.35, 0.35, 1)
+    gfx.rectangle("fill", cx - GA.ICON / 2, cy, GA.ICON, 1)
+  elseif anim == 2 then
+    gfx.setColor(0.85, 0.2, 0.2, 1)
+    gfx.circle("line", cx, cy, r)
+    gfx.circle("line", cx, cy, r - 1)
+  elseif anim == 1 then
+    gfx.setColor(0.2, 0.45, 0.85, 1)
+    gfx.polygon("line", cx, cy - r, cx - r, cy + r - 1, cx + r, cy + r - 1)
+  else
+    gfx.setColor(0.25, 0.25, 0.25, 1)
+    gfx.line(cx - r, cy - r, cx + r, cy + r)
+    gfx.line(cx - r, cy + r, cx + r, cy - r)
+  end
+  gfx.setColor(1, 1, 1, 1)
+end
+
+local function drawMark3(gfx, anim, cx, cy)
+  local img = arenaIcon3(anim)
+  if img then
+    gfx.setColor(1, 1, 1, 1)
+    local ok = pcall(gfx.draw, img, cx - GA.ICON / 2, cy - GA.ICON / 2)
+    if ok then return end
+  end
+  drawMarkShape3(gfx, anim, cx, cy)
+end
+
+-- One centred line in an arena window ({ tx, ty, tw, th }).
+local function windowLine3(F, text, win, colors)
+  text = printable(text)
+  if text == "" then return end
+  local x = win[1] * 8 + math.floor((win[3] * 8 - measure(F, text)) / 2)
+  drawText(F, text, x, win[2] * 8 + GA.TEXT_Y, { colors = colors })
+end
+
+local function drawArenaJudgment3(gfx, F, j)
+  -- the field darkened, by the fade's progress (0..8 of 16)
+  gfx.setColor(0, 0, 0, math.max(0, math.min(8, num3(j.fade, 8))) / 16)
+  gfx.rectangle("fill", 0, 0, G.W, G.PANEL_Y)
+  gfx.setColor(1, 1, 1, 1)
+  if not j.shown then return end
+  local Gen3Ui = nil
+  pcall(function() Gen3Ui = need("Gen3Ui") end)
+  local fr = GA.FRAME
+  if Gen3Ui and type(Gen3Ui.frame) == "function" then
+    Gen3Ui.frame(fr.tx, fr.ty, fr.tw, fr.th)
+  else
+    gfx.setColor(1, 1, 1, 1)
+    gfx.rectangle("fill", fr.tx * 8, fr.ty * 8, fr.tw * 8, fr.th * 8)
+  end
+  local cols = arenaColors3()
+  if cols and cols.fill then
+    gfx.setColor(cols.fill)
+    gfx.rectangle("fill", fr.tx * 8, fr.ty * 8, fr.tw * 8, fr.th * 8)
+    gfx.setColor(1, 1, 1, 1)
+  end
+  local nameInk = cols and cols.name.fg and cols.name or (F.COLOR and F.COLOR.NORMAL)
+  local ink = cols and cols.text.fg and cols.text or (F.COLOR and F.COLOR.NORMAL)
+  local names = type(j.names) == "table" and j.names or {}
+  windowLine3(F, names.mine, GA.WIN.mine, nameInk)
+  windowLine3(F, j.vs or "VS", GA.WIN.vs, ink)
+  windowLine3(F, names.foe, GA.WIN.foe, ink)
+  local labels = type(j.labels) == "table" and j.labels or {}
+  for i, cat in ipairs(CATS3) do windowLine3(F, labels[i] or cat, GA.WIN[cat], ink) end
+  -- the title: the two scores {CLEAR 13} either side of the word
+  local score = type(j.score) == "table" and j.score or {}
+  local word = printable(j.judgment or "Judgment")
+  local a, b = tostring(math.floor(num3(score.mine, 0))), tostring(math.floor(num3(score.foe, 0)))
+  local wa, ww, wb = measure(F, a), measure(F, word), measure(F, b)
+  local total = wa + GA.CLEAR + ww + GA.CLEAR + wb
+  local tw = GA.WIN.title
+  local x = tw[1] * 8 + math.floor((tw[3] * 8 - total) / 2)
+  local y = tw[2] * 8 + GA.TEXT_Y
+  drawText(F, a, x, y, { colors = ink })
+  drawText(F, word, x + wa + GA.CLEAR, y, { colors = ink })
+  drawText(F, b, x + wa + GA.CLEAR + ww + GA.CLEAR, y, { colors = ink })
+  -- the rule above the title, and each category's marks so far
+  for i = 0, GA.LINE_N - 1 do drawMark3(gfx, 3, GA.LINE_X + i * GA.LINE_DX, GA.LINE_Y) end
+  for _, mark in ipairs(type(j.marks) == "table" and j.marks or {}) do
+    local y0 = GA.ICON_Y[mark.cat]
+    if y0 then
+      drawMark3(gfx, math.max(0, math.min(2, math.floor(num3(mark.mine, 0)))), GA.ICON_X.mine, y0)
+      drawMark3(gfx, math.max(0, math.min(2, math.floor(num3(mark.foe, 0)))), GA.ICON_X.foe, y0)
+    end
+  end
+  gfx.setColor(1, 1, 1, 1)
+end
+
 -- "12/34" (a row's `right`) -> 12, 34.
 local function hpOfRow(row)
   local hp, maxHp = tonumber(row.hp), tonumber(row.maxHp)
@@ -2698,17 +2888,75 @@ local function drawSafariBox(gfx, C, F, safari)
   gfx.setColor(1, 1, 1, 1)
 end
 
--- The player's own back pic (the first frame of the sheet).
+-- One 64x64 frame of a back-pic strip (frames stacked down the sheet).
+local backFrameQuads = setmetatable({}, { __mode = "k" })
+local function backFrameQuad(gfx, image, frame)
+  frame = math.max(0, math.floor(num3(frame, 0)))
+  if frame == 0 then return backQuad(gfx, image) end
+  local byFrame = backFrameQuads[image]
+  if byFrame == nil then
+    byFrame = {}
+    backFrameQuads[image] = byFrame
+  end
+  local quad = byFrame[frame]
+  if quad ~= nil then return quad or nil end
+  pcall(function()
+    local iw, ih = image:getDimensions()
+    if (frame + 1) * 64 <= ih then quad = gfx.newQuad(0, frame * 64, math.min(64, iw), 64, iw, ih) end
+  end)
+  byFrame[frame] = quad or false
+  return quad
+end
+
+-- The back pic on our side while nobody of ours is out: the player's own
+-- (by gender), or the trainer the screen names (`pic`, a TRAINER_BACK_PIC_*
+-- strip entry: a tutorial's old man / WALLY / POKé DUDE), on `frame` of its
+-- strip (a throw's pose), `nudge` px right (the pose's sPlayerThrowX
+-- Translation) and `dx` px off its place (WALLY sliding in from the left).
 local function drawPlayerBack(gfx, playerBack)
-  local entry = type(Gen3) == "table" and Gen3.trainerBackPic(playerBack.gender) or nil
+  local entry = playerBack.pic
+  if type(entry) ~= "table" then
+    entry = type(Gen3) == "table" and Gen3.trainerBackPic(playerBack.gender) or nil
+  end
   if type(entry) == "table" and entry.image then
-    local quad = backQuad(gfx, entry.image)
+    local quad = backFrameQuad(gfx, entry.image, playerBack.frame)
+      or backQuad(gfx, entry.image)
     gfx.setColor(1, 1, 1, 1)
     if quad then
-      gfx.draw(entry.image, quad, G.PLAYER_BACK_X - 32, G.PLAYER_BACK_Y - 32)
+      local x = G.PLAYER_BACK_X - 32 + math.floor(num3(playerBack.dx, 0) + num3(playerBack.nudge, 0))
+      gfx.draw(entry.image, quad, x, G.PLAYER_BACK_Y - 32)
     end
   end
 end
+
+-- ------- the thrown ball (MediatedBattle classicBallView3)
+
+-- Original vector art (no ROM pixels): a POKé BALL 8 px across -- its red cap,
+-- white base, black band and button -- tilted by `rock` (-1..1) as it shakes.
+M.GEN3_BALL_R = 4
+M.GEN3_BALL_TILT = 0.5
+local function drawBall3(gfx, ball)
+  if type(ball) ~= "table" then return end
+  local x, y = num3(ball.x, nil), num3(ball.y, nil)
+  if not (x and y) then return end
+  local r = M.GEN3_BALL_R
+  local tilt = num3(ball.rock, 0) * M.GEN3_BALL_TILT
+  gfx.push()
+  gfx.translate(x, y)
+  if tilt ~= 0 and gfx.rotate then gfx.rotate(tilt) end
+  gfx.setColor(0.95, 0.95, 0.95, 1)
+  gfx.circle("fill", 0, 0, r)
+  gfx.setColor(0.86, 0.18, 0.16, 1)
+  if gfx.arc then gfx.arc("fill", 0, 0, r, math.pi, 2 * math.pi) end
+  gfx.setColor(0.12, 0.12, 0.12, 1)
+  gfx.rectangle("fill", -r, -0.5, 2 * r, 1)
+  gfx.circle("line", 0, 0, r)
+  gfx.setColor(0.95, 0.95, 0.95, 1)
+  gfx.circle("fill", 0, 0, 1.2)
+  gfx.pop()
+  gfx.setColor(1, 1, 1, 1)
+end
+M.drawBall3 = drawBall3
 
 -- A foe's front pic on its platform: a floater hovers over it by the cart's
 -- own elevation for it, when the screen did not say (a seat carrying its
@@ -2747,7 +2995,7 @@ end
 local function drawSingleField(gfx, C, F, BF, view, frame)
   local foe, ally = view.foe, view.ally
   -- the foe trainer, where the foe will stand
-  if type(view.trainer) == "table" and (view.showTrainer or not foe) then
+  if type(view.trainer) == "table" and (view.showTrainer or not foe or view.trainer.leaving) then
     drawEnemyTrainer(gfx, BF, view.trainer)
   end
   if type(foe) == "table" and not foe.hidden and not (view.showTrainer and view.trainer) then
@@ -2758,7 +3006,7 @@ local function drawSingleField(gfx, C, F, BF, view, frame)
     end
   end
   -- the player's own back pic, while no monster is out
-  if type(view.playerBack) == "table" and (view.showPlayer or not ally) then
+  if type(view.playerBack) == "table" and (view.showPlayer or not ally or view.playerBack.leaving) then
     drawPlayerBack(gfx, view.playerBack)
   end
   if type(ally) == "table" and not ally.hidden and not (view.showPlayer and view.playerBack) then
@@ -2768,6 +3016,8 @@ local function drawSingleField(gfx, C, F, BF, view, frame)
       drawStandingPic(gfx, BF, seatPic(BF, ally, true), G.ALLY_PIC_X, G.ALLY_FEET_Y, ally)
     end
   end
+  -- a thrown ball, in flight, open, on the ground or rocking
+  drawBall3(gfx, view.ball3)
   drawFieldOverlays(gfx, BF, view, frame)
 
   -- the guild-focus rails (2v2 / 3v3)
@@ -2775,15 +3025,18 @@ local function drawSingleField(gfx, C, F, BF, view, frame)
   drawStrip(gfx, BF, F, "ally", view.allyStrip, frame)
 
   -- the healthboxes, and the foe's remaining party under its box -- the
-  -- Safari Zone's SAFARI BALLS box in the player's place
-  if type(foe) == "table" then drawFoeBox(gfx, C, F, foe) end
-  if type(ally) == "table" then
-    drawAllyBox(gfx, C, F, ally)
-  elseif type(view.safari) == "table" then
-    drawSafariBox(gfx, C, F, view.safari)
-  end
-  if view.foeParty ~= nil and M.wantsFoeBalls(view.mode) then
-    drawFoeBalls(C, view.foeParty)
+  -- Safari Zone's SAFARI BALLS box in the player's place; none while the
+  -- battle's opening slide is still bringing the sprites in (`hideBoxes`)
+  if not view.hideBoxes then
+    if type(foe) == "table" then drawFoeBox(gfx, C, F, foe) end
+    if type(ally) == "table" then
+      drawAllyBox(gfx, C, F, ally)
+    elseif type(view.safari) == "table" then
+      drawSafariBox(gfx, C, F, view.safari)
+    end
+    if view.foeParty ~= nil and M.wantsFoeBalls(view.mode) then
+      drawFoeBalls(C, view.foeParty)
+    end
   end
   -- a general clip's throws, over everything on the field
   drawThrows3(gfx, view.throws3)
@@ -3004,6 +3257,15 @@ function M.drawGen3(view, state)
         drawDoubleField(gfx, C, F, BF, view, double, frame, wash)
       else
         drawSingleField(gfx, C, F, BF, view, frame)
+      end
+      -- the Battle Arena's judgment window, over the darkened field
+      if type(view.arena3) == "table" then drawArenaJudgment3(gfx, F, view.arena3) end
+      -- ...and its referee's own box in place of the textbox while he speaks
+      -- (DrawArenaRefereeTextBox: the dialogue frame, his line inside it)
+      if view.refBox and not (type(list) == "table" or view.commands or view.moves) then
+        pcall(C.drawPanel, "none")
+        drawVoiceover(gfx, F, view.message, view.hint == true and not view.hold)
+        return
       end
       -- Oak's voice-over: the field darkened under his line, which prints
       -- in its own frame in place of the textbox.

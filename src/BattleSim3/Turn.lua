@@ -30,8 +30,9 @@
 --   1. battle start: one roll(0,255) per speed-tied group of the switch-in order;
 --      Trace's pick between two or more traceable foes, roll(0, n-1);
 --   2. turn start: Quick Claw roll(0,65535) -- only when two or more seats
---      fight (a wild seat's flee counts) and one of them holds QUICK_CLAW; one
---      roll(0,255) per group of them tied on both priority and speed;
+--      fight (a wild seat's flee and WALLY's throw count) and one of them
+--      holds QUICK_CLAW; one roll(0,255) per group of them tied on both
+--      priority and speed;
 --   3. runs (wild modes): roll(0,255) for a runner slower than the wild mon
 --      (no draw for Smoke Ball, Run Away, the faster runner or a veiled
 --      GHOST's foe); under `rules.pyramidRun` every runner but a Smoke Ball
@@ -48,11 +49,11 @@
 --      for BAIT / ROCK, up to four roll(0,65535) for a SAFARI BALL, nothing
 --      for GO NEAR, a POKeBLOCK or RUN -- then the monster's flee or watch,
 --      which draws nothing;
---   6. moves -- and a wild seat's flee, which draws nothing -- in speed order,
---      each drawing only at the points it reaches (a Battle Palace pick that
---      failed its selection check draws only a random-target move's target
---      and, failing for `unable`, its sleeper's roll(0,3) with no counter or
---      its frozen battler's roll(0,4) -- Palace.lua):
+--   6. moves -- and a wild seat's flee or WALLY's throw, which draw nothing --
+--      in speed order, each drawing only at the points it reaches (a Battle
+--      Palace pick that failed its selection check draws only a random-target
+--      move's target and, failing for `unable`, its sleeper's roll(0,3) with
+--      no counter or its frozen battler's roll(0,4) -- Palace.lua):
 --      canceller (freeze roll(0,4); a sleeper with no counter roll(0,3); confusion
 --      roll(0,1) [+ self-hit roll(85,100) + Focus Band roll(0,99) when held];
 --      paralysis roll(0,3); infatuation roll(0,1)); obedience, after the PP
@@ -178,7 +179,17 @@
 --         before Random()); under pokedude a crit is drawn and void (:1201),
 --         every move skips the accuracy check, both sides (:1015), no mon
 --         disobeys (battle_util.c:3149), and no move effect but sleep lands on
---         side b (:2128);
+--         side b (:2128); under wally side a may also file `{ action =
+--         "wallyThrow" }` (B_ACTION_WALLY_THROW, wave 4b's contract C-W): the
+--         recall and "You throw a BALL now, right?" turn, from WALLY's seat
+--         alone (side a's first).  It is ordered with the moves at priority 0
+--         (pokeemerald battle_main.c:4819 hoists only items and switches;
+--         GetWhoStrikesFirst reads MOVE_NONE for it), and when it runs
+--         (`_wallyThrow`, battle_util.c:625 HandleAction_WallyBallThrow) it
+--         emits `wallyThrow { slot, side }` and cancels the turn's SECOND
+--         action slot (gActionsByTurnOrder[1] = B_ACTION_FINISHED): a slower
+--         foe never acts that turn, a faster one already has; refused in
+--         every other fight, and from any other seat (side b, a partner);
 --     and a side-entry field, `noBattler = true`: the entry is a trainer with
 --     no battler (the old man; the Safari's player, implied there), side a of
 --     a `wild` fight only, bringing no monsters.  It chooses every turn, holds
@@ -272,7 +283,13 @@ M.STATUS_TO_WIRE = M.STATUS_FROM_WIRE
 
 -- `safari` is the Safari Zone's one action (Wire.BATTLE_ACTIONS3, contract
 -- C6): refused by `_normaliseChoice` in every fight that is not `safari`.
-local ACTIONS = { fight = true, item = true, switch = true, run = true, cancel = true, safari = true }
+-- `wallyThrow` is WALLY's turn-3 B_ACTION_WALLY_THROW (contract C-W, also on
+-- Wire.BATTLE_ACTIONS3): refused in every fight that is not `tutorial =
+-- "wally"`, and from every seat but WALLY's (side a's first).
+local ACTIONS = {
+  fight = true, item = true, switch = true, run = true, cancel = true, safari = true,
+  wallyThrow = true,
+}
 
 -- Contract C3 (docs/plans/gen3-solo-remaining-fights.md): `outcome().how`.
 -- `balls` is the Safari's last missed ball (Safari.lua); `judge` the Battle
@@ -1304,6 +1321,20 @@ function Battle:_normaliseChoice(fighter, choice)
     return nil
   end
 
+  if action == "wallyThrow" then
+    -- B_ACTION_WALLY_THROW (contract C-W): only WALLY's controller files it
+    -- (pokeemerald/src/battle_controller_wally.c:220, WallyHandleActions
+    -- state 3), and it drives B_POSITION_PLAYER_LEFT alone (battle_setup.c
+    -- BATTLE_TYPE_WALLY_TUTORIAL is a single battle), so only WALLY's own
+    -- seat of a `tutorial = "wally"` fight may: side a's FIRST seat (`index`
+    -- 1, the entry's lead).  A second side-a seat -- a coop partner, a shared
+    -- team's `#2` seat -- is refused like side b, so one turn holds one throw.
+    -- Nothing else of the choice is read: the action carries no move, item
+    -- or target (BtlController_EmitTwoReturnValues(..., 0)).
+    if self.tutorial ~= "wally" or fighter.side ~= "a" or fighter.index ~= 1 then return nil end
+    return { action = "wallyThrow" }
+  end
+
   if action == "run" then
     -- A wild seat's own RUN is the cart's opponent RUN: it reaches the cart as
     -- the move controller's AI_CHOICE_FLEE (pokefirered/src/battle_main.c:3268),
@@ -2134,6 +2165,16 @@ function Battle:_beginTurn()
       -- speed, Quick Claw and paralysis included.  MOVE_NONE is not Rage.
       b.rage = nil
       rows[#rows + 1] = { f = f, b = b, row = nil, pri = 0, order = i, flee = true }
+    elseif b and b.mon.hp > 0 and choice and choice.action == "wallyThrow" then
+      -- WALLY's throw is the flee's shape (contract C-W): pokeemerald/src/
+      -- battle_main.c:4819 SetActionsAndBattlersTurnOrder hoists only
+      -- B_ACTION_USE_ITEM and B_ACTION_SWITCH, so B_ACTION_WALLY_THROW is
+      -- sorted with the moves by GetWhoStrikesFirst (:4595), which reads
+      -- MOVE_NONE -- priority 0 -- for any action but a move (:4706): speed,
+      -- Quick Claw and paralysis included, a tie random.  BattleTurnPassed
+      -- left gChosenMoveByBattler MOVE_NONE (:4004), which is not Rage.
+      b.rage = nil
+      rows[#rows + 1] = { f = f, b = b, row = nil, pri = 0, order = i, wally = true }
     elseif b and b.mon.hp > 0 and choice and choice.action == "fight" then
       -- A recharge turn chooses no move (pokefirered/src/battle_main.c:3126
       -- withholds the menu; :2993 left gChosenMoveByBattler MOVE_NONE): Rage
@@ -2426,6 +2467,23 @@ function Battle:_wildFlee(fighter)
   local other = fighter.side == "a" and "b" or "a"
   self:_finish("win", self:_sidePlayers(other), self:_sidePlayers(fighter.side), "run",
     "flee", fighter.side)
+end
+
+-- WALLY's throw when its turn comes (contract C-W; pokeemerald/src/battle_util.c
+-- :625 HandleAction_WallyBallThrow): BattleScript_ActionWallyThrow -- "<MON>,
+-- come back!" with the recall, WALLY slides in, "You throw a BALL now,
+-- right?" -- is the screen's to play on the `wallyThrow` event; the referee
+-- changes no state, draws nothing, and does what the handler's last line
+-- does: gActionsByTurnOrder[1] = B_ACTION_FINISHED, the turn's SECOND action
+-- slot whoever holds it.  Thrown first, that slot is the foe's, which never
+-- acts this turn (HandleAction_ActionFinished just steps past it); thrown
+-- second, it is the throw's own slot, already running, and the foe has acted.
+-- The script's end2 then ends the action as any other (B_ACTION_TRY_FINISH:
+-- the post-action pass, `_afterAction`), and the turn ends normally.
+function Battle:_wallyThrow(fighter)
+  self:_emit("wallyThrow", { slot = fighter.slot, side = fighter.side })
+  local second = self.turnOrderFighters and self.turnOrderFighters[2]
+  if second then second.acted = true end
 end
 
 -- Pursuit aimed at a seat that is switching out strikes first, doubled
@@ -2725,7 +2783,9 @@ function Battle:_resolveFights()
     -- inherit the turn, and a Pursuit already spent it.
     if not f.acted and f.b == r.b and r.b.mon.hp > 0 then
       f.acted = true
-      if r.flee then self:_wildFlee(f) else self:_fightAction(f, f.choice) end
+      if r.flee then self:_wildFlee(f)
+      elseif r.wally then self:_wallyThrow(f)
+      else self:_fightAction(f, f.choice) end
       self:_afterAction()
     end
     self:_faintSweep()

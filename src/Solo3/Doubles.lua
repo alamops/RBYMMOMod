@@ -320,7 +320,7 @@ end
 -- core's (a loss's two whiteout lines, BattleScript_LocalBattleLost).
 local function settleTwo(ctx, outcome)
   if not (ctx.verdict == "win" and type(outcome) == "table"
-          and (outcome.reason == "ko" or outcome.how == "judge")) then
+          and (outcome.reason == "ko" or outcome.how == "judge" or ctx.standingDraw)) then
     return false
   end
   local _, bp = emerald()

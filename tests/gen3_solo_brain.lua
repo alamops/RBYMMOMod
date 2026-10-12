@@ -775,6 +775,239 @@ do
 end
 
 -- ===================================================================
+-- 6. the Battle Palace's pick (pokeemerald battle_gfx_sfx_util.c:109
+--    ChooseMoveAndTargetInBattlePalace) and the Battle Arena's two rules
+-- ===================================================================
+
+-- The cart's Palace tables, invented: every nature's ATTACK / DEFENSE
+-- thresholds 60 / 80 above half HP, 20 / 40 at or under; natures 0 / 1 / 2
+-- prefer the STRONGER / WEAKER / a RANDOM target.
+local PALACE = { likelihood = {}, moveTarget = {} }
+for n = 1, 25 do
+  PALACE.likelihood[n] = { 60, 80, 20, 40 }
+  PALACE.moveTarget[n] = (n - 1) % 3
+end
+local FLAVOR = {}
+for n = 1, 25 do FLAVOR[n] = 0 end
+
+local function palaceFight(sides, extra)
+  extra = extra or {}
+  local battle = assert(Sim.Turn.create({
+    id = "palace3", mode = "coop_npc", seed = 3, typeTable = CHART, sides = sides,
+    rules = extra.rules or { palace = { flavor = FLAVOR } },
+  }))
+  battle:drainEvents()
+  return battle
+end
+
+-- Three groups: SCRATCH-like (ATTACK), a status move at BOTH (SUPPORT), a
+-- move at the user (DEFENSE).
+local function attack(num) return mv(num or 10, { power = 40, type = 0, target = 0 }) end
+local function support(num) return mv(num or 45, { power = 0, type = 0, target = 8, effect = 18 }) end
+local function defense(num) return mv(num or 104, { power = 0, type = 0, target = 16, effect = 16 }) end
+
+do
+  local G = Brain.PALACE_GROUP
+  local function group(fields) return Brain.palaceGroup3(mv(1, fields)) end
+  eq(group({ power = 40, target = 0 }), G.ATTACK, "palace group: a damaging SELECTED move is ATTACK")
+  eq(group({ power = 0, target = 0 }), G.SUPPORT, "palace group: a status SELECTED move is SUPPORT")
+  eq(group({ power = 40, target = 8 }), G.ATTACK, "palace group: a damaging BOTH move is ATTACK")
+  eq(group({ power = 0, target = 8 }), G.SUPPORT, "palace group: a status BOTH move is SUPPORT")
+  eq(group({ power = 20, target = 4 }), G.ATTACK, "palace group: RANDOM, damaging: ATTACK")
+  eq(group({ power = 0, target = 32 }), G.SUPPORT, "palace group: FOES_AND_ALLY, status: SUPPORT")
+  eq(group({ power = 1, target = 1 }), G.SUPPORT, "palace group: DEPENDS is SUPPORT whatever its power")
+  eq(group({ power = 0, target = 64 }), G.SUPPORT, "palace group: the foes' field is SUPPORT")
+  eq(group({ power = 0, target = 16 }), G.DEFENSE, "palace group: a move at the user is DEFENSE")
+  eq(group({ power = 90, target = 128 }), G.ATTACK, "palace group: any other target is ATTACK")
+
+  eq(Brain.palaceTables3({ likelihood = {}, moveTarget = {} }), nil, "palace tables: short of 25 natures")
+  local bad = { likelihood = PALACE.likelihood, moveTarget = {} }
+  for n = 1, 25 do bad.moveTarget[n] = 3 end
+  eq(Brain.palaceTables3(bad), nil, "palace tables: a target preference out of 0..2")
+  check(Brain.palaceTables3(PALACE) ~= nil, "palace tables: the cart's shape")
+  eq(Brain.new({ generation = 3, aiFlags = 7, aiBits = EM }).palace3, nil, "palace: none unless asked")
+end
+
+do -- the nature's group, the AI inside it, the low-HP half
+  local function single(npcMoves, extraMons)
+    local mons = { sheet({ moves = npcMoves }) }
+    for _, m in ipairs(extraMons or {}) do mons[#mons + 1] = m end
+    local battle = palaceFight({
+      a = { { playerId = "p", name = "P", mons = { sheet() } } },
+      b = { { playerId = "n", name = "N", mons = mons } },
+    })
+    return battle, view3(battle, battle.byId.n)
+  end
+  local function palaceBrain(values, extra)
+    local opts = { aiBits = EM, palace = PALACE, rng = queued(values) }
+    for k, v in pairs(extra or {}) do opts[k] = v end
+    return brain3(7, opts)
+  end
+  local moves = { attack(), support(), defense() }
+  local _, v = single(moves)
+  local b = palaceBrain({ 10 })
+  eq(b:choose(v).move, 0, "palace: under 60 -- the ATTACK group, its one move")
+  eq(b.lastPalace3.group, Brain.PALACE_GROUP.ATTACK, "palace: ...the group drawn")
+  check(b.lastPalace3.mask[1] and not b.lastPalace3.mask[2], "palace: ...the AI's mask is the group")
+  eq(b.lastScores3 and b.lastScores3[2], 0, "palace: ...the rest scored up from 0")
+  eq(palaceBrain({ 70 }):choose(v).move, 2, "palace: 60..79 -- DEFENSE")
+  eq(palaceBrain({ 90 }):choose(v).move, 1, "palace: 80 and over -- SUPPORT")
+
+  local battle, lv = single(moves)
+  battle.byId.n.b.palaceLow = true
+  local lb = palaceBrain({ 30 })
+  eq(lb:choose(lv).move, 2, "palace (low HP): the second pair -- 30 is DEFENSE there")
+  eq(lb.lastPalace3.low, true, "palace (low HP): read off the referee's bit (Battle:palaceLow)")
+  eq(palaceBrain({ 10 }):choose(lv).move, 0, "palace (low HP): under 20 still ATTACK")
+
+  -- The trainer's AI_TrySwitchOrUseItem still runs first (the opponent's
+  -- controller asks it before the move); a `moveOnly` view never switches.
+  local sb, sv = single(moves, { sheet({ slot = 1 }) })
+  sb.byId.n.b.perishTurns = 0
+  eq(palaceBrain({ 10 }):choose(sv).action, "switch", "palace: the trainer's switch comes first")
+  sv.moveOnly = true
+  eq(palaceBrain({ 10 }):choose(sv).action, "fight", "palace: ...the player's monster only ever picks a move")
+
+  -- An Encore: the controller is never asked; the encored move, nothing drawn.
+  local eb, ev = single(moves)
+  eb.byId.n.b.encoreTurns, eb.byId.n.b.encoreNum = 2, moves[2].num
+  local enc = palaceBrain({ 10 })
+  eq(enc:choose(ev).move, 1, "palace: an Encore's move")
+  eq(enc.lastPalace3, nil, "palace: ...and no nature drawn")
+  -- Nothing usable: Struggle, nothing drawn.
+  local nb, nv = single({ mv(10, { power = 40, pp = 0 }) })
+  local st = palaceBrain({ 10 })
+  eq(st:choose(nv).move, 0, "palace: no usable move -- the referee's Struggle")
+  eq(st.lastPalace3, nil, "palace: ...the controller never asked")
+  check(nb ~= nil, "palace: (the fight)")
+end
+
+do -- the group's one move unusable: the pick may land on it, and fails there
+  local battle = palaceFight({
+    a = { { playerId = "p", name = "P", mons = { sheet() } } },
+    b = { { playerId = "n", name = "N", mons = { sheet({ moves = { attack(), support() } }) } } },
+  })
+  local n = battle.byId.n
+  n.b.disabledNum = 10
+  local v = view3(battle, n)
+  -- No scripts: every slot ties at 0 (the mask's one move is disabled), the
+  -- pick is any of the two -- the first, by this generator.
+  local b0 = brain3(0, { aiBits = EM, palace = PALACE, rng = queued({ 10 }) })
+  local c = b0:choose(v)
+  eq(c.move, 0, "palace (disabled): the drawn group's disabled move can be picked")
+  check(battle:submitChoice("n", c), "palace (disabled): the referee takes the pick")
+  eq(n.choice and n.choice.palace, "disabled", "palace (disabled): ...and fails it at selection")
+
+  -- With the scripts, a masked-out move's score is never under 0 (Cmd_score
+  -- flattens it): a NORMAL move into a GHOST is -10 to CHECK_BAD_MOVE.
+  local ghost = palaceFight({
+    a = { { playerId = "p", name = "P", mons = { sheet({ types = { 7 } }) } } },
+    b = { { playerId = "n", name = "N", mons = { sheet({ moves = { attack(), support() } }) } } },
+  })
+  local gv = view3(ghost, ghost.byId.n)
+  gv.moveMask = { [2] = true }
+  local plain = brain3(1, { aiBits = EM, rng = queued({}) })
+  plain:choose(gv)
+  eq(plain.lastScores3 and plain.lastScores3[1], 0, "scores: a masked-out move CHECK_BAD_MOVE marks down stays at 0")
+  gv.moveMask = nil
+  plain:choose(gv)
+  eq(plain.lastScores3 and plain.lastScores3[1], 90, "scores: ...from 100 it is the -10 it always was")
+end
+
+do -- no move of the group left: the fallback and its coin
+  local function fallbackOf(moves, values)
+    local battle = palaceFight({
+      a = { { playerId = "p", name = "P", mons = { sheet() } } },
+      b = { { playerId = "n", name = "N", mons = { sheet({ moves = moves }) } } },
+    })
+    local b = brain3(7, { aiBits = EM, palace = PALACE, rng = queued(values) })
+    return b:choose(view3(battle, battle.byId.n)), b
+  end
+  -- DEFENSE drawn (70), none known: a random usable move (slot 2), the coin
+  -- under 50 lets it through.
+  local c, b = fallbackOf({ attack(), support() }, { 70, 1, 10 })
+  eq(c.move, 1, "palace fallback: a random usable move")
+  check(b.lastPalace3.fallback, "palace fallback: ...by the fallback")
+  local u = fallbackOf({ attack(), support() }, { 70, 1, 50 })
+  eq(u.unable, true, "palace fallback: the coin at 50 or over -- 'unable'")
+  eq(u.move, nil, "palace fallback: ...no move named")
+  -- Two SUPPORT moves are never "the one group with two": the cart's third
+  -- test reads the DEFENSE count against 2 << 8 -- an ATTACK move is drawn
+  -- as readily as either.
+  local s = fallbackOf({ support(45), support(46), attack(10) }, { 70, 2, 10 })
+  eq(s.move, 2, "palace fallback: two SUPPORT moves weigh nothing (the cart's bug)")
+  -- Two ATTACK moves are: the draw is kept to them.
+  local a = fallbackOf({ attack(10), attack(11), support(45) }, { 70, 2, 0, 10 })
+  eq(a.move, 0, "palace fallback: two ATTACK moves -- a draw outside them is drawn again")
+end
+
+do -- a double: the nature's target (GetBattlePalaceTarget)
+  local function double(natureN, hp1, hp2, values, npcMoves, foeFainted, npcTypes)
+    local battle = palaceFight({
+      a = { { playerId = "p", name = "P", seats = 2,
+              mons = { sheet({ hp = hp1 }), sheet({ slot = 1, hp = hp2 }) } } },
+      b = { { playerId = "n", name = "N", seats = 2,
+              mons = { sheet({ nature = natureN, moves = npcMoves or { attack() }, types = npcTypes }),
+                       sheet({ slot = 1, nature = natureN, moves = npcMoves or { attack() } }) } } },
+    })
+    if foeFainted then
+      local seat = battle.byId["p#2"]
+      seat.b.mon.hp = 0
+    end
+    local b = brain3(7, { aiBits = EM, palace = PALACE, rng = queued(values) })
+    return b:choose(view3(battle, battle.byId.n))
+  end
+  eq(double(0, 100, 50, { 10 }).target, 0, "palace double: STRONGER -- the player's left, more HP")
+  eq(double(0, 50, 100, { 10 }).target, 1, "palace double: STRONGER -- the right, more HP")
+  eq(double(1, 100, 50, { 10 }).target, 1, "palace double: WEAKER -- the right, less HP")
+  local r = double(2, 100, 50, { 10 })
+  check(r.target == 0 or r.target == 1, "palace double: RANDOM -- either")
+  check(double(0, 80, 80, { 10 }).target ~= nil, "palace double: equal HP -- one of them at random")
+  eq(double(1, 100, 50, { 10 }, nil, true).target, 0,
+     "palace double: WEAKER picks the fallen position -- the move is redirected to its partner")
+  -- CURSE: a move at the user (DEFENSE); a Ghost's is aimed by the nature.
+  local curse = mv(174, { power = 0, target = 16, effect = 109 })
+  local plainCurse = double(0, 100, 50, { 70 }, { curse })
+  eq(plainCurse.move, 0, "palace double: CURSE is drawn with DEFENSE")
+  eq(plainCurse.target, nil, "palace double: ...a non-Ghost's names nobody (it is its own)")
+  local ghostCurse = double(1, 100, 50, { 70 }, { curse }, nil, { 7 })
+  eq(ghostCurse.move, 0, "palace double: a Ghost's CURSE, drawn with DEFENSE too")
+  eq(ghostCurse.target, 1, "palace double: ...aimed as a SELECTED move, by the nature (WEAKER)")
+end
+
+do -- the Battle Arena: no switching, party order
+  local judged = sheet({ slot = 1 })
+  judged.judged = true
+  local battle = palaceFight({
+    a = { { playerId = "p", name = "P", mons = { sheet() } } },
+    b = { { playerId = "n", name = "N", mons = { sheet(), judged, sheet({ slot = 2, types = { 10 } }) } } },
+  }, { rules = { arena = true } })
+  local n = battle.byId.n
+  n.mons[2].judged = true
+  n.b.perishTurns = 0
+  local v = view3(battle, n)
+  local b = brain3(7, { aiBits = EM })
+  eq(b:choose(v).action, "fight", "arena: the referee's rules -- never a switch (ShouldSwitch's ARENA arm)")
+  -- A send-out: the next standing, unjudged monster, no scoring.
+  local bare = { mon = sheet(), foe = sheet(), party = { sheet(), judged, sheet({ slot = 2 }), sheet({ slot = 3 }) },
+                 mustReplace = true }
+  bare.party[1].hp = 0
+  local pick = brain3(7, { aiBits = EM, arena = true }):choose(bare)
+  eq(pick and pick.slot, 2, "arena: the send-out is the next in party order, the judged one passed over")
+  -- Anywhere, a judged monster is down for good.
+  local open = create({
+    a = { { playerId = "p", name = "P", mons = { sheet() } } },
+    b = { { playerId = "n", name = "N", mons = { sheet(), judged } } },
+  })
+  open.byId.n.b.perishTurns = 0
+  eq(brain3(7, { aiBits = EM }):choose(view3(open, open.byId.n)).action, "switch",
+     "judged: (a perish count switches to a standing bench monster)")
+  open.byId.n.mons[2].judged = true
+  eq(brain3(7, { aiBits = EM }):choose(view3(open, open.byId.n)).action, "fight",
+     "judged: a judged monster -- the referee's mark -- is no bench to switch to")
+end
+
+-- ===================================================================
 
 check(not contains(warns, "ERROR"), "no error was logged: " .. table.concat(warns, " / "))
 eq(#warns, 0, "no warning fired beyond the one pinned above: " .. table.concat(warns, " / "))

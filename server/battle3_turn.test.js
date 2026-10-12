@@ -207,3 +207,98 @@ for (const scn of fixture.scenarios) {
     }
   });
 }
+
+// ------------------------------------------------------------------
+// contract C-W: WALLY's throw (docs/plans/gen3-solo-remaining-fights.md, wave
+// 4b), asserted on this twin's own replay -- the Lua runner asserts the same
+// on its own (tests/battle_sim3_turn.lua). pokeemerald battle_main.c:4819
+// sorts B_ACTION_WALLY_THROW with the moves at priority 0 (MOVE_NONE, :4706);
+// battle_util.c:625 HandleAction_WallyBallThrow sets gActionsByTurnOrder[1] =
+// B_ACTION_FINISHED.
+// ------------------------------------------------------------------
+
+test('C-W: WALLY\'s throw is ordered with the moves and cancels the second slot', () => {
+  const byName = new Map(fixture.scenarios.map((s) => [s.name, s]));
+  const replay = (name) => {
+    const scn = byName.get(name);
+    assert.ok(scn, `${name} is in the fixture`);
+    const got = run(scn);
+    assert.ok(!got.refused, `${name}: create refused: ${got.refused}`);
+    return got;
+  };
+  const at = (got, pred, from = -1) => {
+    for (let i = from + 1; i < got.events.length; i += 1) if (pred(got.events[i])) return i;
+    return -1;
+  };
+  const isThrow = (e) => e.t === 'wallyThrow';
+  const used = (who) => (e) => e.t === 'msg' && e.text.startsWith(`${who} used `);
+  const turnOf = (n) => (e) => e.t === 'turn' && e.amount === n && e.slot === undefined;
+  const count = (got, pred) => got.events.filter(pred).length;
+
+  let got = replay('w4b_wally_cw_throw_first');
+  const t3 = at(got, turnOf(3));
+  const t4 = at(got, turnOf(4));
+  const thr = at(got, isThrow);
+  assert.ok(t3 >= 0 && t3 < thr && thr < t4, 'the throw runs in turn 3, and turn 4 opens after it');
+  assert.deepStrictEqual({ seat: got.events[thr].seat, slot: got.events[thr].slot, side: got.events[thr].side },
+    { seat: undefined, slot: 0, side: 'a' }, 'wallyThrow { slot, side }, no seat');
+  const foeAfter = at(got, used('RALTS'), t3);
+  assert.ok(foeAfter < 0 || foeAfter > t4, 'thrown first, the foe never acts in turn 3');
+  assert.strictEqual(count(got, isThrow), 1, 'one throw, one event');
+  assert.ok(got.outcome.how === 'catch' && got.outcome.given === false, "turn 4's ball is the forced catch");
+
+  for (const name of ['w4b_wally_cw_foe_first', 'w4b_wally_cw_tie_foe_first', 'w4b_wally_cw_priority_foe',
+    'w4b_wally_cw_quick_claw_foe']) {
+    got = replay(name);
+    const foe = at(got, used('RALTS'));
+    const t = at(got, isThrow);
+    const t2 = at(got, turnOf(2));
+    assert.ok(foe >= 0 && foe < t && t < t2, `${name}: the foe acts first, then the throw, then turn 2`);
+  }
+  for (const name of ['w4b_wally_cw_tie_throw_first', 'w4b_wally_cw_negative_priority_foe']) {
+    got = replay(name);
+    const t = at(got, isThrow);
+    assert.ok(t >= 0 && t < at(got, turnOf(2)) && at(got, used('RALTS')) < 0,
+      `${name}: thrown first, the foe never acts that turn`);
+  }
+  got = replay('w4b_wally_cw_thrower_down');
+  assert.ok(count(got, isThrow) === 0 && got.outcome.how === 'ko', 'no throw from a fainted thrower');
+  got = replay('w4b_wally_cw_second_slot_partner');
+  const tp = at(got, isThrow);
+  assert.ok(tp >= 0 && at(got, used('PARTNER')) < 0 && at(got, used('RALTS'), tp) > tp,
+    "gActionsByTurnOrder[1] is the partner's; the third slot acts");
+  for (const [name, slot] of [['w4b_wally_cw_refused_plain_wild', 0], ['w4b_wally_cw_refused_old_man', 0],
+    ['w4b_wally_cw_refused_pokedude', 0], ['w4b_wally_cw_refused_1v1', 0],
+    ['w4b_wally_cw_refused_no_battler', 0], ['w4b_wally_cw_refused_replacing', 2]]) {
+    got = replay(name);
+    assert.ok(got.results[slot] === false && count(got, isThrow) === 0, `${name}: refused and never emitted`);
+  }
+  got = replay('w4b_wally_cw_refused_side_b');
+  assert.ok(got.results[0] === false && got.results[2] === true && count(got, isThrow) === 1
+    && got.events[at(got, isThrow)].side === 'a', "side b's throw refused, side a's taken");
+  // WALLY's seat alone: side a's second seat (a coop partner) is refused like
+  // side b (pokeemerald's WALLY controller drives B_POSITION_PLAYER_LEFT only),
+  // so a turn where both side-a seats file one holds one throw, from slot 0.
+  got = replay('w4b_wally_cw_refused_partner');
+  const tq = at(got, isThrow);
+  assert.ok(got.results[0] === false && got.results[1] === true && count(got, isThrow) === 1
+    && got.events[tq].slot === 0 && got.events[tq].side === 'a',
+    "the partner's throw refused, WALLY's taken; one throw, from slot 0");
+
+  // The throw draws nothing: no tie, no QUICK CLAW, the foe cancelled.
+  const opts = plain(byName.get('w4b_wally_cw_throw_first').create);
+  opts.typeTable = plain(fixture.typeTable);
+  opts.movePool = plain(fixture.movePool);
+  delete opts.wildPick;
+  const { battle } = Turn.attempt(opts);
+  battle.drainEvents();
+  const before = battle.snapshot().rngState;
+  battle.submitChoice('p1', { action: 'wallyThrow' });
+  battle.submitChoice('wild', { action: 'fight', move: 0 });
+  assert.ok(battle.snapshot().rngState === before && battle.snapshot().turn === 2,
+    'the throw turn drew nothing and closed');
+  const b2 = Turn.attempt(opts).battle;
+  assert.strictEqual(b2.submitChoice('p1', {
+    action: 'wallyThrow', move: 1, item: 4, slot: 1, target: 3,
+  }), true, 'stray fields on a wallyThrow are ignored, not refused');
+});

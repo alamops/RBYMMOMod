@@ -16,6 +16,9 @@
 --   2. a 2-on-2 against a trainer on a Gen 3 hub: uploads, battle_ready,
 --      Gen 3 targeting (a SELECTED move may aim at the partner, a spread one
 --      asks nobody), the C5 kinds (weather, ability, stat delta), the result;
+--      each player's own seat's cursors between turns (kept where left,
+--      through the hub's clock answering for them, back to FIGHT on their own
+--      switch-in only);
 --   3. a 2-on-2 against a wild: the knockout priced by Exp3 on the session
 --      party, and a catch into the session party;
 --  3b. the badge rules through the real screens and the in-game hub
@@ -37,7 +40,8 @@
 --      divert takes the encounter, and the trainer wrap installed from the
 --      field;
 --   8. Gold regressions: the item-effect table is Gen 2's, and an invite
---      joiner's prize lands in save.player.money.
+--      joiner's prize lands in save.player.money; Red and Gold's co-op turns
+--      still open on FIGHT (no Gen 3 per-seat cursors).
 --
 -- Legal: every species, move, trainer and item row below is the SDK
 -- fixture's or invented here with synthetic numbers; the only real values are
@@ -1048,6 +1052,158 @@ do
   eq(calMon.exp, calExp, "no EXP")
   eq(calMon.level, calLevel, "and no level")
   eq(#gen1Asked, 0, "and no side asked for anything of Gen 1's")
+end
+
+-- ------- the cursors between turns: each player's own seat (W4b-DCUR)
+--
+-- The carts keep the action menu's and the move list's cursor per battler
+-- between turns (pret gActionSelectionCursor / gMoveSelectionCursor; the rule
+-- is CoopBattle `restoreCursors3`'s): a co-op player's menu opens where they
+-- left it on their own seat, the hub's clock answering for them moves no row
+-- of theirs (pret never asks a battler whose action is forced, so nothing
+-- writes its cursors that turn) and leaves no picker half-open, and only
+-- their own monster's switch-in puts the pair back -- the partner's moves
+-- nothing.  Red and Gold's every-turn FIGHT is pinned in section 8.
+
+do
+  newGame()
+  local savedFoes = TRAINERS[400].party
+  -- Foes that only GROWL, too sturdy for a few turns of ours to end the fight.
+  TRAINERS[400].party = { { species = 151, level = 40, iv = 0, moves = { 45 } },
+                          { species = 16, level = 40, iv = 0, moves = { 45 } } }
+  -- ANN's lead is hurt, so a POTION on it later has something to do.
+  local mine = monOf(4, 30, { moves = { 33, 57, 14 }, pp = { 35, 15, 30 }, maxPp = { 35, 15, 30 },
+                              hp = 20 })
+  local spare = monOf(5, 30, { moves = { 33 }, pp = { 35 }, maxPp = { 35 } })
+  SESSION.party = { mine, spare }
+  FakeBag.add(SESSION.bag, 13, 3)
+  local partnerParty = assert(CoopBattle.unpackParty(GAME, assert(CoopBattle.packParty({
+    monOf(16, 30, { moves = { 33, 45 }, pp = { 35, 40 }, maxPp = { 35, 40 } }),
+    monOf(29, 30, { moves = { 45 }, pp = { 40 }, maxPp = { 40 } }) }, GAME))))
+  local b1, b2, trainer = npcSeats(GAME, 400)
+  TRAINERS[400].party = savedFoes
+
+  local hub = Hub.new({ maxPlayers = 4, generation = 3 })
+  hub.forceBattleSeed = 7
+  local ann, annPeer = join3(hub, "ANN", "firered")
+  local bob, bobPeer = join3(hub, "BOB", "emerald")
+  hub:openCoopBattle("cur1", { ann.id, bob.id }, { mode = "coop_npc", hostId = ann.id })
+  local record = hub.battles["cur1"]
+  local slots = {
+    { side = "a", owner = ann.id, name = "ANN", party = SESSION.party },
+    { side = "a", owner = bob.id, name = "BOB", party = partnerParty },
+    { side = "b", name = "DUO", party = b1 },
+    { side = "b", name = "DUO", party = b2 },
+  }
+  local hostT, guestT = transportFor(hub, ann), transportFor(hub, bob)
+  local host = assert(CoopBattle.new(GAME, { slots = slots, mine = 1, host = true,
+    mode = "coop_npc", trainer = trainer, trainerPic = trainer.trainerPic,
+    transport = hostT, battleId = "cur1", selfId = ann.id }))
+  local guest = assert(CoopBattle.new(GAME, { slots = slots, mine = 2, host = false,
+    mode = "coop_npc", trainer = trainer, transport = guestT, battleId = "cur1",
+    selfId = bob.id }))
+  host:enter()
+  guest:enter()
+  local function flush()
+    deliver(annPeer, host)
+    deliver(bobPeer, guest)
+    settle(host)
+    settle(guest)
+  end
+  -- One button on ANN's screen, one frame.
+  local function press(key)
+    GAME.input = fakeInput(key)
+    host:update(1 / 60)
+    GAME.input = fakeInput()
+  end
+  flush()
+  eq(host.phase, "choose", "co-op cursor: ANN's menu")
+  eq(host.commandIndex, 1, "co-op cursor: a menu never walked opens on FIGHT")
+
+  -- turn 1: ANN's list walked to SWORDS DANCE (row 3), filed
+  press("a")
+  eq(host.phase, "move", "co-op cursor: FIGHT opens ANN's list")
+  press("down")
+  press("down")
+  press("a")
+  eq(host.phase, "wait", "co-op cursor: SWORDS DANCE filed")
+  guest:commit({ slot = 2, move = 2, target = 3 })
+  flush()
+
+  -- turn 2: the list opens on row 3; ANN walks to BAG and leaves the bag open
+  eq(host.phase, "choose", "co-op cursor: turn 2")
+  eq(host.commandIndex, 1, "co-op cursor: ANN's menu on FIGHT, where she left it")
+  press("a")
+  eq(host.moveIndex, 3, "co-op cursor: her list opens on SWORDS DANCE")
+  press("b")
+  press("right")
+  eq(host.commandIndex, 2, "co-op cursor: ANN walks to BAG")
+  press("a")
+  eq(host.phase, "item", "co-op cursor: the bag is open -- and ANN says nothing more")
+  guest:commit({ slot = 2, move = 2, target = 3 })
+  deliver(annPeer, host)
+  deliver(bobPeer, guest)
+  local deadline = record.sim and record.sim.deadline
+  check(deadline ~= nil, "co-op cursor: the hub's clock is running on ANN's choice")
+  hub:tickBattles(deadline or 0)
+  deliver(annPeer, host)
+  deliver(bobPeer, guest)
+  local late = false
+  local function saysLate(row)
+    local text = type(row) == "table" and row.text or row
+    return type(text) == "string" and text:gsub("\n", " "):find("ran out of time", 1, true) ~= nil
+  end
+  for _, row in ipairs(host.messages) do late = late or saysLate(row) end
+  late = late or saysLate(host.shown)
+  check(late, "co-op cursor: the hub answered for ANN (\"ran out of time\")")
+  check(host.phase ~= "item", "co-op cursor: the turn the clock took closed her bag (" .. tostring(host.phase) .. ")")
+  settle(host)
+  settle(guest)
+
+  -- turn 3: her rows are hers; nothing half-open
+  eq(host.phase, "choose", "co-op cursor: turn 3 opens on the action menu, not the bag")
+  eq(host.commandIndex, 2, "co-op cursor: ...on BAG -- the clock's answer moved no row of hers")
+  eq(host.targetIndex, 1, "co-op cursor: the aim starts afresh")
+  press("left")
+  press("a")
+  eq(host.moveIndex, 3, "co-op cursor: her list still on SWORDS DANCE")
+  press("b")
+  press("right")
+  press("right")
+  eq(host.commandIndex, 3, "co-op cursor: ANN on POKéMON (co-op's one row of four)")
+  press("a")
+  eq(host.phase, "switch", "co-op cursor: the party list")
+  press("a")
+  eq(host.phase, "wait", "co-op cursor: ANN's switch filed")
+  guest:commit({ slot = 2, move = 2, target = 3 })
+  flush()
+
+  -- turn 4: her own switch-in put both back; she ends on BAG (a POTION on
+  -- her hurt CHARMANDER) while BOB switches
+  eq(host.phase, "choose", "co-op cursor: turn 4")
+  eq(host.sim:slot(1).active, 2, "co-op cursor: CHARMELEON is out for ANN")
+  eq(host.commandIndex, 1, "co-op cursor: her own switch-in put her menu back on FIGHT (SwitchInClearSetData)")
+  press("a")
+  eq(host.moveIndex, 1, "co-op cursor: ...and her list on its first row")
+  press("b")
+  press("right")
+  press("a")
+  eq(host.phase, "item", "co-op cursor: the bag")
+  press("a")
+  eq(host.phase, "item_party", "co-op cursor: POTION asks who")
+  press("a")
+  eq(host.phase, "wait", "co-op cursor: ANN's POTION on CHARMANDER filed")
+  guest:commit({ slot = 2, kind = "switch", index = 2 })
+  flush()
+
+  -- turn 5: BOB's switch-in is his seat's, not hers
+  eq(host.phase, "choose", "co-op cursor: turn 5")
+  eq(host.sim:slot(2).active, 2, "co-op cursor: BOB switched")
+  eq(host.commandIndex, 2, "co-op cursor: ANN on BAG, where she left it -- BOB's switch-in moved nothing of hers")
+  check(host.cursors3 and host.cursors3[1] ~= nil and host.cursors3[2] == nil,
+        "co-op cursor: ANN's screen keeps ANN's seat's pair, and only hers")
+  eq(guest.cursors3, nil, "co-op cursor: BOB never walked a menu on his own screen -- nothing kept there")
+  eq(#gen1Asked, 0, "co-op cursor: nothing of Gen 1's was asked for")
 end
 
 -- ------- the C5 kinds, one at a time (synthetic events on a mediated screen)
@@ -2070,23 +2226,28 @@ do
 end
 
 do
-  -- RF6 #4: a draw that leaves the player standing (a dropped link, a
-  -- referee timeout) must not reach the opcode at all -- "lose" ran the bytes
-  -- after trainerbattle (a leader's TM without the badge).
+  -- A standing timeout draw halts the trainer script and pays nothing.
   newGame()
   SESSION.party = { monOf(4, 10) }
+  SESSION.money = 1000
   local stand, results = trainerStand(326)
   FakeVm.running = true   -- the trainerbattle command waits in the VM
   Coop.finishBuriedBattle(stand, GAME, "draw", false)
   CoopField.pump3(0.1)
-  eq(#results, 0, "a draw is never handed to the opcode (no post-battle bytes run)")
-  eq(FakeVm.halted, 1, "the trainer's waiting script is halted instead")
-  eq(FakeVm.aborted, true, "as aborted, the cart's own ending for it")
-  eq(STORE.flags[0x500 + 326], nil, "the trainer stays unbeaten")
+  eq(#results, 0, "a standing draw does not answer the trainer opcode")
+  eq(FakeVm.halted, 1, "the trainer's waiting script is halted")
+  eq(FakeVm.aborted, true, "the script is aborted where it waits")
   eq(recorded("moneyLoss"), 0, "and nobody is taxed for it")
   eq(recorded("respawn"), 0, "or sent to a POKeMON CENTER")
   eq(recorded("returnToField"), 1, "the field comes back")
-  eq(SESSION.battleOutcome, 3, "B_OUTCOME_DREW")
+  eq(SESSION.battleOutcome, 3, "the standing draw records B_OUTCOME_DREW")
+  eq(SESSION.money, 1000, "and pays no prize")
+  local again, againRitual = Coop.finishBuriedBattle(stand, GAME, "draw", false)
+  eq(again, true, "duplicate finish is ignored: handled (there was a battle behind it)")
+  eq(againRitual, true, "...and the ritual is somebody else's, so no caller runs a second")
+  CoopField.pump3(0.1)
+  eq(SESSION.money, 1000, "duplicate finish never pays")
+  eq(#results, 0, "the continuation does not run")
 
   -- A draw that leaves the team on nothing is the cart's whiteout
   -- (IsPlayerDefeated counts B_OUTCOME_DREW): "lose", the ritual, no flag.
@@ -2100,6 +2261,120 @@ do
   eq(handled and ritual, true, "handed over as a loss the engine side whites out")
   eq(recorded("respawn"), 1, "to the heal location")
   eq(results2[1], "lose", "and the opcode hears a loss")
+end
+
+do
+  newGame()
+  SESSION.party = { monOf(4, 10) }
+  FakeObjects._byId = { [3] = { localId = 3, trainerId = 326 } }
+  SESSION.money = 1000
+  local coop = Coop.new({ isReady = function() return true end, send = function() end },
+    { say = function() return {} end }, nil, nil, nil)
+  coop.party = { count = function() return 2 end }
+  coop.battle = { plan = { kind = "npc", npcId = "g3t326" } }
+  coop:onBattleOver("draw", GAME, { gen3 = true, mode = "coop_npc", trainer = { trainerId = 326 } })
+  eq(STORE.flags[0x500 + 326], nil, "a standing invite joiner draw leaves the trainer unbeaten")
+  eq(SESSION.money, 1000, "a standing invite joiner draw pays nothing")
+  eq(coop.lastResult, "draw", "the standing trainer draw stays a draw")
+  eq(CoopField.trainerDrawResult3("draw", "timeout", true), "draw",
+    "a timeout is not a win, even when the caller says the party stands")
+  eq(CoopField.trainerDrawResult3("draw", "ko", false), "draw",
+    "a knockout the fight decided was down stays a draw")
+  eq(CoopField.trainerDrawResult3("draw", "ko", true), "win",
+    "a knockout whose sheets and the save disagree is a win")
+  eq(CoopField.trainerDrawResult3("draw", "judge", true), "win",
+    "an arena judgment that disagrees is a win")
+  eq(CoopField.knockoutHow3(nil, "ko"), "ko", "a knockout with no how is still a knockout")
+  eq(CoopField.knockoutHow3("forfeit", "run"), nil, "a forfeit is not a knockout")
+
+  -- The same knockout, decided once: leftover HP on this client whites out
+  -- with everybody else, and does not set the flag.  The outcome as the hub
+  -- sends it, through the real sanitiser (Wire.battleOutcome): `reason` "ko"
+  -- survives and `how` does not -- a hub's outcome never carries it, even
+  -- from a hub that tried -- and the screen files the two the way
+  -- CoopBattle:onBattleOutcome does (medEndReason / medEndHow).
+  local wire = Wire.battleOutcome({
+    battle = "b3ko", outcome = "draw", reason = "ko", how = "ko",
+    losers = { "p1", "p2" },
+  }, 3)
+  check(wire ~= nil, "the hub's knockout draw passes the sanitiser")
+  eq(wire and wire.reason, "ko", "...with its reason")
+  eq(wire and wire.how, nil, "...and no how")
+  newGame()
+  SESSION.party = { monOf(4, 10) }
+  SESSION.money = 1000
+  local wiped = Coop.new({ isReady = function() return true end, send = function() end },
+    { say = function() return {} end }, nil, nil, nil)
+  wiped.party = { count = function() return 2 end }
+  wiped.battle = { plan = { kind = "npc", npcId = "g3t327" } }
+  wiped:onBattleOver("draw", GAME, {
+    gen3 = true, mode = "coop_npc",
+    medEndHow = wire and wire.how, medEndReason = wire and wire.reason,
+    trainer = { trainerId = 327 },
+  })
+  CoopField.pump3(0.1)
+  eq(STORE.flags[0x500 + 327], nil, "a knockout draw does not set the trainer flag")
+  eq(wiped.lastResult, "draw", "a knockout draw stays a draw on the result")
+  eq(recorded("respawn"), 1, "and every client whites out from the referee's sheets")
+
+  -- The knockout-draw override is Gen 3's: a state that is not a Gen 3
+  -- screen keeps deciding a draw's blackout from this save, which stands.
+  newGame()
+  SESSION.party = { monOf(4, 10) }
+  SESSION.money = 1000
+  local older = Coop.new({ isReady = function() return true end, send = function() end },
+    { say = function() return {} end }, nil, nil, nil)
+  older.party = { count = function() return 2 end }
+  older.battle = { plan = { kind = "npc" } }
+  older:onBattleOver("draw", GAME, { mode = "coop_npc", medEndReason = "ko" })
+  CoopField.pump3(0.1)
+  eq(recorded("respawn"), 0, "a non-Gen-3 knockout draw with this party standing whites nobody out")
+end
+
+do
+  -- A walk-in co-op trainer fight whose stand-in already finished (its ritual
+  -- ran, or it was handed back to the cart) and whose plan carries the
+  -- trainer's npcId: the ending must not finish that trainer a second time.
+  newGame()
+  SESSION.party = { monOf(4, 10) }
+  FakeObjects._byId = { [3] = { localId = 3, trainerId = 326 } }
+  SESSION.money = 1000
+  local stand, results = trainerStand(326)
+  Coop.finishBuriedBattle(stand, GAME, "win", false)
+  CoopField.pump3(0.1)
+  eq(results[1], "win", "the stand-in's own ritual answered the opcode")
+  local paid = SESSION.money
+  check(paid > 1000, "and paid the prize once")
+  STORE.flags = {}
+  local coop = Coop.new({ isReady = function() return true end, send = function() end },
+    { say = function() return {} end }, nil, nil, nil)
+  coop.party = { count = function() return 2 end }
+  coop.battle = { plan = { kind = "npc", npcId = "g3t326" } }
+  coop.engineBattle = stand
+  coop:onBattleOver("win", GAME, { gen3 = true, mode = "coop_npc", trainer = { trainerId = 326 } })
+  CoopField.pump3(0.1)
+  eq(SESSION.money, paid, "finished stand + walk-in npcId: no second prize")
+  eq(STORE.flags[0x500 + 326], nil, "...and no synthetic trainer flag")
+  eq(#results, 1, "...and the opcode is not answered again")
+
+  -- ...and a loss on one: the whiteout already happened (or is the cart's).
+  newGame()
+  SESSION.party = { monOf(4, 10, { hp = 0 }) }
+  SESSION.money = 1000
+  local lost = trainerStand(326)
+  Coop.finishBuriedBattle(lost, GAME, "loss", true)
+  CoopField.pump3(0.1)
+  eq(recorded("respawn"), 1, "the stand-in's loss whited out once")
+  local after = SESSION.money
+  local coop2 = Coop.new({ isReady = function() return true end, send = function() end },
+    { say = function() return {} end }, nil, nil, nil)
+  coop2.party = { count = function() return 2 end }
+  coop2.battle = { plan = { kind = "npc", npcId = "g3t326" } }
+  coop2.engineBattle = lost
+  coop2:onBattleOver("loss", GAME, { gen3 = true, mode = "coop_npc", trainer = { trainerId = 326 } })
+  CoopField.pump3(0.1)
+  eq(recorded("respawn"), 1, "finished stand + loss: no second whiteout")
+  eq(SESSION.money, after, "...and no second money loss")
 end
 
 do
@@ -3194,6 +3469,51 @@ do
   eq(screen.caughtBall, "LEVEL_BALL", "and the catcher remembers which one")
   eq(needGold("BattleSim/Effects").itemEffect("LEVEL_BALL"), nil,
      "(Gen 1's table has no such ball -- which is what the screen used to ask)")
+
+  -- Red and Gold keep the co-op cursors they always had (W4b-DCUR): every
+  -- turn opens on FIGHT, the move list opens on the move last sent with the
+  -- monster now out (`moveMemory`), and none of Gen 3's per-seat pair is
+  -- kept, read or dropped -- Gen 3's rule (`restoreCursors3`) is gated on
+  -- the Gen 3 screen alone.
+  for _, case in ipairs({ { game = gold, tag = "Gold" }, { game = red, tag = "Red" } }) do
+    local tag = case.tag
+    local sim = CoopSimG.new({ data = case.game.data, game = case.game }, {
+      { side = "a", owner = "me", name = "P", party = { { species = "X", hp = 10, stats = { hp = 10 } } } },
+      { side = "b", name = "WILD", party = { { species = "Y", hp = 10, stats = { hp = 10 } } } },
+    })
+    local scr = setmetatable({
+      game = case.game, mediated = true, battleId = "g9", mine = 1, phase = "choose",
+      commandIndex = 1, moveIndex = 1, targetIndex = 1,
+      medSlots = { [0] = 1, [3] = 2 }, medFields = { [1] = 0, [2] = 3 }, messages = {}, sim = sim,
+    }, CoopBattleG)
+    local seat = sim:slot(1)
+    if seat.battler then
+      seat.battler.curMoves = { { id = "TACKLE", pp = 5 }, { id = "GROWL", pp = 5 } }
+    end
+    eq(scr.gen3, nil, tag .. " cursor: (not a Gen 3 screen)")
+    CoopBattleG.updateCommand(scr, { wasPressed = function(_, k) return k == "right" end })
+    eq(scr.commandIndex, 2, tag .. " cursor: the walk moves the cursor as ever")
+    eq(scr.cursors3, nil, tag .. " cursor: ...and keeps no per-seat pair")
+    scr:playEvents({})
+    eq(scr.commandIndex, 1, tag .. " cursor: the next turn opens on FIGHT, as it always has")
+    eq(scr.moveIndex, 1, tag .. " cursor: ...the move list's live row first")
+    eq(scr.targetIndex, 1, tag .. " cursor: ...and the aim's")
+    scr.commandIndex = 3
+    eq(scr:freshTurnCursors(), 1, tag .. " cursor: a fresh turn's cursor is FIGHT")
+    eq(scr.commandIndex, 1, tag .. " cursor: ...set on the screen")
+    eq(scr:noteCursorEvent3({ t = "send", slot = 0, side = "a" }), false,
+       tag .. " cursor: a send-out of ours reads as no Gen 3 cursor reset")
+    eq(scr:noteCursorEvent3({ t = "faint", slot = 0, side = "a" }), false, tag .. " cursor: nor a faint")
+    if seat.battler then
+      scr.moveMemory = { [seat.active or 1] = 2 }
+      scr.cursors3 = { [1] = { action = 4, move = 1 } }
+      eq(scr:rememberedMove(), 2, tag .. " cursor: the move list opens on the move last sent with this monster")
+      scr:playEvents({})
+      eq(scr.commandIndex, 1, tag .. " cursor: and a pair planted on the screen is never read")
+    else
+      check(false, tag .. " cursor: the seat has a battler to read moves from")
+    end
+  end
 
   -- An invite joiner's prize on Gold lands where Gold keeps its money.
   local ow = {

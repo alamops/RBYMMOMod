@@ -732,8 +732,16 @@ function M.new(game, opts)
     -- `rememberedMove`): a Gen 1 fight is mostly one attack repeated, and
     -- re-walking the list to it every turn is the tax this removes. Per
     -- monster, because the fourth row of the mon you switched to is a
-    -- different move.
+    -- different move.  Red and Gold only: Gen 3 keeps the cart's per-seat
+    -- cursors instead (`cursors3`).
     moveMemory = {},
+    -- Gen 3: the action menu's and the move list's cursor per own seat, kept
+    -- between turns the way the carts keep them (see `restoreCursors3`): seat
+    -- index -> { action = row, move = row }.  Written as the menus are walked,
+    -- dropped on that seat's own switch-in, faint or TRANSFORM.  `cursorSeat3`
+    -- is the seat whose cursor `commandIndex` holds right now.
+    cursors3 = nil,
+    cursorSeat3 = nil,
     targetIndex = 1,
     frame = 0,
     messages = {},
@@ -1286,7 +1294,9 @@ function M:queueMediatedIntro()
   self.messages[#self.messages + 1] = {
     act = function(battle)
       battle.introBalls = nil
-      battle.showEnemyTrainer = nil
+      -- The GBA double page's trainer stands until its send-out slide takes
+      -- it off (`queueSlideOut3`).
+      if not battle:slidesOnPage3() then battle.showEnemyTrainer = nil end
     end,
   }
   self.messages[#self.messages + 1] = { wait = sendOutWait() }
@@ -1440,6 +1450,9 @@ function M:enter()
   else
     self:queueIntroSendOut()
   end
+  -- The cart's opening slide on the GBA double page, ahead of every line
+  -- (`queueIntroSlide3`).
+  self:queueIntroSlide3()
   self.phase = "messages"
   self.after = "choose"
   self:announce("coop_battle_started")
@@ -1459,6 +1472,21 @@ function M:playVictoryMusic()
   if self.result ~= "win" or self.victoryMusicPlayed then return end
   self.victoryMusicPlayed = true
   if self.gen3 then
+    -- A fight whose kind named its jingle (newSoloDouble's `victorySong`: a
+    -- Frontier trainer's MUS_VICTORY_TRAINER -- pret pokeemerald
+    -- battle_main.c:4978 HandleEndTurn_BattleWon picks by the battle type,
+    -- never the trainer class the resolver below reads) plays that one; one
+    -- the cart cannot play is said once and the ordinary jingle plays.
+    -- MediatedBattle:playVictoryMusic's twin.
+    if self.victorySong3 ~= nil then
+      if Gen3.audio.playSong(self.victorySong3) then return end
+      if not self.victorySongWarned3 then
+        self.victorySongWarned3 = true
+        mod.log:warn("this fight's own victory jingle (%s) could not be played, so it takes "
+          .. "the ordinary one; re-import the ROM from the title screen if the music is "
+          .. "missing everywhere", tostring(self.victorySong3))
+      end
+    end
     Gen.playVictoryMusic(self.game, self:gen3MusicOpts())
     return
   end
@@ -1687,6 +1715,8 @@ function M:update(dt)
   -- Arena effects advance on wall time whatever the phase: a lunge or a sink
   -- started under one phase must not freeze because a menu opened over it.
   self:stepFx(dt)
+  -- ...and the GBA page's general-clip beats (`classicBeat3`), on the same clock.
+  self:stepClassicFx3(dt)
   -- Gen 2 charge can set vanished/chargeMove with no anim row. Start the
   -- hide from that state so Dig/Fly still leave the seat.
   self:syncVanishHolds()
@@ -1835,7 +1865,7 @@ function M:update(dt)
       if type(head) == "table"
          and (head.anim or head.drain or head.faintfx or head.expfill
               or head.evolve or head.wait or head.act or head.ballsend
-              or head.vfxrow or head.shakefx) then
+              or head.vfxrow or head.shakefx or head.slide3) then
         -- Hold wait/act/anim behind opening appear line(s). Drop ball chrome
         -- when the post-appear wait starts (not on every page advance), so a
         -- multi-page appear does not begin the gap early.
@@ -1844,7 +1874,12 @@ function M:update(dt)
           -- fall through to dwell
         elseif head.wait then
           if self.introBalls then self.introBalls = nil end
-          if self.showEnemyTrainer then self.showEnemyTrainer = nil end
+          -- ...and takes the trainer's face down -- except where the cart's
+          -- send-out slide does (`queueSlideOut3`): there it stands until
+          -- its monsters come out.
+          if self.showEnemyTrainer and not self:slidesOnPage3() then
+            self.showEnemyTrainer = nil
+          end
           head._t = (head._t or 0) + 1
           if head._t >= (tonumber(head.wait) or 0) then
             table.remove(self.messages, 1)
@@ -1856,6 +1891,9 @@ function M:update(dt)
             if type(head.act) == "function" then pcall(head.act, self) end
           elseif head.ballsend then
             self:startSendBall(head)
+          elseif head.slide3 then
+            -- A trainer slide on the GBA double page (`startSlide3`).
+            self:startSlide3(head)
           elseif head.anim then
             self.acting = head.from or self.acting
             self:startAnim(head)
@@ -2324,13 +2362,167 @@ function M:liveMoves()
   return (battler and battler.curMoves) or {}
 end
 
+-- ------- Gen 3: two cursors per seat, kept between turns
+--
+-- The carts keep the action menu's cursor and the move list's per battler
+-- (gActionSelectionCursor / gMoveSelectionCursor, pokeemerald battle_main.c:225,
+-- pokefirered :211), and nothing a turn does touches them: each menu is drawn
+-- where its cursor was left (PlayerHandleChooseAction,
+-- InitMoveSelectionsVarsAndStrings -- pokeemerald battle_controller_player.c
+-- :2575 / :2643, pokefirered :2412 / :2446), and only that battler's own d-pad
+-- moves them, as it walks and before any A (HandleInputChooseAction :233 /
+-- :219, HandleInputChooseMove :471 / :437).  Three things put a battler's back
+-- on the first row, and only that battler's:
+--
+--   * its switch-in -- SwitchInClearSetData (pokeemerald battle_main.c:3152,
+--     pokefirered :2329), HandleAction_Switch (pokeemerald battle_util.c:294,
+--     pokefirered battle_main.c:4135), PlayerHandleSwitchInAnim
+--     (battle_controller_player.c:2185 / :2094): both cursors -- a BATON PASS
+--     and a replacement after a faint included;
+--   * its faint -- FaintClearSetData (pokeemerald battle_main.c:3264,
+--     pokefirered :2433): both;
+--   * a TRANSFORM it lands -- Cmd_transformdataexecution's
+--     RESET_MOVE_SELECTION (pokeemerald battle_script_commands.c:7764,
+--     pokefirered :7398): the move cursor alone.  MIMIC writes the copy into
+--     the slot it sat in and resets nothing (Cmd_mimicattackcopy :7844 / :7478).
+--
+-- The aim is not one of them: HandleInputChooseMove sets gMultiUsePlayerCursor
+-- afresh from the move each time it opens the aim, so `targetIndex` still goes
+-- back to the first row every turn (`freshTurnCursors`).
+--
+-- This screen keeps the same pair per own seat in `cursors3` (the seat's sim
+-- slot -> { action, move }): written through as the menus are walked
+-- (`keepActionCursor3`, `keepMoveCursor3`), read back as a seat's menu opens
+-- (`restoreCursors3`) and as FIGHT opens its list (`rememberedMove`), dropped
+-- on that seat's own `send` / `switch` / `faint` / TRANSFORM `form`
+-- (`noteCursorEvent3`).  A solo double's two seats keep two pairs; a co-op
+-- player keeps the one for the seat they fight from.  Red and Gold never come
+-- here: every turn of theirs opens on FIGHT (see `playEvents`).
+
+-- A remembered row, clamped onto a list of `count` rows: a cursor past the
+-- end takes the last row, a missing or nonsensical one the first, and an empty
+-- list row 1 -- never an index the list has nothing at.
+local function clampRow3(want, count)
+  local n = tonumber(want)
+  count = math.floor(tonumber(count) or 0)
+  if n == nil or n ~= n or count < 1 then return 1 end
+  n = math.floor(n)
+  if n < 1 then return 1 end
+  if n > count then return count end
+  return n
+end
+
+-- Own seat `index`'s pair, made on first use.
+function M:seatCursors3(index)
+  if index == nil then return nil end
+  self.cursors3 = self.cursors3 or {}
+  local kept = self.cursors3[index]
+  if not kept then
+    kept = {}
+    self.cursors3[index] = kept
+  end
+  return kept
+end
+
+-- The choosing seat's action cursor, put back into `commandIndex` (clamped
+-- onto the command list it has now), and that seat named as the one the live
+-- cursor belongs to.  A seat that never walked its menu -- or whose cursors
+-- its own switch-in or faint just dropped -- opens on FIGHT.
+function M:restoreCursors3()
+  local at = self.mine
+  local kept = at ~= nil and self.cursors3 and self.cursors3[at] or nil
+  self.commandIndex = clampRow3(kept and kept.action, #self:commandList())
+  self.cursorSeat3 = at
+  return self.commandIndex
+end
+
+-- Written through from the action menu, every frame it is driven: where the
+-- cursor sits is the seat's cursor, whichever way it got there.  A live
+-- cursor that belongs to another seat -- `self.mine` moved without a menu
+-- being opened for it -- is that seat's, already kept: this seat's own is put
+-- back instead of being overwritten with it.
+function M:keepActionCursor3()
+  if not self.gen3 or self.mine == nil then return end
+  local owner = self.cursorSeat3
+  if owner ~= nil and owner ~= self.mine then
+    self:restoreCursors3()
+  else
+    self.commandIndex = clampRow3(self.commandIndex, #self:commandList())
+    self.cursorSeat3 = self.mine
+  end
+  self:seatCursors3(self.mine).action = self.commandIndex
+end
+
+-- ...and from the move list, the same way (the Ether / Elixir move pick reuses
+-- `moveIndex` and is the party menu's cursor on the cart, never this one).
+function M:keepMoveCursor3()
+  if not self.gen3 or self.mine == nil then return end
+  self:seatCursors3(self.mine).move = self.moveIndex
+end
+
+-- Own seat `index`'s cursors back on the first row: both, or (`moveOnly`) the
+-- move list's alone.  A live action cursor that was this seat's is let go
+-- too (`cursorSeat3` 0, which no seat is), so the next menu re-reads the
+-- dropped pair rather than writing the stale row back over it.
+function M:dropCursors3(index, moveOnly)
+  if index == nil then return false end
+  local kept = self.cursors3 and self.cursors3[index]
+  if moveOnly then
+    if kept then kept.move = nil end
+    return true
+  end
+  if self.cursors3 then self.cursors3[index] = nil end
+  if self.cursorSeat3 == index then self.cursorSeat3 = 0 end
+  return true
+end
+
+-- A referee event that resets one of our seats' cursors, read as it arrives
+-- (ahead of the batch's own turn reset, which then opens the menus on what is
+-- left): our seat's `send` or `switch` (SwitchInClearSetData) and `faint`
+-- (FaintClearSetData), both cursors; a TRANSFORM's `form` -- the one that
+-- names a species, which a Castform's weather form never does -- the move
+-- cursor alone (Cmd_transformdataexecution).  A foe's, a partner's, anybody
+-- else's moves nothing of ours.
+function M:noteCursorEvent3(msg)
+  if not self.gen3 or type(msg) ~= "table" then return false end
+  local kind = msg.t
+  if kind ~= "send" and kind ~= "switch" and kind ~= "faint" and kind ~= "form" then
+    return false
+  end
+  local index = self:medSlotOf(msg)
+  if not self:isMine(index) then return false end
+  if kind == "form" then
+    if msg.speciesId == nil then return false end
+    return self:dropCursors3(index, true)
+  end
+  return self:dropCursors3(index)
+end
+
+-- Where a fresh turn -- or a seat's freshly opened menu -- puts the cursors:
+-- the move list's and the aim's on their first row (FIGHT re-reads the move
+-- cursor through `rememberedMove`; the aim is asked afresh every time), and
+-- the action menu on FIGHT, or on Gen 3 where this seat left it.
+function M:freshTurnCursors()
+  self.moveIndex = 1
+  self.targetIndex = 1
+  if self.gen3 then return self:restoreCursors3() end
+  self.commandIndex = 1
+  return 1
+end
+
 -- Where the move list opens: the move this monster last actually used, or its
--- first move if it has not attacked yet.
+-- first move if it has not attacked yet.  On Gen 3, the seat's own move
+-- cursor, where it was last left (`cursors3`; the cart's gMoveSelectionCursor
+-- -- see `restoreCursors3`).
 --
 -- Clamped against the list it has *now* rather than the one it had then --
 -- Transform and Mimic rewrite a sheet mid-fight, and a cursor left past the
 -- end would open on a row that is not drawn.
 function M:rememberedMove()
+  if self.gen3 then
+    local kept = self.mine ~= nil and self.cursors3 and self.cursors3[self.mine] or nil
+    return clampRow3(kept and kept.move, #self:liveMoves())
+  end
   local slot = self:mySlot()
   local moves = self:liveMoves()
   local key = (slot and slot.active) or 1
@@ -2447,14 +2639,24 @@ end
 
 function M:updateCommand(input)
   self.commandIndex = self.commandIndex or 1
+  -- Gen 3: this is the choosing seat's own cursor, kept as it stands and as
+  -- it walks (`keepActionCursor3`), before the A below can hand the menu to
+  -- the next seat.
+  self:keepActionCursor3()
   local commands = self:commandList()
   local moved = gridPress(self.commandIndex, #commands, input, self:commandCols())
   if moved then
     self.commandIndex = moved
+    self:keepActionCursor3()
   elseif input:wasPressed("a") then
     local command = commands[self.commandIndex]
     local locked = command == "FIGHT" and self:lockedFightSlot() or nil
-    if locked then
+    if command == "FIGHT" and self.palace3 then
+      -- The Battle Palace: FIGHT is the nature's pick, never the move list
+      -- or a target (`palacePick3`; pret battle_controller_player.c:2631
+      -- PlayerHandleChooseMove -> PlayerChooseMoveInBattlePalace).
+      self:palacePick3()
+    elseif locked then
       -- A Bide going on (Gold's `.locked_in`), or Red's monster asleep or
       -- frozen (MediatedBattle `lockedFightSlot` has both carts' rule): no
       -- move list -- the slot, past its PP, at the first foe, which the
@@ -2710,9 +2912,15 @@ function M:updateMove(input)
   -- One name per row (drawMoves), so UP/DOWN step the list. LEFT/RIGHT stay
   -- aliases -- same habit as the target column -- and both ends wrap, matching
   -- Gen 1 FIGHT and MediatedBattle:updateMoveMenu.
+  --
+  -- Gen 3 keeps the row under the cursor as the seat's move cursor
+  -- (`keepMoveCursor3`), walked or confirmed or backed out of -- the cart's
+  -- gMoveSelectionCursor moves with the d-pad, not with the A.
+  self:keepMoveCursor3()
   local moved = listPress(self.moveIndex or 1, #moves, input, true)
   if moved then
     self.moveIndex = moved
+    self:keepMoveCursor3()
   elseif input:wasPressed("b") then
     self.phase = "choose"
   elseif input:wasPressed("a") then
@@ -3977,8 +4185,10 @@ function M:commit(action)
   -- item's `move` names the move being restored rather than one being used.
   -- Written only once the choice actually goes (mediated send, or host-sim
   -- below): a refused 0-PP send must not open next turn on a row nobody took.
+  -- Red and Gold only: Gen 3's move list keeps the seat's own cursor
+  -- (`keepMoveCursor3`), which a refused row stays under, as the cart's does.
   local memKey, memMove
-  if action and action.kind == nil and tonumber(action.move) then
+  if action and action.kind == nil and tonumber(action.move) and not self.gen3 then
     local slot = self:mySlot()
     memKey = (slot and slot.active) or 1
     memMove = math.floor(action.move)
@@ -4461,6 +4671,20 @@ function M:playEvents(events)
       if type(line) == "string" and line ~= "" then
         self.messages[#self.messages + 1] = { text = line }
       end
+    elseif event.kind == "palace3" then
+      -- A Battle Palace line (medRows3): the cart's, naming the battler on
+      -- that seat at this point in the batch -- either side's, the cart says
+      -- both -- else the referee's own sentence, so it is read exactly once.
+      local who = showing(event.slot)
+      local line = nil
+      if type(Mediated.palaceText3) == "function" then
+        line = Mediated.palaceText3(event.token, event.amount, who and who.name,
+          not self:foeSide(event.slot))
+      end
+      line = line or event.fallback
+      if type(line) == "string" and line ~= "" then
+        self.messages[#self.messages + 1] = { text = line }
+      end
     elseif event.kind == "learn" then
       self:learnMove(event)
     elseif event.kind == "send" then
@@ -4528,6 +4752,9 @@ function M:playEvents(events)
         -- owed to the one that left has played by the time the ball leaves the
         -- trainer's hand. See `queueSendBall` for the seats that get one.
         self:queueSendBall(event.slot)
+        -- ...and on the GBA double page, the trainer standing there leaving
+        -- as its first monsters come (`queueSlideOut3`).
+        self:queueSlideOut3(event.slot)
         self.messages[#self.messages + 1] =
           { swap = event.slot, battler = slot.battler }
       end
@@ -4618,7 +4845,12 @@ function M:playEvents(events)
   -- unreachable: an ask no client is displaying, that a forged yes could still
   -- be accepted against.
   if self.host then self.runAsks = nil end
-  -- Every turn starts on FIGHT.
+  -- A solo double's next turn starts at mon 1 again, nothing filed -- unless
+  -- this batch is a replacement still being answered, whose picker owns
+  -- `mine` until the last owing seat has picked.  Ahead of the cursors below,
+  -- which are the seat's that `mine` names.
+  if self.ownSlots and not self.replacing then self:resetChooser() end
+  -- Red and Gold: every turn starts on FIGHT.
   --
   -- The cursor used to keep whatever row was picked last, and that is a trap:
   -- land it on ITEM, empty the bag, and the menu opens an empty list, bounces
@@ -4630,13 +4862,28 @@ function M:playEvents(events)
   -- one more: a client whose picker was closed by an auto-picked turn would
   -- otherwise re-open next turn still pointing at half of a decision that was
   -- taken out of its hands.
-  self.commandIndex = 1
-  self.moveIndex = 1
-  self.targetIndex = 1
-  -- ...and a solo double's next turn starts at mon 1 again, nothing filed --
-  -- unless this batch is a replacement still being answered, whose picker
-  -- owns `mine` until the last owing seat has picked.
-  if self.ownSlots and not self.replacing then self:resetChooser() end
+  --
+  -- Gen 3 opens where the seat left it instead -- the carts keep the action
+  -- and move cursors per battler between turns (`restoreCursors3` has the
+  -- rule) -- and neither trap comes back with it:
+  --
+  --   * the empty bag no longer bounces.  The flicker was the one-frame line
+  --     (MSG_MIN_DWELL and the dwell in `update` have why); BAG with nothing
+  --     usable now says so, is read, and hands the action menu back on BAG,
+  --     where the cart leaves it too (pret opens the bag regardless and comes
+  --     back with no item to STATE_BEFORE_ACTION_CHOSEN, pokeemerald
+  --     battle_main.c:4407, under the same gActionSelectionCursor).  Input is
+  --     edge-triggered and the handover takes a frame of its own, so nothing
+  --     presses A on it again: the menu sits on BAG until the player moves,
+  --     and every other command still answers the turn.
+  --   * no half decision survives.  What is kept is two rows -- where the
+  --     action menu and the move list open -- never a phase: this batch has
+  --     closed every picker above, the aim goes back to its first row here,
+  --     and a seat's menu opens clean (`openSeatMenu`).  A seat the referee
+  --     or a clock answered keeps its rows, as the cart's do: pret never asks
+  --     a battler whose action is forced (a recharge, a rampage), so nothing
+  --     writes its cursors that turn.
+  self:freshTurnCursors()
 end
 
 function M:resultFor(winner)
@@ -5148,6 +5395,11 @@ function M:applySwap(row)
   -- opening send-outs are being played, which is what lets `snapDisplay` tell
   -- "still waiting for the batch" from "a seat nobody is coming to".
   if self.introHide then self.introHide[row.swap] = nil end
+  -- A foe out with its trainer's face still up: the face goes (the GBA double
+  -- page's send-out slide has normally taken it already, `startSlide3`).
+  if self.showEnemyTrainer and self.soloDouble and self:foeSide(row.swap) then
+    self.showEnemyTrainer = nil
+  end
   if M.mediates(self.mode) then self.medOpened = true end
   -- The screen has just caught up with a send-out, so this is the frame the new
   -- monster appears on the arena. Same beat the intro gets (and the same beat
@@ -7904,13 +8156,23 @@ end
 -- trainer's figure (`from = "trainer"`); a motion beat moves the monster
 -- itself.  Answers how long the longest beat lasts -- the cart's battle
 -- script waits for a `playanimation` to finish, so the queue is held as long
--- (`startAnim`) -- or nil when nothing was drawn: off the arena, or a clip
--- the cart skips for a SUBSTITUTE standing on its battler's seat
--- (Vfx.subSilences3, pret TryHandleLaunchBattleTableAnimation), which then
--- holds nothing either.
+-- (`startAnim`) -- or nil when nothing was drawn: a clip the cart skips for a
+-- SUBSTITUTE standing on its battler's seat (Vfx.subSilences3, pret
+-- TryHandleLaunchBattleTableAnimation), which then holds nothing either.
+--
+-- On the arena the beats are `fx` like any other effect (sway / nod / tremble
+-- seat motions, `vfx` particles).  On the GBA page (CLASSIC BATTLE UI) they
+-- are this screen's own short records (`classicBeat3`) -- a motion moves the
+-- seat's pic, a thrown beat arcs from our trainer, anything else flashes the
+-- battler -- which `gen3ClassicModel` hands ClassicBattle per seat
+-- (`gen3LookSeat`'s dx / dy / flash) and as `throws3`.  MediatedBattle's
+-- startGeneralLook3 is the single screen's twin.
 function M:startGeneralLook3(row)
   self.moveVfx = nil
-  if not self:usesBattlefield() or type(row) ~= "table" then return nil end
+  if type(row) ~= "table" then return nil end
+  local arena = self:usesBattlefield()
+  -- Off the arena only a Gen 3 page has a way to show one.
+  if not arena and not self.gen3 then return nil end
   local beats = Vfx.forGeneral3(row.anim, row.amount)
   if not beats then return nil end
   local event = row.from
@@ -7930,18 +8192,115 @@ function M:startGeneralLook3(row)
     local at = event
     if beat.on == "own" then at = own elseif beat.on == "foe" then at = foe end
     if at ~= nil then
-      local fx
-      if beat.motion then
-        fx = self:emitFx(beat.motion, at, nil, { duration = beat.duration, wait = beat.wait })
+      local life
+      if arena then
+        local fx
+        if beat.motion then
+          fx = self:emitFx(beat.motion, at, nil, { duration = beat.duration, wait = beat.wait })
+        else
+          fx = self:emitVfx(beat, at, nil, beat.from == "trainer" and "ally" or nil)
+        end
+        life = fx and tonumber(fx.duration) or 0
       else
-        fx = self:emitVfx(beat, at, nil, beat.from == "trainer" and "ally" or nil)
+        life = self:classicBeat3(beat, at)
       end
-      local life = fx and tonumber(fx.duration) or 0
       if life > span then span = life end
     end
   end
   if span <= 0 then return nil end
   return span
+end
+
+-- One beat of a general clip on the GBA page (`startGeneralLook3`): a record
+-- on `classicFx3` -- the seat it plays on (`slot`, the screen's seat index) and
+-- that seat's side -- stepped by `stepClassicFx3` on the arena's own clock and
+-- read by `gen3ClassicModel`.  `kind` is the motion ("sway" / "nod" /
+-- "tremble"), "throw" for a beat thrown from the trainer (the Safari's bait,
+-- rock and POKeBLOCK -- never sent in a double today, kept for the twin's
+-- sake), or "flash" for every other particle beat: the page has no particle
+-- painter, so the battler lights up under it instead.  Answers the beat's
+-- life in seconds.  MediatedBattle:classicBeat3's twin, per seat.
+function M:classicBeat3(beat, at)
+  if type(beat) ~= "table" or at == nil then return 0 end
+  local life
+  local rec = { side = self:fxSideFor(at), slot = at, elapsed = 0, t = 0 }
+  if beat.motion then
+    rec.kind, rec.wait = beat.motion, beat.wait
+    life = tonumber(beat.duration) or FX_SPAN[beat.motion]
+  else
+    local travels = beat.delivery == "projectile" or beat.delivery == "beam"
+    rec.kind = (beat.from == "trainer" and travels) and "throw" or "flash"
+    rec.palette = beat.palette
+    life = tonumber(beat.duration) or FX_SPAN.vfx
+  end
+  life = tonumber(life) or 0
+  if life <= 0 then return 0 end
+  rec.duration = life
+  local list = self.classicFx3
+  if type(list) ~= "table" then
+    list = {}
+    self.classicFx3 = list
+  end
+  list[#list + 1] = rec
+  return life
+end
+
+-- The GBA page's general-clip beats, advanced one update and retired at the
+-- end of their life (`stepFx`'s rule for the arena's own).
+function M:stepClassicFx3(dt)
+  local list = self.classicFx3
+  if type(list) ~= "table" or #list == 0 then return end
+  local step = tonumber(dt) or 0
+  if step <= 0 then step = 1 / 60 end
+  local kept = {}
+  for _, rec in ipairs(list) do
+    rec.elapsed = (tonumber(rec.elapsed) or 0) + step
+    local t = rec.elapsed / math.max(1e-3, tonumber(rec.duration) or 0.5)
+    if t < 1 then
+      rec.t = t
+      kept[#kept + 1] = rec
+    end
+  end
+  self.classicFx3 = (#kept > 0) and kept or nil
+end
+
+-- One seat's pic under every live beat on it (ClassicBattle.gen3LookSeat over
+-- that seat's records): dx, dy, flash -- all nil when nothing plays there.
+function M:classicLookAt3(index, isPlayer)
+  local list = self.classicFx3
+  if type(list) ~= "table" or index == nil then return nil end
+  if type(ClassicBattle.gen3LookSeat) ~= "function" then return nil end
+  local mine = nil
+  for _, rec in ipairs(list) do
+    if rec.slot == index then
+      mine = mine or {}
+      mine[#mine + 1] = rec
+    end
+  end
+  if not mine then return nil end
+  local dx, dy, flash = ClassicBattle.gen3LookSeat(mine, isPlayer and "ally" or "foe")
+  return dx, dy, flash
+end
+
+-- The GBA page's throws in flight, as ClassicBattle draws them (`throws3`):
+-- { t, from = "ally", to = "foe" | "ally", color, edge } -- the beat's palette
+-- off the catalogue (Vfx.PALETTES: its mid and edge tones).  nil when none.
+function M:classicThrows3()
+  local list = self.classicFx3
+  if type(list) ~= "table" then return nil end
+  local out = nil
+  for _, rec in ipairs(list) do
+    if rec.kind == "throw" then
+      local pal = Vfx.PALETTES and Vfx.PALETTES[rec.palette] or nil
+      out = out or {}
+      out[#out + 1] = {
+        t = rec.t, from = "ally", to = rec.side,
+        color = type(pal) == "table" and pal[2] or nil,
+        edge = type(pal) == "table" and pal[3] or nil,
+      }
+    end
+  end
+  return out
 end
 
 function M:battlerAt(slotIndex)
@@ -10560,10 +10919,9 @@ function M:closePickers()
   self.runAsk = nil
   self.phase = "wait"
   -- The cursors go back where a fresh turn would put them, so the menu that
-  -- opens next turn is not still pointing at half a decision from this one.
-  self.commandIndex = 1
-  self.moveIndex = 1
-  self.targetIndex = 1
+  -- opens next turn is not still pointing at half a decision from this one
+  -- (`freshTurnCursors`: FIGHT on Red / Gold, the seat's own row on Gen 3).
+  self:freshTurnCursors()
   return true
 end
 
@@ -10697,9 +11055,7 @@ function M:unwedge()
     -- the menu that can spend another one does (see the header).
     self:refundUnspent()
     self.phase = "choose"
-    self.commandIndex = 1
-    self.moveIndex = 1
-    self.targetIndex = 1
+    self:freshTurnCursors()
     -- A consent ask belongs to the turn that went missing with it.
     self.runAsk = nil
   end
@@ -12104,6 +12460,10 @@ function M:onBattleEvent(msg)
     end
     return true
   end
+  -- Gen 3: our seat's own switch-in, faint or TRANSFORM puts that seat's
+  -- cursors back on the first row (`noteCursorEvent3`), read as it arrives so
+  -- the batch's turn reset already opens the menu on what is left.
+  if self.gen3 then self:noteCursorEvent3(msg) end
   -- Gold's 0-HP `standing` state (BattleSim2 Turn, wave 5), read off the
   -- stream: a seat a hit left at 0 HP with no `faint` behind it -- SPIKES on
   -- a successor, PERISH SONG's count -- is still the monster in that seat
@@ -12406,6 +12766,9 @@ function M:onBattleEvent(msg)
         else
           self:resetChooser()
         end
+        -- ...on the seat's own cursor (`restoreCursors3`): a trainer's RUN
+        -- handed back reopens on RUN, as the cart's refusal does.
+        if self.gen3 then self:restoreCursors3() end
         self.phase = "messages"
         self.after = "choose"
       end
@@ -12571,8 +12934,15 @@ function M:onBattleOutcome(msg)
   end
 
   -- Why it ended, for the ending past this screen: an escape is no defeat
-  -- (Coop `onBattleOver` reads it before deciding a blackout).
+  -- (Coop `onBattleOver` reads it before deciding a blackout). `reason` is
+  -- the same on every client, and is what tells a knockout draw ("ko") from a
+  -- timeout. `how` is kept for the fights this client referees itself (a solo
+  -- double's facility forfeit, below); a hub's outcome never carries it --
+  -- Wire.battleOutcome and the hub's Relay.settleMediated pass only the
+  -- fields they name -- so a co-op knockout draw arrives with `how` nil and is
+  -- read off `reason` (CoopField.knockoutHow3's fallback).
   self.medEndReason = msg.reason
+  self.medEndHow = msg.how
   -- A wild fight's escape -- the party's RUN, a ROAR / WHIRLWIND sending the
   -- wild monster off, its own flight -- ends on its line with no fanfare on
   -- Red / Gold (MediatedBattle `finish` has the carts' reason).
@@ -13716,17 +14086,37 @@ local EXP_PER_FAINT3 = 6
 -- shared branches of medRows.
 function M:medRows3(msg, rows, index, slot, say)
   local kind = msg.t
-  -- An `obey` row owns exactly the next event -- the referee's own sentence for
-  -- the same outcome, which it always emits straight behind (Move.lua
-  -- Bm:_obeyLine) -- and nothing after.  Matched on `seq` so a lossy stream
-  -- that dropped that sentence cannot swallow the line after it.  Kept on the
-  -- row rather than said: it is what the row prints when the player's text
-  -- pack has no line for the outcome (`playEvents`, obey3).
-  local obey = self.obeyRow3
-  self.obeyRow3 = nil
-  if kind == "msg" and obey and tonumber(msg.seq) == obey.seq + 1 then
+  -- An `obey` row -- and a `palace` row, the same way -- owns exactly the next
+  -- event: the referee's own sentence for the same outcome, which it always
+  -- emits straight behind (Move.lua Bm:_obeyLine; Palace.lua's flavor and
+  -- "incapable" lines) -- and nothing after.  Matched on `seq` so a lossy
+  -- stream that dropped that sentence cannot swallow the line after it.  Kept
+  -- on the row rather than said: it is what the row prints when the player's
+  -- text pack has no line for the outcome (`playEvents`, obey3 / palace3).
+  local echo = self.echoRow3
+  self.echoRow3 = nil
+  if kind == "msg" and echo and tonumber(msg.seq) == echo.seq + 1 then
     -- No mark ever reaches the box (`medViewLine`; Gen 3 writes none).
-    obey.fallback = self:medViewLine(msg.text)
+    echo.fallback = self:medViewLine(msg.text)
+    return true
+  end
+  if kind == "palace" then
+    -- The Battle Palace's two lines of its own (contract C6, wave 3 R3):
+    -- "<MON> appears incapable of using its power!" (pret battle_scripts_1.s
+    -- BattleScript_MoveUsedLoafingAround, STRINGID_PKMNINCAPABLEOFPOWER) and
+    -- the half-HP flavor line (BattleScript_PalacePrintFlavorText,
+    -- gBattlePalaceFlavorTextTable[amount]), in the cart's words when the row
+    -- plays (MediatedBattle.palaceText3; `sayPalace3`'s twin).  Neither has a
+    -- look on the cart.
+    if index then
+      local row = { kind = "palace3", slot = index, token = msg.text, amount = msg.amount }
+      rows[#rows + 1] = row
+      local seq = tonumber(msg.seq)
+      if seq then
+        row.seq = seq
+        self.echoRow3 = row
+      end
+    end
     return true
   end
   if kind == "obey" then
@@ -13743,7 +14133,7 @@ function M:medRows3(msg, rows, index, slot, say)
       local seq = tonumber(msg.seq)
       if seq then
         row.seq = seq
-        self.obeyRow3 = row
+        self.echoRow3 = row
       end
     end
     return true
@@ -14719,6 +15109,13 @@ function M:gen3SeatModel(index, isPlayer)
     if battler.shownExpFrac == nil then self:seedExpClock(battler) end
     seat.expFrac = battler.shownExpFrac
   end
+  -- A general clip's beats on this seat's pic (`classicBeat3`): the pic sways,
+  -- nods or trembles, or lights up under a beat the page has no particles for
+  -- (ClassicBattle.gen3LookSeat; the double's drawStandingPic reads the three).
+  local dx, dy, flash = self:classicLookAt3(index, isPlayer)
+  if dx and dx ~= 0 then seat.dx = dx end
+  if dy and dy ~= 0 then seat.dy = dy end
+  if flash and flash > 0 then seat.flash = flash end
   if not isPlayer and self.mode == "coop_wild" then
     -- The dex's answer is read once per fight for the page (a catch ends the
     -- fight); the throw itself still asks afresh (commitMediatedItem).
@@ -14787,12 +15184,31 @@ function M:gen3ClassicModel()
   end
   -- A solo double's two trainers and its partner stand where the cart puts
   -- them (`gen3Figures3`) -- the page's one centred trainer and one back pic
-  -- are not theirs.
-  if double and (self.pair3 or self.partner3 or self.endTrainer3) then
+  -- are not theirs -- and on the GBA page every trainer leaving at the
+  -- send-out is a figure too, drawn over the monsters coming out.
+  local slides = double ~= nil and self:slidesOnPage3()
+  if double and (self.pair3 or self.partner3 or self.endTrainer3
+                 or (slides and (self.foeSlide3 or self.allySlide3))) then
     if self.pair3 or self.endTrainer3 then model.trainer = nil end
     if self.partner3 then model.playerBack = nil end
     model.figures3 = self:gen3Figures3(double)
   end
+  if slides then
+    -- The opening slide (`introSlideDx3`): the lone trainer in from the
+    -- left, our back in from the right, no healthbox yet (the seats are not
+    -- on the page until they come out, `gen3DoubleView`).
+    local intro = self:introSlideDx3()
+    if intro > 0 then
+      if model.trainer then model.trainer.dx = -intro end
+      if model.playerBack then model.playerBack.dx = intro end
+      model.hideBoxes = true
+    end
+    -- Ours leaving, then gone for good: the back is a figure while it goes
+    -- (`gen3Figures3`) and nobody's afterwards.
+    if self.allySlide3 or self.allyGone3 then model.playerBack = nil end
+  end
+  -- A general clip's throws in flight on this page (`classicBeat3`).
+  model.throws3 = self:classicThrows3()
   local mine = self:mySlot()
   model.prompt = self:choosePrompt()
   -- The POKéMON / BAG / TARGET lists are the page's expensive half (a front
@@ -15322,13 +15738,14 @@ function M:ownSeatOwes(index)
   return true
 end
 
--- A seat's command menu, opened fresh: every cursor where a new turn puts it,
--- and the bag list rebuilt (what the other seat has filed is out of it).
+-- A seat's command menu, opened fresh: every cursor where a new turn puts it
+-- -- the action menu on this seat's own row, which is FIGHT until the seat
+-- walks it (`freshTurnCursors`, `restoreCursors3`: pret draws each battler's
+-- menu at its own gActionSelectionCursor) -- and the bag list rebuilt (what
+-- the other seat has filed is out of it).
 function M:openSeatMenu()
   self.phase = "choose"
-  self.commandIndex = 1
-  self.moveIndex = 1
-  self.targetIndex = 1
+  self:freshTurnCursors()
   self.switchIndex = 1
   self.itemIndex = 1
   self.itemPick, self.itemPartyIndex = nil, nil
@@ -15424,21 +15841,57 @@ function M:commitOwn(action)
   return true
 end
 
+-- ------- the Battle Palace (newSoloDouble's `palace`)
+--
+-- A Battle Palace double (pret FRONTIER_MODE_DOUBLES under BATTLE_TYPE_PALACE)
+-- on this screen: FIGHT opens no move list and asks for no target -- the
+-- monster's nature picks both (pret battle_controller_player.c:2631
+-- PlayerHandleChooseMove -> PlayerChooseMoveInBattlePalace,
+-- ChooseMoveAndTargetInBattlePalace) -- so the kind's `pick(screen, field)`
+-- files that choice for the seat choosing (its field slot, as every choice
+-- of this screen names it) and says whether it went.  A pick that went is
+-- this seat's command, kept as any other (`noteFiled`: B on the next seat's
+-- menu takes it back through the referee's `cancel`, as pret's
+-- B_ACTION_CANCEL_PARTNER does in the Palace too) and the chooser moves on;
+-- one that did not leaves the menu up; one that throws is said once.
+-- MediatedBattle:palacePick3 is the single screen's twin.  BAG and RUN are
+-- the facility's as ever (`bagRefused3`, `forfeits3`).
+--
+-- src/Solo3/Facility.lua seats a Palace double on this screen only while
+-- this says the screen can file the pick.
+M.SOLO_DOUBLE_PALACE3 = true
+
+function M:palacePick3()
+  local palace = self.palace3
+  if not (palace and type(palace.pick) == "function") then return false end
+  local index = self.mine
+  local ok, took = pcall(palace.pick, self, self:medFieldOf(index))
+  if not ok then
+    if not self.palaceWarned3 then
+      self.palaceWarned3 = true
+      mod.log:warn("the Battle Palace pick failed (%s); the menu stays open -- choose FIGHT "
+        .. "again, and report this with the Palace battle you were in", tostring(took))
+    end
+    return false
+  end
+  if took ~= true then return false end
+  self:noteFiled(index, { kind = "palace", slot = index })
+  if self:advanceChooser() then return true end
+  self.phase = "wait"
+  return true
+end
+
 -- A command the referee took for own seat `index`: what this screen keeps of
 -- it until the turn turns -- the command (for `siblingTaken`, and for B to
--- take back), the seat answered (`acted`), the move list's cursor for next
--- turn (`rememberedMove`), and an item's pending spend, made when the
--- referee's `item` names this seat (`confirmOwnItem`), as co-op's one pending
--- item is.
+-- take back), the seat answered (`acted`), and an item's pending spend, made
+-- when the referee's `item` names this seat (`confirmOwnItem`), as co-op's one
+-- pending item is.  The seat's cursors for next turn are not filed here: the
+-- menus kept them as they were walked (`keepActionCursor3`,
+-- `keepMoveCursor3`), the cart's way.
 function M:noteFiled(index, action)
   self.filed = self.filed or {}
   self.filed[index] = { action = action, command = self.commandIndex }
   self:markActed(index)
-  if action.kind == nil and tonumber(action.move) then
-    local slot = self.sim and self.sim:slot(index)
-    self.moveMemory = self.moveMemory or {}
-    self.moveMemory[(slot and slot.active) or 1] = math.floor(tonumber(action.move))
-  end
   if self.pendingItem then
     self.pendingItems = self.pendingItems or {}
     self.pendingItems[index] = { id = self.pendingItem, slot = self.pendingItemSlot }
@@ -15877,6 +16330,19 @@ function M:composeIntro3()
     for part in (tostring(line) .. "\n\n"):gmatch("(.-)\n%s*\n%s*") do
       if part ~= "" then rows[#rows + 1] = { kind = "msg", text = part } end
     end
+    -- The arrivals in the order they come out: on the GBA page a partner's
+    -- before ours -- his controller sends after 24 frames, ours after 31
+    -- (`revealAt3`) -- the line still naming them in slot order.
+    if which == "a" and self.partner3 and self:slidesOnPage3() then
+      local partnerFirst = {}
+      for _, row in ipairs(list) do
+        if self:isPartnerSeat3(row.slot) then partnerFirst[#partnerFirst + 1] = row end
+      end
+      for _, row in ipairs(list) do
+        if not self:isPartnerSeat3(row.slot) then partnerFirst[#partnerFirst + 1] = row end
+      end
+      list = partnerFirst
+    end
     for _, row in ipairs(list) do
       if row.index then
         rows[#rows + 1] = { kind = "send", slot = row.slot, index = row.index,
@@ -16086,46 +16552,370 @@ M.PAIR_PIC_X3 = { a = 200, b = 152 }
 M.END_PIC_X3 = 208
 M.MULTI_BACK_X3 = { player = 32, partner = 90 }
 
+-- A partner who is not Steven has no back pic, and the cart draws both of our
+-- trainers by their FRONT pics instead (pret battle_controller_player.c:2304
+-- PlayerHandleDrawTrainerPic's INGAME_PARTNER arm and
+-- battle_controller_player_partner.c:1309): the partner's at x 32, the
+-- player's own (PlayerGenderToFrontTrainerPicId) at x 90, both hFlip'd, at
+-- y (8 - size) * 4 + 80 moved down by y2 = 48.  That is low: the message box
+-- (BG0, priority 0) covers the battle sprites (OAM priority 2,
+-- gOamData_BattleSpritePlayerSide), so only what stands above the box's top
+-- shows -- the page crops them there (`clipY`).  The page centres every front
+-- pic on its spot (ui.lua draw_enemy_trainer), so the size term is 8's.
+M.MULTI_FRONT_X3 = { partner = 32, player = 90 }
+M.MULTI_FRONT_Y3 = 80 + 48
+
+-- ------- the trainers' two slides on the GBA double page
+--
+-- The single screen's GBA page has both of the cart's trainer slides
+-- (MediatedBattle `queueIntroSlide3` / `queueSlideOut3`); this is the double
+-- page's, on the same numbers (Mediated.INTRO_UNLOCK3 / INTRO_SLIDE_PX3 /
+-- INTRO_SLIDE_STEP3, Mediated.SLIDE_OUT3, Mediated.THROW_POSE3 /
+-- THROW_NUDGE3) and the doubles' own differences, all pret's:
+--
+--   * the opening slide.  BattleIntroDrawTrainersOrMonsSprites (pokeemerald
+--     battle_main.c:3393, pokefirered :2555) draws the player-left battler's
+--     trainer, the opponent-left's, and in a MULTI the right flanks' too, in
+--     TWO_OPPONENTS the second foe trainer: every trainer of ours in from the
+--     right (PlayerHandleDrawTrainerPic / PlayerPartnerHandleDrawTrainerPic,
+--     x2 = DISPLAY_WIDTH, -2 a frame), every foe trainer in from the left
+--     (OpponentHandleDrawTrainerPic, x2 = -DISPLAY_WIDTH, +2), each at its own
+--     place -- the lone trainer at 176, a pair at 200 / 152, our back at 80, a
+--     multi's at 32 / 90 (`gen3Figures3`) -- all held until the background's
+--     unlock (SpriteCB_TrainerSlideIn reads gIntroSlideFlags).  No healthbox
+--     until a monster is out (Intro_TryShinyAnimShowHealthbox), and the
+--     opening line waits for the sprites.
+--   * the send-out slide.  "<TRAINER> sent out X and Y!" prints, then
+--     BattleIntroOpponent1SendsOutMonAnimation sends the foe-left trainer off
+--     to x 280 over 35 frames (OpponentHandleIntroTrainerBallThrow) with its
+--     monsters out at once (Task_StartSendOutAnim: a lone trainer's double
+--     sends BOTH, pokeemerald battle_controller_opponent.c:1897; in a MULTI or
+--     TWO_OPPONENTS each trainer its own) -- and, in those, the second trainer
+--     one main-loop frame later (BattleIntroOpponent2SendsOutMonAnimation
+--     waits for nothing, battle_main.c:3610).  Then "Go! X and Y!" and ours:
+--     the player off to x -40 over 50 frames playing its throw
+--     (PlayerHandleIntroTrainerBallThrow :2931), both of ours out 31 frames in
+--     (Task_StartSendOutAnim :2978, BIT_FLANK) -- in a MULTI only the player's,
+--     the partner leaving a frame later (BattleIntroPlayer2SendsOut
+--     MonAnimation :3740) on the same 50 frames to -40 and sending its own
+--     after 24 (battle_controller_player_partner.c:1777 / :1818) -- so the
+--     partner's monster is out before ours.  FireRed's player steps through
+--     its throw's offsets as it goes (MediatedBattle's slideOut3 row has why);
+--     every Emerald back pic -- BRENDAN, MAY, STEVEN (back_pic_anims.h
+--     sAnimCmd_May_Steven_1) -- plays its throw where it stands.
+--   * a wild double is not this page's: pret slides both wild monsters in
+--     with the opening (OpponentHandleLoadMonSprite, x2 = -DISPLAY_WIDTH),
+--     but no FireRed / LeafGreen / Emerald map starts a wild double, and
+--     src/SoloBattle.lua opens this screen for trainers and facility kinds
+--     alone (`_doubleScreen3`).
+--
+-- The arena stands its figures on their edges from the start and has none of
+-- this; Red and Gold have no GBA page.
+M.PARTNER_SEND_AT3 = 24
+M.SECOND_THROW_LAG3 = 1
+
+-- Does this screen play the cart's trainer slides?  The solo double's GBA page.
+function M:slidesOnPage3()
+  return self.gen3 == true and self.soloDouble == true and not self:usesBattlefield()
+end
+
+-- The opening slide, ahead of the opening line (the cart's line waits for the
+-- sprites, CompleteOnBattlerSpriteCallbackDummy).  Every figure stands a full
+-- screen off its place until the row plays (`introPending3`).
+function M:queueIntroSlide3()
+  if not self:slidesOnPage3() then return false end
+  self.messages = self.messages or {}
+  table.insert(self.messages, 1, { slide3 = "in" })
+  self.introPending3 = true
+  return true
+end
+
+-- The send-out slide in front of an opening arrival (`playEvents`' send arm,
+-- ahead of the arrival's `swap`): the side's trainer leaving, once, and -- on
+-- our side -- the hold until this arrival's own frame (`revealAt3`).  Only
+-- an opening arrival: one still under the opening's `introHide`.
+function M:queueSlideOut3(index)
+  if not self:slidesOnPage3() or index == nil then return false end
+  if not (self.introHide and self.introHide[index]) then return false end
+  self.messages = self.messages or {}
+  if self:foeSide(index) then
+    if self.foeSlideQueued3 then
+      -- A pair's second trainer leaves a frame behind the first and sends
+      -- its own monster as it goes (BattleIntroOpponent2SendsOutMon
+      -- Animation): that arrival a frame later.  A lone trainer's second
+      -- monster comes out with its first.
+      local pair = self.pair3
+      if not (pair and index == pair.slotB) then return false end
+      self.messages[#self.messages + 1] = { slide3 = "until", side = "foe", at = M.SECOND_THROW_LAG3 }
+      return true
+    end
+    if not self.showEnemyTrainer then return false end
+    self.foeSlideQueued3 = true
+    self.messages[#self.messages + 1] = { slide3 = "out", side = "foe" }
+    return true
+  end
+  local at = self:revealAt3(index)
+  if not self.allySlideQueued3 then
+    self.allySlideQueued3 = true
+    self.messages[#self.messages + 1] = { slide3 = "out", side = "ally", at = at }
+  elseif at > (self.allySlideAt3 or 0) then
+    -- A later arrival of ours (a multi's player after the partner's) holds
+    -- until its own frame; one due with the last (a lone double's second,
+    -- BIT_FLANK) comes out with it, in the same frame.
+    self.messages[#self.messages + 1] = { slide3 = "until", side = "ally", at = at }
+  else
+    return false
+  end
+  self.allySlideAt3 = at
+  return true
+end
+
+-- The frame of our slide an arrival of ours comes out on: the partner's
+-- after its 24 (a frame behind ours), ours -- either of a lone double's, both
+-- sent together -- after 31.
+function M:revealAt3(index)
+  if self:isPartnerSeat3(index) then return M.PARTNER_SEND_AT3 + M.SECOND_THROW_LAG3 end
+  return Mediated.SLIDE_OUT3.ally.sendAt
+end
+
+-- A slide row reaching the head of the queue: its clock starts, and the
+-- queue holds for what the cart holds -- the whole opening slide; our side
+-- until its first arrival's frame, then until each later one's ("until").
+-- The foe's holds nothing: its monsters come out with it (a pair's second a
+-- frame behind, its own "until").
+function M:startSlide3(row)
+  local kind, frame = row.slide3, self.frame or 0
+  if kind == "in" then
+    self.introPending3 = nil
+    self.introSlide3 = { frame = frame, row = row }
+    return self:holdSlide3(row, Mediated.INTRO_UNLOCK3
+      + Mediated.INTRO_SLIDE_PX3 / Mediated.INTRO_SLIDE_STEP3)
+  end
+  if kind == "out" and row.side == "foe" then
+    self.showEnemyTrainer = nil
+    self.foeSlide3 = frame
+    return true
+  end
+  if kind == "out" then
+    self.allySlide3 = frame
+    return self:holdSlide3(row, row.at)
+  end
+  if kind == "until" then
+    local start
+    if row.side == "foe" then start = self.foeSlide3 else start = self.allySlide3 end
+    if not start then return false end
+    return self:holdSlide3(row, (tonumber(row.at) or 0) - (frame - start))
+  end
+  return false
+end
+
+-- Hold the queue `frames` frames on this row (an animation's hold: the line on
+-- screen stays, B skips it).
+function M:holdSlide3(row, frames)
+  frames = tonumber(frames) or 0
+  if frames <= 0 then return false end
+  self.anim = row
+  self.animPlayer = nil
+  self.animHold = frames / 60
+  self.animDwell = nil
+  return true
+end
+
+-- How far off its place every sliding figure still is (px, 0 once there): a
+-- full screen until the slide's row plays, then on the frame clock while that
+-- row holds the queue, nothing once it has let go (MediatedBattle
+-- `introSlideDx3`).
+function M:introSlideDx3()
+  if self.introPending3 then return Mediated.INTRO_SLIDE_PX3 end
+  local slide = self.introSlide3
+  if not slide then return 0 end
+  if self.anim ~= slide.row then
+    self.introSlide3 = nil
+    return 0
+  end
+  local f = (self.frame or 0) - slide.frame
+  if f < Mediated.INTRO_UNLOCK3 then return Mediated.INTRO_SLIDE_PX3 end
+  local dx = Mediated.INTRO_SLIDE_PX3 - Mediated.INTRO_SLIDE_STEP3 * (f - Mediated.INTRO_UNLOCK3)
+  if dx <= 0 then
+    self.introSlide3 = nil
+    return 0
+  end
+  return dx
+end
+
+-- Frames since `side`'s send-out slide began, or nil: never begun, or over --
+-- the trainers gone for good (`foeGone3` / `allyGone3`), a frame after the
+-- second thrower's own end.
+function M:slideOutFrame3(side)
+  local start
+  if side == "foe" then start = self.foeSlide3 else start = self.allySlide3 end
+  if not start then return nil end
+  local f = (self.frame or 0) - start
+  if f >= Mediated.SLIDE_OUT3[side].frames + M.SECOND_THROW_LAG3 then
+    if side == "foe" then
+      self.foeSlide3, self.foeGone3 = nil, true
+    else
+      self.allySlide3, self.allyGone3 = nil, true
+    end
+    return nil
+  end
+  return f
+end
+
+-- One leaving figure's offset from `from` toward `to` at frame `f` of its own
+-- `frames` (StartAnimLinearTranslation: straight, even), 0 before it starts,
+-- nil once it is off.  Pure.
+function M.slideOutDx3(from, to, frames, f)
+  f = tonumber(f) or 0
+  frames = math.max(1, tonumber(frames) or 1)
+  if f >= frames then return nil end
+  return floor((to - from) * math.max(0, f) / frames + 0.5)
+end
+
+-- A back pic's throw at frame `f` of its slide (back_pic_anims.h anim 1,
+-- Mediated.THROW_POSE3): its strip frame and -- FireRed's player alone, on
+-- PlayerThrowBall_StartAnimLinearTranslation -- the nudge right of its place
+-- (Mediated.THROW_NUDGE3).  Pure.
+function M.throwPose3(pose, f, still)
+  local steps = Mediated.THROW_POSE3[pose] or Mediated.THROW_POSE3.red
+  f = math.max(0, tonumber(f) or 0)
+  for i, step in ipairs(steps) do
+    if f < step[2] then
+      return step[1], (not still and Mediated.THROW_NUDGE3[i - 1]) or 0
+    end
+    f = f - step[2]
+  end
+  return 0, 0
+end
+
+-- This cart's back-pic throw: FireRed / LeafGreen's RED / LEAF ("red", walked
+-- through its offsets), Emerald's ("rse", played in place).
+local function throwPoseOf3()
+  local family = Gen3.family and Gen3.family() or "frlg"
+  if family == "rse" then return "rse", true end
+  return "red", false
+end
+
 -- The figures the page draws over its field (`drawFigures3`): { kind =
--- "front", pic = TRAINER_PIC_*, x, y, who } and { kind = "back", back =
--- TRAINER_BACK_PIC_* index (a number, or the battle profile's backPics key),
--- x, y, who }; nil when this fight has none.  `double` is gen3DoubleView's.
+-- "front", pic = TRAINER_PIC_*, x, y, who, flip?, clipY?, leaving? } and {
+-- kind = "back", back = TRAINER_BACK_PIC_* index (a number, or the battle
+-- profile's backPics key), x, y, who, frame?, leaving? }; nil when this fight
+-- has none.  `flip` mirrors a front pic (the sprite's hFlip); `clipY` is the
+-- page row nothing of it is drawn at or below (the message box over it);
+-- `frame` is a back pic's strip frame (its throw); `leaving` marks a trainer
+-- on its way off at the send-out, drawn over the monsters coming out.  `x`
+-- is where it is drawn now, the slides' offsets included.  `double` is
+-- gen3DoubleView's.
 function M:gen3Figures3(double)
   if not self.soloDouble then return nil end
   local G = ClassicBattle.G3 or {}
   local out = {}
   local pair = self.pair3
-  local function front(t, x, who)
+  -- The GBA page's slides (`slidesOnPage3`): the opening's offset, foes in
+  -- from the left and ours from the right, and each side's send-out slide.
+  local slides = self:slidesOnPage3()
+  local intro = slides and self:introSlideDx3() or 0
+  local function front(t, x, who, leaving)
     local pic = type(t) == "table" and tonumber(t.trainerPic or t.pic) or nil
     if pic then
-      out[#out + 1] = { kind = "front", pic = pic, x = x, y = G.TRAINER_Y or 40, who = who }
+      out[#out + 1] = { kind = "front", pic = pic, x = x, y = G.TRAINER_Y or 40, who = who,
+                        leaving = leaving }
     end
   end
-  if pair and self.showEnemyTrainer then
-    front(pair.a, M.PAIR_PIC_X3.a, "a")
-    front(pair.b, M.PAIR_PIC_X3.b, "b")
+  -- A foe trainer on its way off to x 280 at frame `f` of its own slide.
+  local function leavingFoe(t, x, who, f)
+    local spec = Mediated.SLIDE_OUT3.foe
+    local dx = M.slideOutDx3(x, spec.to, spec.frames, f)
+    if dx then front(t, x + dx, who, true) end
+  end
+  local foeOut = (slides and not self.endTrainer3) and self:slideOutFrame3("foe") or nil
+  if foeOut then
+    if pair then
+      leavingFoe(pair.a, M.PAIR_PIC_X3.a, "a", foeOut)
+      leavingFoe(pair.b, M.PAIR_PIC_X3.b, "b", foeOut - M.SECOND_THROW_LAG3)
+    else
+      leavingFoe(self.trainer, G.TRAINER_X or 176, "a", foeOut)
+    end
+  elseif pair and self.showEnemyTrainer then
+    front(pair.a, M.PAIR_PIC_X3.a - intro, "a")
+    front(pair.b, M.PAIR_PIC_X3.b - intro, "b")
   elseif self.endTrainer3 then
     local t = (self.endTrainer3 == "b" and pair) and pair.b or self.trainer
     front(t, M.END_PIC_X3, self.endTrainer3)
   end
   local partner = self.partner3
-  if partner and self:alliesUnseen3(double) then
-    local player = Gen3.player()
-    local y = G.PLAYER_BACK_Y or 80
-    out[#out + 1] = { kind = "back", back = player and player.gender or 0,
-                      x = M.MULTI_BACK_X3.player, y = y, who = "player" }
-    local back = partner.trainer.backPic or partner.trainer.partnerBackPic
-    if back ~= nil then
-      out[#out + 1] = { kind = "back", back = back, x = M.MULTI_BACK_X3.partner, y = y,
-                        who = "partner" }
-    elseif tonumber(partner.trainer.trainerPic) then
-      -- No back pic for this partner: the cart draws a frontier partner by
-      -- his front pic there (battle_controller_player_partner.c:1309).
-      out[#out + 1] = { kind = "front", pic = tonumber(partner.trainer.trainerPic),
-                        x = M.MULTI_BACK_X3.partner, y = y, who = "partner" }
+  local allyOut = slides and self:slideOutFrame3("ally") or nil
+  if allyOut then
+    -- Ours on the way off to x -40 (`slideOutFrame3`): the player's from the
+    -- slide's first frame, the partner's a frame behind, each back pic in its
+    -- throw (`throwPose3`; STEVEN's is Emerald's, played in place).
+    local spec = Mediated.SLIDE_OUT3.ally
+    local standing = partner and self:allyFigures3(G)
+      or { { kind = "back", back = self:playerGender3(), x = G.PLAYER_BACK_X or 80,
+             y = G.PLAYER_BACK_Y or 80, who = "player" } }
+    for _, fig in ipairs(standing) do
+      local f = (fig.who == "player") and allyOut or (allyOut - M.SECOND_THROW_LAG3)
+      local dx = M.slideOutDx3(fig.x, spec.to, spec.frames, f)
+      if dx then
+        fig.x, fig.leaving = fig.x + dx, true
+        if fig.kind == "back" then
+          local pose, still = throwPoseOf3()
+          if fig.who ~= "player" then pose, still = "rse", true end
+          local frame, nudge = M.throwPose3(pose, f, still)
+          fig.frame, fig.x = frame, fig.x + nudge
+        end
+        out[#out + 1] = fig
+      end
+    end
+  elseif partner and not self.allyGone3 and self:alliesUnseen3(double) then
+    for _, fig in ipairs(self:allyFigures3(G)) do
+      fig.x = fig.x + intro
+      out[#out + 1] = fig
     end
   end
   if #out == 0 then return nil end
+  return out
+end
+
+-- The player's gender, the index of the player's back pic (TRAINER_BACK_PIC_*
+-- 0 / 1 on either cart).
+function M:playerGender3()
+  local player = Gen3.player()
+  return player and player.gender or 0
+end
+
+-- Our side's trainers where a multi stands them before anybody of ours is out:
+-- Steven's and the player's backs, or a frontier partner's front pic and the
+-- player's own (M.MULTI_BACK_X3 / M.MULTI_FRONT_X3 above).
+function M:allyFigures3(G)
+  local out = {}
+  local partner = self.partner3
+  if not partner then return out end
+  local gender = self:playerGender3()
+  local trainer = type(partner.trainer) == "table" and partner.trainer or {}
+  local back = trainer.backPic or trainer.partnerBackPic
+  if back ~= nil then
+    -- Steven: both backs (the player's battler 0 on the left flank).
+    local y = G.PLAYER_BACK_Y or 80
+    out[#out + 1] = { kind = "back", back = gender, x = M.MULTI_BACK_X3.player, y = y,
+                      who = "player" }
+    out[#out + 1] = { kind = "back", back = back, x = M.MULTI_BACK_X3.partner, y = y,
+                      who = "partner" }
+  else
+    -- A frontier partner: both front pics, flipped, under the box's edge
+    -- (M.MULTI_FRONT_X3 above).  A pic the cart cannot name is left out.
+    local y, clip = M.MULTI_FRONT_Y3, G.PANEL_Y or 112
+    local his = tonumber(trainer.trainerPic or trainer.pic)
+    if his then
+      out[#out + 1] = { kind = "front", pic = his, x = M.MULTI_FRONT_X3.partner, y = y,
+                        who = "partner", flip = true, clipY = clip }
+    end
+    local mine = Battlefield.gen3PlayerFrontPicId(gender)
+    if mine then
+      out[#out + 1] = { kind = "front", pic = mine, x = M.MULTI_FRONT_X3.player, y = y,
+                        who = "player", flip = true, clipY = clip }
+    end
+  end
   return out
 end
 
@@ -16147,10 +16937,51 @@ end
 
 -- The figures, drawn into the 240x160 page over the field ClassicBattle
 -- painted (never over a POKéMON page, which is the whole page): a front pic
--- centred on its spot, a back pic's first 64x64 frame (the page's own
--- drawPlayerBack rule).  The pics are the player's cart's (Battlefield's
--- Gen 3 art doors).
+-- centred on its spot -- mirrored when `flip`, cut off at `clipY` -- a back
+-- pic's first 64x64 frame (the page's own drawPlayerBack rule).  The pics are
+-- the player's cart's (Battlefield's Gen 3 art doors).
 local backQuads3 = setmetatable({}, { __mode = "k" })
+local frontQuads3 = setmetatable({}, { __mode = "k" })
+
+-- Where one front figure lands on the page: its left and top, the rows of it
+-- drawn (all of them, or those above `clipY`) and whether it is mirrored.
+-- Pure.
+function M.figureRect3(f, iw, ih)
+  iw, ih = tonumber(iw) or 64, tonumber(ih) or 64
+  local x0 = floor((tonumber(f.x) or 0) - floor(iw / 2))
+  local y0 = floor((tonumber(f.y) or 0) - floor(ih / 2))
+  local rows = ih
+  local clip = tonumber(f.clipY)
+  if clip then rows = math.max(0, math.min(ih, clip - y0)) end
+  return x0, y0, rows, f.flip == true
+end
+
+local function drawFront3(gfx, img, f)
+  local iw, ih = img:getDimensions()
+  local x0, y0, rows, flip = M.figureRect3(f, iw, ih)
+  if rows <= 0 then return end
+  gfx.setColor(1, 1, 1, 1)
+  if rows >= ih and not flip then
+    gfx.draw(img, x0, y0)
+    return
+  end
+  local byRows = frontQuads3[img]
+  if not byRows then
+    byRows = {}
+    frontQuads3[img] = byRows
+  end
+  local quad = byRows[rows]
+  if not quad then
+    quad = gfx.newQuad(0, 0, iw, rows, iw, ih)
+    byRows[rows] = quad
+  end
+  if flip then
+    -- the sprite's hFlip: mirrored about its own centre
+    gfx.draw(img, quad, x0 + iw, y0, 0, -1, 1)
+  else
+    gfx.draw(img, quad, x0, y0)
+  end
+end
 function M:drawFigures3(model)
   local figures = type(model) == "table" and model.figures3 or nil
   if type(figures) ~= "table" or #figures == 0 then return false end
@@ -16164,22 +16995,27 @@ function M:drawFigures3(model)
       local entry = Battlefield.gen3TrainerBackPic(f.back)
       local img = type(entry) == "table" and entry.image or nil
       if img then
-        local quad = backQuads3[img]
+        -- One 64x64 frame of the strip: `frame` (a throw's pose) when the
+        -- strip has it, else its first.
+        local byFrame = backQuads3[img]
+        if not byFrame then
+          byFrame = {}
+          backQuads3[img] = byFrame
+        end
+        local iw, ih = img:getDimensions()
+        local frame = math.max(0, math.floor(tonumber(f.frame) or 0))
+        if (frame + 1) * 64 > ih then frame = 0 end
+        local quad = byFrame[frame]
         if not quad then
-          local iw, ih = img:getDimensions()
-          quad = gfx.newQuad(0, 0, 64, 64, iw, ih)
-          backQuads3[img] = quad
+          quad = gfx.newQuad(0, frame * 64, 64, 64, iw, ih)
+          byFrame[frame] = quad
         end
         gfx.setColor(1, 1, 1, 1)
         gfx.draw(img, quad, f.x - 32, f.y - 32)
       end
     else
       local img = Battlefield.gen3TrainerPic(f.pic)
-      if img then
-        local iw, ih = img:getDimensions()
-        gfx.setColor(1, 1, 1, 1)
-        gfx.draw(img, f.x - floor(iw / 2), f.y - floor(ih / 2))
-      end
+      if img then drawFront3(gfx, img, f) end
     end
   end
   return true
@@ -16317,13 +17153,22 @@ end
 function M:gen3DoubleView(phase)
   local double = { foes = {}, allies = {} }
   local nFoe, nAlly = 0, 0
+  -- A seat still held for the opening is not on the page at all where the
+  -- cart's slides play (`slidesOnPage3`): no pic and no healthbox until its
+  -- monster comes out (pret Intro_TryShinyAnimShowHealthbox), and the trainer
+  -- and our back stand on an empty field meanwhile.
+  local held = self:slidesOnPage3() and self.introHide or nil
+  local function seatAt(index, isPlayer)
+    if held and held[index] then return nil end
+    return self:gen3SeatModel(index, isPlayer)
+  end
   for _, slot in ipairs((self.sim and self.sim.slots) or {}) do
     if self:foeSide(slot.index) then
       nFoe = nFoe + 1
-      double.foes[nFoe] = self:gen3SeatModel(slot.index, false)
+      double.foes[nFoe] = seatAt(slot.index, false)
     else
       nAlly = nAlly + 1
-      double.allies[nAlly] = self:gen3SeatModel(slot.index, true)
+      double.allies[nAlly] = seatAt(slot.index, true)
     end
   end
   local choosing = (phase == "choose" or phase == "move" or phase == "target")
@@ -16523,6 +17368,19 @@ end
 --       `forfeit` turns RUN into the cart's forfeit question (`updateCommand`).
 --   song    the fight's own battle theme (a MUS_* name or a song number: the
 --       engine's `opts.song`), in place of the trainer's (`playBattleTheme3`).
+--   victorySong   the fight's own win jingle (a MUS_* name or a song number:
+--       a Frontier trainer's MUS_VICTORY_TRAINER), in place of the one
+--       resolved from the trainer (`playVictoryMusic`) -- the single screen's
+--       option of the same name.
+--   palace  { pick = function(screen, fieldSlot) -> true }   the Battle
+--       Palace: FIGHT calls it for the seat choosing (its field slot, 0 or 1)
+--       instead of opening the move list, and a pick that went is that
+--       seat's command (`palacePick3`); the referee's `palace` events are
+--       said in the cart's words (medRows3's `palace3` row).
+--   A partner with no back pic (`backPic` / `partnerBackPic` absent: a Battle
+--       Tower partner, never Steven) is drawn on the GBA page the cart's way
+--       for a frontier partner -- his front pic and the player's own, both
+--       flipped (`gen3Figures3`).
 --
 -- The referee's seat ids `onReady` maps: side a is { the player, the
 -- partner's id } beside a partner, else the shared team's two; side b is {
@@ -16640,6 +17498,14 @@ function M.newSoloDouble(game, opts)
   if type(opts.rules) == "table" then screen.rules3 = opts.rules end
   local song = opts.song
   if (type(song) == "string" and song ~= "") or tonumber(song) then screen.song3 = song end
+  local victory = opts.victorySong
+  if (type(victory) == "string" and victory ~= "") or tonumber(victory) then
+    screen.victorySong3 = victory
+  end
+  local palace = opts.palace
+  if type(palace) == "table" and type(palace.pick) == "function" then
+    screen.palace3 = { pick = palace.pick }
+  end
   return screen
 end
 

@@ -2204,10 +2204,14 @@ test('C6: the lesson kind and the safari action are one Gen 3 vocabulary on Wire
     'Wire.BATTLE_ACTIONS and sanitize BATTLE_ACTIONS are one table');
   assert.deepStrictEqual(Object.keys(shared).sort(), ['cancel', 'fight', 'item', 'run', 'switch'],
     'the every-generation actions stay the five they were');
-  assert.deepStrictEqual(luaTypedKeys(wire, /M\.BATTLE_ACTIONS3\s*=\s*\{([\s\S]*?)\}/),
+  // Wave 4b's contract C-W added `wallyThrow = true` beside `safari = "throw"`:
+  // the table is read the way BATTLE_ACTIONS is, typed keys plus `= true` keys.
+  const gen3Actions = { ...luaTypedKeys(wire, /M\.BATTLE_ACTIONS3\s*=\s*\{([\s\S]*?)\}/) };
+  for (const key of luaSet(wire, 'BATTLE_ACTIONS3')) gen3Actions[key] = true;
+  assert.deepStrictEqual(gen3Actions,
     Object.fromEntries(sanitize.BATTLE_ACTIONS3), 'Wire.BATTLE_ACTIONS3 and sanitize BATTLE_ACTIONS3 are one table');
-  assert.deepStrictEqual(Object.fromEntries(sanitize.BATTLE_ACTIONS3), { safari: 'throw' },
-    'Gen 3 adds exactly safari, which needs its throw');
+  assert.deepStrictEqual(Object.fromEntries(sanitize.BATTLE_ACTIONS3), { safari: 'throw', wallyThrow: true },
+    'Gen 3 adds exactly safari, which needs its throw, and wallyThrow (C-W), which needs nothing');
   assert.deepStrictEqual(luaSet(wire, 'SAFARI_THROWS3'), [...sanitize.SAFARI_THROWS3].sort(),
     'the throws are one closed set on both sides');
   assert.deepStrictEqual([...sanitize.SAFARI_THROWS3].sort(), ['bait', 'ball', 'block', 'near', 'rock'],
@@ -2599,4 +2603,214 @@ test('wave 3: Wire and sanitize read palace and arena events alike, case by case
   assert.ok(seen.palace > 500 && seen.arena > 500 && seen.refused > 300 && seen.dropped > 300,
     `the run reached palace (${seen.palace}) / arena (${seen.arena}) events, refusals (${seen.refused}) `
     + `and dropped texts (${seen.dropped})`);
+});
+
+// Wave 4b of docs/plans/gen3-solo-remaining-fights.md (contract C-W): WALLY's
+// `wallyThrow` -- a Gen 3 action that needs nothing (B_ACTION_WALLY_THROW,
+// pokeemerald src/battle_controller_wally.c WallyHandleActions) and the Gen 3
+// event that says it ran, `slot` / `side` naming WALLY's field slot (only side
+// a's first seat may throw, so no seat id rides). Gen 3 words alone, on Wire,
+// sanitize and both sims alike; no PROTOCOL bump, because no hub seats
+// Emerald's catching tutorial.
+test('C-W: the wallyThrow action and event are one Gen 3 vocabulary on Wire, sanitize and both sims', () => {
+  const wire = read('src/Wire.lua');
+  const sim = read('src/BattleSim3/events.lua');
+  const Events3 = require('./lib/battle3/events.js');
+  // The choice: a Gen 3 action, in neither shared table.
+  assert.ok(luaSet(wire, 'BATTLE_ACTIONS3').includes('wallyThrow'), 'Wire.BATTLE_ACTIONS3 names wallyThrow');
+  assert.strictEqual(sanitize.BATTLE_ACTIONS3.get('wallyThrow'), true, 'sanitize BATTLE_ACTIONS3: it needs nothing');
+  assert.ok(!luaSet(wire, 'BATTLE_ACTIONS').includes('wallyThrow') && !sanitize.BATTLE_ACTIONS.has('wallyThrow'),
+    'wallyThrow is no every-generation action');
+  // The event: a Gen 3 kind on all four twins, in neither older sim; no `seat`
+  // field on either sim's whitelist (WALLY's seat is side a's first, and the
+  // screen reads `side` alone).
+  assert.ok(luaSet(wire, 'BATTLE_EVENTS3').includes('wallyThrow'), 'Wire.BATTLE_EVENTS3 names wallyThrow');
+  assert.ok(sanitize.BATTLE_EVENT_TYPES3.has('wallyThrow'), 'sanitize BATTLE_EVENT_TYPES3 names wallyThrow');
+  assert.ok(!luaSet(wire, 'BATTLE_EVENTS').includes('wallyThrow') && !BATTLE_EVENT_TYPES.has('wallyThrow'),
+    'wallyThrow is not in the every-generation vocabulary');
+  assert.ok(!luaSet(wire, 'BATTLE_EVENTS2').includes('wallyThrow'), '...nor in Gold\'s');
+  assert.ok(luaSet(sim, 'KINDS').includes('wallyThrow') && Events3.KINDS.wallyThrow === true,
+    'BattleSim3 speaks wallyThrow on both twins');
+  for (const [lua, js] of [['src/BattleSim/events.lua', './lib/battle/events.js'],
+    ['src/BattleSim2/events.lua', './lib/battle2/events.js']]) {
+    assert.ok(!luaSet(read(lua), 'KINDS').includes('wallyThrow'), `${lua} does not speak wallyThrow`);
+    assert.ok(!Object.keys(require(js).KINDS).includes('wallyThrow'), `${js} does not speak wallyThrow`);
+  }
+  assert.strictEqual(luaTypedKeys(sim, /M\.FIELDS\s*=\s*\{([\s\S]*?)\}/).seat, undefined, 'events.lua has no FIELDS.seat');
+  assert.strictEqual(Events3.FIELDS.seat, undefined, 'events.js has no FIELDS.seat');
+  assert.deepStrictEqual(Object.keys(Events3.SHAPES.wallyThrow).sort(), ['side', 'slot'],
+    'events.js SHAPES.wallyThrow: slot and side');
+  assert.ok(!/wallyThrow\s*=\s*\{[^}]*\bseat\b/.test(sim), 'events.lua SHAPES.wallyThrow names no seat');
+
+  // The JS reading, case by case (the differential below holds Lua to it).
+  const choice = (extra, gen) => sanitize.cleanBattleChoice({ battle: 'b1', action: 'wallyThrow', ...extra }, gen);
+  for (const gen of [3, '3']) {
+    assert.deepStrictEqual(choice({}, gen), { battle: 'b1', action: 'wallyThrow' },
+      `a generation ${gen} reader takes a wallyThrow`);
+  }
+  for (const gen of [1, 2, undefined, 4]) {
+    assert.strictEqual(choice({}, gen), null, `a reader for generation ${gen} refuses a wallyThrow whole`);
+  }
+  for (const bad of ['WALLYTHROW', 'wallythrow', 'wally', 'throw', 'wallyThrow ']) {
+    assert.strictEqual(sanitize.cleanBattleChoice({ battle: 'b1', action: bad }, 3), null,
+      `action ${JSON.stringify(bad)} is no action`);
+  }
+  assert.deepStrictEqual(choice({ throw: 'ball', block: 3 }, 3), { battle: 'b1', action: 'wallyThrow' },
+    'a Safari throw on a wallyThrow is a stray field, ignored');
+  assert.strictEqual(choice({ move: 9 }, 3), null, 'an out-of-range index refuses it as it refuses any choice');
+
+  const ev = (extra, gen) => sanitize.cleanBattleEvent({
+    battle: 'b1', seq: 5, t: 'wallyThrow', side: 'a', slot: 0, ...extra,
+  }, gen);
+  for (const gen of [3, undefined]) {
+    assert.deepStrictEqual(ev({}, gen), {
+      battle: 'b1', seq: 5, t: 'wallyThrow', side: 'a', slot: 0,
+    }, `a wallyThrow reads for generation ${gen}`);
+  }
+  for (const gen of [1, 2]) assert.strictEqual(ev({}, gen), null, `a Gen ${gen} reader refuses a wallyThrow whole`);
+  for (const stray of ['solo_player', 'p1', 'p1#2', '', 7, ['p1']]) {
+    const got = ev({ seat: stray }, 3);
+    assert.ok(got && got.seat === undefined, `seat ${JSON.stringify(stray)} is a stray field: dropped, the event kept`);
+  }
+});
+
+test('C-W: Wire and sanitize read wallyThrow choices and events alike, case by case', (t) => {
+  const { spawnSync } = require('node:child_process');
+  const probe = spawnSync('luajit', ['-v'], { encoding: 'utf8' });
+  if (probe.error || probe.status !== 0) {
+    t.skip('luajit not on PATH');
+    return;
+  }
+  let seed = 20261012;
+  const rand = () => {
+    seed = (seed + 0x6D2B79F5) >>> 0;
+    let x = seed;
+    x = Math.imul(x ^ (x >>> 15), x | 1);
+    x ^= x + Math.imul(x ^ (x >>> 7), x | 61);
+    return ((x ^ (x >>> 14)) >>> 0) / 4294967296;
+  };
+  const pick = (list) => list[Math.floor(rand() * list.length)];
+  const maybe = (p, list) => (rand() < p ? pick(list) : undefined);
+  const GENS = [1, 2, 3, 3, 3, undefined, '3', 3.5, 0, 4, 'x'];
+  const INTS = [0, 1, 3, 4, 6, -1, '2', 2.5, 'x', true, null];
+  const SEATS = ['solo_player', 'p1', 'p1#2', 'solo_foe_b', '', 'x'.repeat(40), 'x'.repeat(41), 'two words',
+    'p-1', 7, true, null, undefined, ['p1'], 'constructor'];
+  const choices = [];
+  for (let i = 0; i < 2000; i += 1) {
+    const raw = {
+      battle: rand() < 0.85 ? 'b1' : pick(['bad id!', 5, '']),
+      action: rand() < 0.6 ? 'wallyThrow' : pick(['WALLYTHROW', 'wallythrow', 'wally', 'safari', 'run',
+        'fight', 'constructor', null, 5]),
+      throw: maybe(0.2, ['ball', 'bait', 'x']),
+      move: maybe(0.15, INTS),
+      slot: maybe(0.15, INTS),
+      target: maybe(0.1, INTS),
+      item: maybe(0.1, ['4', 'POKE_BALL', 'bad item']),
+      seat: maybe(0.2, SEATS),
+    };
+    for (const key of Object.keys(raw)) if (raw[key] === undefined) delete raw[key];
+    choices.push({ raw, gen: pick(GENS) });
+  }
+  const events = [];
+  for (let i = 0; i < 2000; i += 1) {
+    const raw = {
+      battle: pick(['b1', 'b1', 'b1', 'bad id!']),
+      seq: pick([1, 7, 0, -1, '3']),
+      t: rand() < 0.6 ? 'wallyThrow' : pick(['run', 'chose', 'msg', 'lesson', 'WALLYTHROW', 'wally', null]),
+      seat: maybe(0.85, SEATS),
+      side: maybe(0.8, ['a', 'b', 'c']),
+      slot: maybe(0.7, [0, 1, 3, 9, '2', -1]),
+      text: maybe(0.2, ['WALLY', 'damage', '', 7]),
+    };
+    for (const key of Object.keys(raw)) if (raw[key] === undefined) delete raw[key];
+    events.push({ raw, gen: pick([1, 2, 3, 3, undefined, '3']) });
+  }
+  const lit = (v) => {
+    if (v === undefined || v === null) return 'nil';
+    if (typeof v === 'boolean') return String(v);
+    if (typeof v === 'number') return Number.isFinite(v) ? String(v) : '(0/0)';
+    if (typeof v === 'string') return `"${[...Buffer.from(v, 'utf8')].map((b) => `\\${b}`).join('')}"`;
+    if (Array.isArray(v)) return `{${v.map(lit).join(', ')}}`;
+    return `{${Object.entries(v).filter(([, x]) => x !== null && x !== undefined)
+      .map(([k, x]) => `[${lit(k)}] = ${lit(x)}`).join(', ')}}`;
+  };
+  const hex = (s) => Buffer.from(s, 'utf8').toString('hex');
+  const canon = (v) => {
+    if (v === null || v === undefined) return 'nil';
+    if (typeof v === 'boolean') return String(v);
+    if (typeof v === 'number') return `n${v}`;
+    if (typeof v === 'string') return `s${hex(v)}`;
+    return `{${Object.keys(v).sort().map((k) => `${k}=${canon(v[k])}`).join(',')}}`;
+  };
+  const script = [
+    `package.path = "${ROOT}/?.lua;" .. package.path`,
+    'local cache = {}',
+    'local function need(name)',
+    '  if cache[name] ~= nil then return cache[name] end',
+    `  local h = assert(io.open("${ROOT}/src/" .. name .. ".lua", "rb"))`,
+    '  local body = h:read("*a"); h:close()',
+    '  cache[name] = assert((loadstring or load)(body, "@" .. name))(need)',
+    '  return cache[name]',
+    'end',
+    'local Wire = need("Wire")',
+    "local function hex(s) return (s:gsub('.', function(c) return string.format('%02x', c:byte()) end)) end",
+    'local function canon(v)',
+    '  local t = type(v)',
+    '  if t == "nil" then return "nil" end',
+    '  if t == "boolean" then return tostring(v) end',
+    '  if t == "number" then return "n" .. string.format("%d", v) end',
+    '  if t == "string" then return "s" .. hex(v) end',
+    '  local keys = {}',
+    '  for k in pairs(v) do keys[#keys + 1] = k end',
+    '  table.sort(keys)',
+    '  local parts = {}',
+    '  for _, k in ipairs(keys) do parts[#parts + 1] = k .. "=" .. canon(v[k]) end',
+    '  return "{" .. table.concat(parts, ",") .. "}"',
+    'end',
+    'for line in io.lines() do',
+    '  local kind, body = line:match("^(%a) (.*)$")',
+    '  local case = assert((loadstring or load)("return " .. body))()',
+    '  local out',
+    '  if kind == "c" then out = Wire.battleChoice(case.raw, case.gen)',
+    '  else out = Wire.battleEvent(case.raw, case.gen) end',
+    "  io.write(canon(out), '\\n')",
+    'end',
+  ].join('\n');
+  const lines = [
+    ...choices.map((c) => `c {raw = ${lit(c.raw)}, gen = ${lit(c.gen)}}`),
+    ...events.map((e) => `e {raw = ${lit(e.raw)}, gen = ${lit(e.gen)}}`),
+  ];
+  const lua = spawnSync('luajit', ['-e', script], {
+    input: `${lines.join('\n')}\n`,
+    encoding: 'utf8',
+    maxBuffer: 1 << 26,
+  });
+  assert.strictEqual(lua.status, 0, `luajit failed: ${lua.stderr}`);
+  const answers = lua.stdout.trim().split('\n');
+  assert.strictEqual(answers.length, lines.length, 'one answer per case');
+  const differ = [];
+  const seen = { taken: 0, refused: 0, events: 0, kept: 0, dropped: 0, refusedEvents: 0 };
+  choices.forEach((c, i) => {
+    const js = sanitize.cleanBattleChoice(c.raw, c.gen);
+    if (js && js.action === 'wallyThrow') seen.taken += 1;
+    if (!js && c.raw.action === 'wallyThrow') seen.refused += 1;
+    if (canon(js) !== answers[i]) differ.push(`choice ${lit(c.raw)} gen ${c.gen}: lua=${answers[i]} js=${canon(js)}`);
+  });
+  events.forEach((e, j) => {
+    const i = choices.length + j;
+    const js = sanitize.cleanBattleEvent(e.raw, e.gen);
+    if (js && js.t === 'wallyThrow') {
+      seen.events += 1;
+      if (js.seat !== undefined) seen.kept += 1;
+      else if (e.raw.seat !== undefined) seen.dropped += 1;
+    }
+    if (!js && e.raw.t === 'wallyThrow') seen.refusedEvents += 1;
+    if (canon(js) !== answers[i]) differ.push(`event ${lit(e.raw)} gen ${e.gen}: lua=${answers[i]} js=${canon(js)}`);
+  });
+  assert.deepStrictEqual(differ.slice(0, 10), [], `${differ.length} of ${lines.length} cases read differently`);
+  assert.strictEqual(seen.kept, 0, 'no reader keeps a seat on a wallyThrow, well-formed or not');
+  assert.ok(seen.taken > 300 && seen.refused > 300 && seen.events > 300 && seen.dropped > 100
+    && seen.refusedEvents > 100,
+    `the run reached taken (${seen.taken}) / refused (${seen.refused}) choices and kept (${seen.events}) / `
+    + `refused (${seen.refusedEvents}) events with dropped seats (${seen.dropped})`);
 });

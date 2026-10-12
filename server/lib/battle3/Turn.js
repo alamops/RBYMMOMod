@@ -30,8 +30,8 @@
  *   1. battle start: one roll(0,255) per speed-tied group of the switch-in order;
  *      Trace's pick between two or more traceable foes, roll(0, n-1);
  *   2. turn start: Quick Claw roll(0,65535) -- only when two or more seats fight
- *      (a wild seat's flee counts) and one of them holds QUICK_CLAW; one
- *      roll(0,255) per group tied on both priority and speed;
+ *      (a wild seat's flee and WALLY's throw count) and one of them holds
+ *      QUICK_CLAW; one roll(0,255) per group tied on both priority and speed;
  *   3. runs (wild modes): roll(0,255) for a runner slower than the wild mon
  *      (none for a veiled GHOST's foe); under `rules.pyramidRun` every runner
  *      but a Smoke Ball holder rolls, Run Away too; a wild seat's flee draws
@@ -45,8 +45,8 @@
  *      (Safari.js `_safariTurn`): roll(0,4) for BAIT / ROCK, up to four
  *      roll(0,65535) for a SAFARI BALL, nothing for GO NEAR, a POKeBLOCK, RUN
  *      or the monster's flee or watch;
- *   6. moves (and a wild seat's flee, drawing nothing), in speed order, each
- *      drawing only at the points it reaches (the
+ *   6. moves (and a wild seat's flee or WALLY's throw, drawing nothing), in
+ *      speed order, each drawing only at the points it reaches (the
  *      full list is in the Lua header and docs/plans/gen3-battle-sheet.md §8;
  *      obedience draws after the PP check, for a side-a mon against the
  *      computer over its badge cap; a multi-hit / Triple Kick / Beat Up strike
@@ -79,7 +79,10 @@
  * `wildPick`, `firstBattle`, `ghost`, `rules` (M.copyRules) and the side-entry
  * fields `ai`, `spare`, `bagFrom`; wave 2's `safari` (Safari.js), `catch =
  * 'forced'` (`outcome().given = false`), `tutorial` ('oldMan' | 'wally' |
- * 'pokedude') and the side-entry field `noBattler`.
+ * 'pokedude') and the side-entry field `noBattler`; wave 4b's contract C-W,
+ * WALLY's `{ action: 'wallyThrow' }` from side a's first seat (WALLY's alone)
+ * under `tutorial = 'wally'` (ordered with the moves at priority 0;
+ * `_wallyThrow` emits `wallyThrow` and cancels the turn's second action slot).
  *
  * Shape differences from the Lua, all forced by the language:
  *
@@ -153,9 +156,12 @@ M.STATUS_FROM_WIRE = {
 M.STATUS_TO_WIRE = M.STATUS_FROM_WIRE;
 
 // `safari` is the Safari Zone's one action (contract C6): refused by
-// `_normaliseChoice` in every fight that is not `safari`.
+// `_normaliseChoice` in every fight that is not `safari`. `wallyThrow` is
+// WALLY's B_ACTION_WALLY_THROW (contract C-W): refused in every fight that is
+// not `tutorial = 'wally'`, and from every seat but WALLY's (side a's first).
 const ACTIONS = {
   fight: true, item: true, switch: true, run: true, cancel: true, safari: true,
+  wallyThrow: true,
 };
 
 // Contract C3: `outcome().how` (`balls` is the Safari's last missed ball;
@@ -1235,6 +1241,16 @@ Battle.prototype._normaliseChoice = function _normaliseChoice(fighter, choice) {
     return null;
   }
 
+  if (action === 'wallyThrow') {
+    // B_ACTION_WALLY_THROW (contract C-W): only WALLY's controller files it
+    // (pokeemerald/src/battle_controller_wally.c:220), for B_POSITION_PLAYER_
+    // LEFT alone, so only WALLY's seat of a `tutorial = 'wally'` fight may:
+    // side a's first (`index` 1). A coop partner or a shared team's `#2` seat
+    // is refused like side b; nothing else of the choice is read.
+    if (this.tutorial !== 'wally' || fighter.side !== 'a' || fighter.index !== 1) return null;
+    return { action: 'wallyThrow' };
+  }
+
   if (action === 'run') {
     // A wild seat's own RUN is the cart's opponent RUN: AI_CHOICE_FLEE arrives
     // past the selection's IsRunningFromBattleImpossible (pokefirered/src/
@@ -2118,6 +2134,15 @@ Battle.prototype._beginTurn = function _beginTurn() {
       rows.push({
         f, b, row: null, pri: 0, order: i, flee: true,
       });
+    } else if (b && b.mon.hp > 0 && choice && choice.action === 'wallyThrow') {
+      // WALLY's throw is the flee's shape (contract C-W): pokeemerald/src/
+      // battle_main.c:4819 hoists only items and switches, so it is sorted
+      // with the moves at priority 0 (GetWhoStrikesFirst's MOVE_NONE, :4706),
+      // by speed, a tie random. MOVE_NONE (:4004) is not Rage.
+      delete b.rage;
+      rows.push({
+        f, b, row: null, pri: 0, order: i, wally: true,
+      });
     } else if (b && b.mon.hp > 0 && choice && choice.action === 'fight') {
       // A recharge turn chooses no move (pokefirered/src/battle_main.c:3126
       // withholds the menu; :2993 left gChosenMoveByBattler MOVE_NONE): Rage
@@ -2416,6 +2441,18 @@ Battle.prototype._wildFlee = function _wildFlee(fighter) {
   const other = fighter.side === 'a' ? 'b' : 'a';
   this._finish('win', this._sidePlayers(other), this._sidePlayers(fighter.side), 'run',
     'flee', fighter.side);
+};
+
+// WALLY's throw when its turn comes (contract C-W; pokeemerald/src/battle_util.c
+// :625 HandleAction_WallyBallThrow): the recall and the slide-in are the
+// screen's to play on the `wallyThrow` event; the referee changes no state,
+// draws nothing, and cancels the turn's SECOND action slot whoever holds it
+// (gActionsByTurnOrder[1] = B_ACTION_FINISHED) -- the foe's when the throw is
+// first, the throw's own (already running) when the foe went first.
+Battle.prototype._wallyThrow = function _wallyThrow(fighter) {
+  this._emit('wallyThrow', { slot: fighter.slot, side: fighter.side });
+  const second = this.turnOrderFighters ? this.turnOrderFighters[1] : null;
+  if (second) second.acted = true;
 };
 
 // Pursuit aimed at a seat that is switching out strikes first, doubled
@@ -2773,6 +2810,7 @@ Battle.prototype._resolveFights = function _resolveFights() {
     if (!truthy(f.acted) && f.b === r.b && r.b.mon.hp > 0) {
       f.acted = true;
       if (truthy(r.flee)) this._wildFlee(f);
+      else if (truthy(r.wally)) this._wallyThrow(f);
       else this._fightAction(f, f.choice);
       this._afterAction();
     }

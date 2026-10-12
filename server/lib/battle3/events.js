@@ -4,11 +4,11 @@
  * The event vocabulary a mediated Gen 3 battle speaks, frozen -- Node half.
  *
  * Twin of src/BattleSim3/events.lua, contract C5 (docs/plans/gen3-battle-sheet.md
- * §7). Every BattleSim2 kind is kept verbatim; Gen 3 adds ten kinds (`ability
- * weather held form sub ball obey lesson palace arena`) and six fields (`target
- * spread stat stage delta holding`). Mirrored, not imported, for the reason lib/battle2/events.js
- * gives: Wire pulls in Config, the Lua sim runs where Config does not, and this
- * file runs where Lua does not. server/twin_parity.test.js holds the copies
+ * §7). Every BattleSim2 kind is kept verbatim; Gen 3 adds eleven kinds (`ability
+ * weather held form sub ball obey lesson palace arena wallyThrow`) and six
+ * fields (`target spread stat stage delta holding`). Mirrored, not imported,
+ * for the reason lib/battle2/events.js gives: Wire pulls in Config, the Lua sim
+ * runs where Config does not, and this file runs where Lua does not. server/twin_parity.test.js holds the copies
  * together.
  *
  * `build` enforces the field whitelist at construction, so an invented field
@@ -21,7 +21,7 @@
 
 const { toNumber, isTable, own } = require('./lua.js');
 
-// BattleSim2's twenty, then Gen 3's ten (see the Lua twin for the prose).
+// BattleSim2's twenty, then Gen 3's eleven (see the Lua twin for the prose).
 const KINDS = {
   msg: true,
   anim: true,
@@ -53,6 +53,7 @@ const KINDS = {
   lesson: true,
   palace: true,
   arena: true,
+  wallyThrow: true,
 };
 
 // The closed token sets of the two facility kinds (the Lua twin's
@@ -199,6 +200,7 @@ const SHAPES = {
     side: 'mind / skill / body / win: whose',
     amount: 'mind / skill / body: the points awarded, 2 / 1 / 0',
   },
+  wallyThrow: { slot: "WALLY's field slot", side: 'a' },
 };
 
 // ------------------------------------------------------------------

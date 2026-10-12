@@ -22,6 +22,10 @@ go upstream as a single RFC rather than as separate asks:
 3. **A draw answer for `trainerbattle`**, so a mod-refereed fight that ends
    with nobody beaten leaves the trainer to be fought again without the mod
    stopping the script VM from outside (addendum C; closes §7).
+4. **A demonstration seam for the TEACHY TV**, so the POKé DUDE's battles
+   can be fought on a mod's screen without the mod lifting the modal stack,
+   toggling menu singletons and swapping the save's party and bag itself
+   (addendum D).
 
 The two later seams build on the first: B is `spawnNpc` taught about the maps
 the field already draws around the current one, and C is the third answer
@@ -253,7 +257,7 @@ battles. Guarded by `Runtime.wants`.
   ghost-pool purge on every map change and the `QuestLogRecorder.capture` and
   `RotatingTilePuzzle.move` wraps. (The look fence stays either way: a remote
   player should be drawn as a walking person, not a boulder.)
-- With addenda A–C: what each one's "What `rby_mmo` removes" lists.
+- With addenda A–D: what each one's "What `rby_mmo` removes" lists.
 
 ## Addendum A — taking a battle over (`battle.intercept`)
 
@@ -549,3 +553,109 @@ Parity pair:
 `opts.done("draw")` instead. That closes known gap §7. The trainer is still
 unbeaten after a draw, which is the cart-faithful outcome, but the script now
 ends by the engine's rule rather than the mod's.
+
+## Addendum D — the TEACHY TV's demonstrations (`startTeachyTvBattle`)
+
+**Found by:** `rby_mmo` 1.5.0 review (solo battles on FireRed / LeafGreen).
+Against the same `dev` @ `fdea09dc`.
+
+### What `rby_mmo` does today, and why
+
+The POKé DUDE's battles never reach `BattleBridge.start`, so neither
+`encounter.roll` nor the start wrap of addendum A sees them. The TEACHY TV
+(`teachy_tv.lua` `startDemonstration`) calls
+`battle/pokedude.lua` `Pokedude.startTeachyTvBattle(session, scriptId, opts)`,
+which plays the music and the transition and then, in its own `start()`
+(pret `teachy_tv.c:1172` `TeachyTvPrepBattle`), does four things around
+`Battle.start` that a taker has to do too. The TEACHY TV's own
+`onDemonstration` slot is one slot, a replacement rather than a chain, and the
+engine's tests own it, so `src/CoopField.lua` (`installPokedude3` /
+`restorePokedude3` / `divertPokedude`) wraps `startTeachyTvBattle` through
+`Gen3.wrapFn` with addendum A's discipline, and with SOLO BATTLES on does
+those four things itself before offering the fight to solo:
+
+- **The modal stack, lifted whole.** `Stack._layers` (`src/ui/game3/stack.lua`)
+  is swapped for an empty table, so the fight's screen is pushed onto an empty
+  stack and the TEACHY TV under it neither draws nor takes input; the saved
+  table is put back at the end (`Stand:coverTeachy3` / `uncoverTeachy3`,
+  copying `start()` / `finish_battle`). `_layers` is the stack's private list.
+- **The bag and START menus, closed.** `src.ui.game3.bag_menu` and
+  `src.ui.game3.start_menu` keep their state on the module (`.open`), and the
+  engine's `hide_menus` / `show_menus` flip it on whichever is already in
+  `package.loaded`. The mod does the same through `Gen3.loaded` — the
+  `Gen3.engine` gate (a Gen 3 boot, a `game3` module name) over
+  `package.loaded`, never a `require`, because a menu nobody loaded cannot be
+  open.
+- **The POKé DUDE's bag in the save.** `TeachyTv.initPokedudeBag` /
+  `restorePlayerBag` (pret `item_menu.c:2162` / `:2082`), the engine's own
+  functions, swap `session.bag`'s pockets with `session.teachyBagBackup`.
+- **The POKé DUDE's party in the save.** `startTeachyTvBattle` hands
+  `Battle.start` his party as `playerParty`; the mod's referee, EXP pass and
+  evolutions read `session.party`, so the mod swaps `session.party` itself
+  (pret `SavePlayerParty`, `InitPokedudePartyAndOpponent` writing
+  `gPlayerParty`, `LoadPlayerParty` at `teachy_tv.c:1208`).
+
+What that costs:
+
+- It depends on `startTeachyTvBattle`'s signature, on `Stack._layers` being a
+  plain list the stack reads on every call, and on the two menus' `.open`
+  flags.
+- The party and the bag are the save. A fight that never reaches its end — a
+  screen that threw and was popped, an F5 hot reload mid-demonstration —
+  would leave the POKé DUDE's monsters and items in the session, and the next
+  save would write them as the player's. The mod records each swap in a
+  ledger on the session (`src/Borrow3.lua`; `Schema.toSaveTable` copies named
+  fields only, so the ledger never reaches the file) and wraps the public
+  `save.write` hook: a swap whose fight is gone is given back before the write,
+  and the write is refused while the fight is really still on screen. The
+  stack cover is *not* restored by that backstop — at save time the player is
+  on the field with the START menu's own layers up, and swapping the TEACHY
+  TV's back in would bury the save box — so the TEACHY TV is simply gone, as
+  if left, and its `onDone` never runs.
+- A taker that declines after the transition hands the demonstration back to
+  the engine with `opts.headless`, the only way to get `start()` without a
+  second intro.
+
+### Proposed seam
+
+One hook, raised inside `start()` after the transition and before anything is
+lifted or swapped:
+
+```lua
+mod.hooks:wrap("teachy_tv.demonstration", function(next, game, spec)
+  -- spec = { scriptId, session, playerParty = <his party>, foe = <his foe>,
+  --          opts = <Battle.start's opts, read-only>,
+  --          finish = function(result) end }
+  -- Return true to take it: the engine has already lifted the TEACHY TV,
+  -- hidden the menus and swapped in his bag and party (and keeps them
+  -- swapped); the taker pushes its screen and calls spec.finish(result)
+  -- exactly once, which runs finish_battle (bag, party, stack, menus back,
+  -- the outcome code to the TEACHY TV).
+  return next(game, spec)
+end)
+```
+
+- Guarded by `Runtime.wantsHook("teachy_tv.demonstration")`; vanilla answers
+  false and `start()` calls `Battle.start` exactly as today.
+- The engine owns the swaps, so the engine owns giving them back: `Game3:save`
+  (or `Schema.toSaveTable`) writes the backed-up party and bag while a
+  demonstration is in progress, which closes the hole for the engine's own
+  battle too (its `session.teachyBagBackup` has the same exposure today).
+- `spec.finish` after a load or a soft reset is a no-op, as the bridge's own
+  finish is.
+
+Parity pair: *vanilla unchanged* — a headless demonstration with no hook runs
+`Battle.start` with the same `playerParty` and the TEACHY TV reads the same
+outcome code; *through the public API* — a `tests/modkit/cases/` case takes
+the demonstration, asserts the TEACHY TV is off the stack and the session's
+party is his, saves (the file holds the player's party and bag), calls
+`spec.finish("win")`, and asserts the TEACHY TV is back with `B_OUTCOME_WON`.
+
+### What `rby_mmo` removes when it lands
+
+`CoopField.installPokedude3` / `restorePokedude3` / `divertPokedude` /
+`teachyFallback3`, the stand's `coverTeachy3` / `uncoverTeachy3`,
+`borrowTeachyBag3` / `returnTeachyBag3`, `borrowParty3` / `returnParty3`, the
+`Gen3.loaded` menu reads, and `src/Borrow3.lua`'s TEACHY TV records (the
+ledger stays only for borrows the mod still makes itself, such as the
+tutorials' bags).

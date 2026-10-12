@@ -707,3 +707,142 @@ Each family is a `src/Solo3/*.lua` module returning `kinds3`; `KIND_FILES3` maps
 - The engine's arena judgment zeroes the loser's HP and clears its status; pret keeps both.
 
 **Brief correction:** the FRLG Safari prompt is `gText_WhatWillPlayerThrow`, "What will {B_PLAYER_NAME}\nthrow?".
+
+## Part 5: wave-4 contracts as built, and remainders
+
+### 5.1 Facilities: Palace, Arena and the multis (`src/Solo3/Facility.lua`, `src/Solo3/FacilityMulti.lua`)
+
+**Palace and Arena** (and the Verdanturf / Fallarbor tents) are taken over.
+- **Palace:** both sides pick through `SoloBrain` `_palace3` (the cart's masked scoring, its fallback bug, the 50% `unable`, the STRONGER / WEAKER / RANDOM targets).
+  - The player's brain draws from its own `BattleSim3/Rng`, `brain.palaceRng3`. It is seeded `(create.seed + Facility.PALACE_RNG_SALT) % 2^32`, with `PALACE_RNG_SALT = 0x50414C41`.
+  - `palacePick3` saves the state per seat each turn, before the pick: `ctx.palaceSaved3[seatId] = {state, turn}` (pret `battle_controller_player.c:2623`).
+  - A Palace `{action = "cancel", seat}` from either screen is filed by Facility's choose hook, which answers `true, taken`. When the referee really un-files a fight choice, `Facility.palaceRewind3(ctx, seat | fieldSlot)` puts the state back (pret `battle_main.c:4307`), so the re-pick is identical.
+  - Pret keeps one global saved value; we keep one per seat. The difference can't be reached, since only the first seat's pick can be cancelled.
+- **Arena:** the brain never switches; send-outs go in party order; a judged monster never comes back off the bench.
+  - A judged loss or draw is a scripted loss: `done("lose")` / `done("draw")`.
+  - `refusalText3`'s switch arm gives `gText_PkmnCantSwitchOut` under `rules.arena` (pret `battle_main.c:4241`).
+  - `Facility.cantSwitchText3(sim, fighter, solo?, seat?, payload?)` falls back to the old wording.
+- **Core:**
+  - `hasLiving` and `SoloBattle.gen3Standing(party, judgedSet?)` count a judged monster as down.
+  - `SoloBattle.judgedSlots3(fighter)` gives `{[slot] = true}` from the referee's sheets. The save party never carries the mark, so `_ended3`'s whiteout check passes it in.
+- **Screen options:**
+  - `bag`.
+  - `victorySong`: Brain 1022 → GYM_LEADER; halls, tents, Hill and FRLG Trainer Tower → TRAINER; Secret Base → none.
+  - `palace = {pick = function(screen, seat)}`. On the single screen it is called as `pick(screen)`.
+  - The Palace double is taken when `CoopBattle.SOLO_DOUBLE_PALACE3` is set.
+
+**Multis** (`FacilityMulti`, reached through Facility's `own3`):
+- **Tower multi:** the partner is not `spare`. pret `checkteamslost` skips the partner only for Steven.
+- **Pike double:** one monster for each foe; the player takes two seats; refused with fewer than 2 alive.
+- **Endings and writeback:**
+  - Words are `win` / `lose` / `draw` / `forfeited`.
+  - The partner's monsters are written back and put behind the player's before `done`.
+  - `lastFrontierBattle` is overwritten.
+  - `setInterviewData` is skipped for multis, as in pret.
+- **Double screen:**
+  - the classic page's general looks and `victorySong`;
+  - Frontier partners drawn with their front pics flipped (x32 / x90, cropped at y112), through `Battlefield.gen3PlayerFrontPicId(gender)`.
+
+**Engine divergences, for the upstream notes:**
+- The engine's `playerHalf` applies to any partner. It loses a Tower multi once the player's half is down; pret does that only with Steven.
+- The engine's `st.partner` comes from `partnerTrainerId`. Because Tower passes `frontierPartner`, a Tower partner gets Steven's back pic.
+- `Tower.startBattle` passes no `victoryTextB`.
+- The engine's Pike double draws monster B from B's own `monSet`; pret reads A's `monSet` for B.
+- `facility_palace.lua` `aiPick` marks out-of-group moves unusable and redraws. Pret scores them from 0 and keeps the pick.
+- New reach-arounds:
+  - `rse/frontier/trainers.lua`: `trainerSpeech`, `opponentClass`, `className`, `gfxId`, `trainerName`, `frontSpriteId`;
+  - `scripting/text_ir.toPlain`;
+  - `constants.of():id("trainer_classes", …)`.
+
+**Known, minor:**
+- The engine doesn't expose `gTrainerFrontPicCoords[id].size`, so front pics use size 8, and a shorter pic sits a few pixels high.
+- `ClassicBattle.drawThrows3` uses the singles geometry on the double field. No double sends a thrown look today.
+- The Palace score floor applies per script, where pret applies it per command.
+
+### 5.2 Tutorials (`src/Solo3/Tutorial.lua`)
+
+- **Driving the fight:** side a is driven by an NPC answerer on `solo_player` that always answers false. Once the screen is at `choose`, the answerer feeds it the cart's scripted input through `autoplay3`. The POKé DUDE's foe is answered from the opponent column of the same pret scripts.
+- **Old man:**
+  - Side a is `{noBattler, bag = POTION ×1 + POKé BALL ×1}` (`InitOldManBag`, `item_menu.c:2098`).
+  - His name comes from STRINGID_OLDMANUSEDITEM ("The old man").
+  - Referee options `tutorial = "oldMan"`, `catch = "forced"`.
+  - One input, item 4 on turn 1; then `done("caught")` with `given = false`.
+  - No dex seen; the party is untouched; the bag is swapped in and back (`BackUpPlayerBag`, `:2061`).
+- **WALLY:**
+  - Side a is the session party (his ZIGZAGOON), with a bag of POTION + POKé BALL.
+  - FIGHT with slot 0 on turns 1–2. Turn 3 and the ball are covered in 5.4.
+  - Emerald marks the RALTS seen.
+- **POKé DUDE:**
+  - He arrives through `fromGen3Encounter` with the stand's `pokedudeScript` and `playerParty`.
+  - His party is borrowed into the session (`TeachyTvPrepBattle`, `:1172`).
+  - Both sides follow pret's input scripts, laid end to end. The STATUS script runs on into MATCHUPS / CATCHING, a quirk we keep.
+  - Voice-overs follow `HandlePokedudeVoiceoverEtc` (`:2508`), using the engine's `Pokedude.TEXT_SCRIPTS`.
+  - The bag comes from `TeachyTv.initPokedudeBag`. EXP is paid.
+  - CATCHING ends with `"catch"`, so the TEACHY TV hears CAUGHT (7).
+- **Flags:** `noReconcile`, `lossless` and `noPickup` on all three; `partyless` on the old man; `noDexSeen` on the old man and the POKé DUDE.
+- **Engine divergences:**
+  - `battle/pokedude.lua` `action_command` defaults to `BAG_ITEM[script] or ITEM_POKE_BALL`. Pret opens the STATUS bag, the ANTIDOTE, for every script except CATCHING (`battle_controller_pokedude.c:362-371`).
+  - `take_action` indexes nil past the last row and throws. Pret reads the bytes that follow; ours plays FIGHT.
+  - `TeachyTv.backUpPlayerBag` also swaps the BERRY_POUCH. Pret swaps Items, Key Items and POKé BALLS only.
+  - The POKé DUDE's monsters carry no OT; pret gives them OT_ID_PLAYER_ID.
+- FRLG's `RandomlyGivePartyPokerus` and `PartySpreadPokerus` are empty stubs (`pokemon.c:5612` / `:5682`), so Pokérus stays Emerald-only.
+
+### 5.3 Single screen (`src/MediatedBattle.lua`, `src/ClassicBattle.lua`)
+
+- **The `tutorial` option:** `{kind, name?, backPic?, prompt?, gfx?}`.
+  - `backPic` takes a profile key, an index or a `TRAINER_BACK_PIC_*` name.
+  - `prompt` is `gText_WhatWillOldManDo` / `gText_WhatWillWallyDo` / `gText_WhatWillPkmnDo`.
+  - `oldMan` implies `noOwnBattler`.
+  - While it is set, the screen takes no input.
+- **`fight:autoplay3(choice, onFiled?, opts?) -> booked`:**
+  - It walks at the cart's pace (`M.TUTORIAL_PACE3`, `TUTORIAL_BAG_STEP3`) on an idle `choose` menu or on the replacement picker.
+  - `onFiled(sent, choice)` is called with false when the referee answered the seat itself.
+  - `opts.instant` skips the waits.
+  - Items are spent from the screen's `bag` only: with a `bag` option, `confirmPendingItem3` never calls `Gen3.bag.remove`. Facility's `pyramidWriteback3` is the Pyramid's one debit.
+- **Other methods:** `fight:sayTutorial3(text, {lit = "ally" | "foe"}?)` and `fight:heldLine3()`.
+- **Palace and Arena:**
+  - `palace` events print STRINGID_PKMNINCAPABLEOFPOWER / `gBattlePalaceFlavorTextTable`.
+  - Arena rows follow `BattleScript_ArenaTurnBeginning` / `BattleScript_ArenaDoJudgment` and are drawn as a judgment window (`M.G3A`, `refBox`).
+  - A judged faint keeps its HP and plays the sink.
+- **Cart fidelity:**
+  - The Gen 3 action cursor persists between turns and resets on our own send or faint (`SwitchInClearSetData` / `FaintClearSetData`).
+  - The GBA page draws the thrown ball and, for the Safari and the tutorials, the trainer's throw pose (`THROW_POSE3`, `TRAINER_HAND3`).
+- **Engine divergences:**
+  - `switch_seq.lua:145` `withdraw_text` computes `hp_thresholds2`. WALLY's pret line uses the stale `hpScale` 0.
+  - The engine has a bag plan only for the POKé DUDE (`POKEDUDE_PLANS`). It files the old man's ball from the action menu (`battle/init.lua:1360`) and has no WALLY bag pacing.
+
+### 5.4 Wave-4b contracts (fix-ups after wave 4)
+
+**C-W, WALLY's throw** (pret `battle_controller_wally.c` WallyHandleActions, `battle_util.c` HandleAction_WallyBallThrow, `battle_scripts_2.s` BattleScript_ActionWallyThrow):
+- Turn 3 is its own B_ACTION_WALLY_THROW: 64 frames, no cursor move, no SE.
+- It is ordered by speed with the moves: not in the item/switch-first loop, priority 0, a tie is random.
+- It cancels the turn's second action (`gActionsByTurnOrder[1] = B_ACTION_FINISHED`), so a slower RALTS never acts that turn.
+- The ball is turn 4.
+- **Referee:** the choice `{action = "wallyThrow"}`, accepted only under `tutorial = "wally"`, and the event `{t = "wallyThrow", seat}`.
+- **Screen:** plays RETURNMON / recall / slide-in / YOUTHROWABALLNOWRIGHT on that event.
+- **Kind:** files the throw on turn 3 and the ball on turn 4.
+
+**C-Q, holding B quits a POKé DUDE battle** (pret `pokefirered/src/battle_main.c:1455` BattleMainCB2):
+- On any battle frame where B is held: DREW, a fade to black, then `CB2_QuitPokedudeBattle`.
+- **Screen option** `tutorial.quit = function() end`. The screen fades, then calls it once.
+- **Kind:** ends the fight on the spot as DREW. No further referee turn, nothing written; the TEACHY TV hears DREW.
+
+**C-V, voice-overs between a command and its sub-menu** (pret `battle_controller_pokedude.c`):
+- `autoplay3(choice, onFiled, {afterCommand = function(fight) end})` is called once the command is picked and before the sub-menu opens.
+- The walk then holds until `fight:tutorialIdle3()`.
+- A POKé DUDE voice-over waits for A.
+
+**Also in 4b:**
+- **Single screen:**
+  - MUS_VICTORY_WILD starts after the POKé DUDE's EXP voice-over.
+  - The Palace waits 8 frames after FIGHT.
+  - The Arena's POKéMON menu opens as PARTY_ACTION_CANT_SWITCH.
+  - Safari BAIT / ROCK use the trainer throw pose.
+  - The POKé DUDE's throw pose runs on his monster's sprite.
+  - Trainers slide in on the GBA page.
+- **Double screen:** per-seat action and move cursors on Gen 3.
+- **Referee:** the POKé DUDE's no-effect ANTIDOTE on the MATCHUPS overrun.
+- **Core and field:**
+  - The quest-log exclusion for the old man and the POKé DUDE (pret `quest_log_battle.c:14`).
+  - The POKé DUDE stand owns the party borrow.
+  - The TEACHY TV divert hides the TV's layers and menus, and plays MUS_VS_WILD and the transition.

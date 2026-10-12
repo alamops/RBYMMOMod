@@ -573,21 +573,21 @@ return function(game)
     end
     H.closeToOverworld(game)
 
-    -- the party list over the region map
+    -- Party figures on the region map, with a nickname over each one.
     local mapLayer = H.g3OpenRegionMap(game)
     check(mapLayer ~= nil, "the region map opened (" .. tostring(mapLayer) .. ")")
     if mapLayer then
       local drawn = H.waitFor(game, function()
         local st = exports.overlayState()
-        return st.reached == "regionmap"
-      end, 120, "the party list over the region map")
+        return st.reached == "regionmap" and (st.drawn or 0) > 0
+      end, 120, "the party figure on the region map")
       local st = exports.overlayState()
       log("overlay on the map:", tostring(st.reached), table.concat(st.names or {}, ","))
       local named = false
       for _, n in ipairs(st.names or {}) do
         if tostring(n):find("HOSTY", 1, true) then named = true end
       end
-      check(drawn and named, "the party list on the region map names the partner")
+      check(drawn and named, "the party figure on the region map names the partner")
       shot("regionmap-party")
       H.g3CloseRegionMap(game)
     end

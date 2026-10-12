@@ -110,6 +110,14 @@ local function realLoad(version)
     local chain = run.loader.hooks.chains[hook]
     check(chain ~= nil and #chain > 0, label .. ": wraps " .. hook)
   end
+  -- The save guard for what a fight borrows from the save (src/Borrow3.lua),
+  -- and its link passes an ordinary save (no borrow held) straight through.
+  local saveChain = run.loader.hooks.chains["save.write"]
+  check(saveChain ~= nil and #saveChain == 1, label .. ": wraps save.write once (the borrow guard)")
+  if saveChain and saveChain[1] then
+    eq(saveChain[1].callback(function() return "written" end, game), "written",
+       label .. ": ...which lets a save with nothing borrowed through")
+  end
   for _, name in ipairs({ "save.loaded", "save.created", "map.entered",
                           "battle.ended", "pokemon.caught", "world.interacted" }) do
     local listeners = run.loader.events.listeners[name]
@@ -749,6 +757,8 @@ local function gen1Load()
   check(keys.run, "gen 1: B TO RUN is still offered")
   local chain = run.loader.hooks.chains["world.talk"]
   eq(chain and #chain or 0, 0, "gen 1: no world.talk link is added off Gen 3")
+  local saveChain = run.loader.hooks.chains["save.write"]
+  eq(saveChain and #saveChain or 0, 0, "gen 1: no save.write link (the borrow guard is Gen 3's)")
   local startLink = run.loader.hooks.chains["ui.start_menu.items"][1].callback
   local out = startLink(function(_, items) return items end, nil, {
     { label = "POKeMON" }, { label = "ITEM" }, { label = "SAVE" }, { label = "OPTION" },

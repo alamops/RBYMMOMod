@@ -115,6 +115,9 @@
 --     twice.  An avatar that is let go is therefore hidden as well as
 --     unlisted (retire3), and the pools are purged of avatars whenever the
 --     avatars are cleared (purgeGhosts3), which every map change does.
+--     Players on connected maps are then rebuilt in those maps' ghost
+--     pools from current presence and animated there, using Map.world's
+--     placement for their nameplates as well as the engine's sprites.
 --   * The sprite is untrusted, and FireRed's Field.interact reads an object's
 --     graphic before its script: a peer presenting as a Cut tree or a boulder
 --     would be offered to Cut / Strength (and Cut removes the object).  Only
@@ -536,7 +539,10 @@ function M:clear()
   self.spawned = {}
   -- Gen 3: whatever the engine copied into a ghost pool on the way out of
   -- the last map goes too (despawn3 / retire3 say why)
-  if onGen3() then M.purgeGhosts3() end
+  if onGen3() then
+    M.purgeGhosts3()
+    M.dropPools3()
+  end
 end
 
 -- where an avatar actually is right now, for the overlay's nameplate.  The
@@ -776,6 +782,43 @@ local function extract3(Objects, av)
   if type(Objects._tracks) == "table" then Objects._tracks[av.lid] = nil end
 end
 
+-- The ghost pools avatarPool3 had to make itself, by map id: the engine's
+-- own Ghosts.sync builds none for a connected map with no object events
+-- (ghosts.lua defsFor answers nil), so one is made to stand an avatar in.
+-- Held weakly -- a pool the engine has let go of is nobody's to drop.
+local madePools3 = setmetatable({}, { __mode = "v" })
+
+-- Neighbours use their own cells and the engine's ghost-pool animation.
+-- FieldView applies Map.world's offsets when it draws those pools.
+local function avatarPool3(self, av)
+  local Objects = objects3()
+  if av.mapId == self.mapId then return Objects end
+  local Ghosts = Gen3.engine("src.core.game3.ghosts")
+  if not (Ghosts and type(Ghosts._pools) == "table") then return nil end
+  local pool = Ghosts._pools[av.mapId]
+  if not pool then
+    pool = Objects.spawnFromDefs({}, mapDef3(av.mapId), av.mapId)
+    Ghosts._pools[av.mapId] = pool
+    madePools3[av.mapId] = pool
+  end
+  return { _byId = pool.byId, _order = pool.order }
+end
+
+function M:visiblePlayers3(roster, mapId)
+  local placements = { [mapId] = { ox = 0, oy = 0 } }
+  local Map = Gen3.engine("src.core.game3.map")
+  if Map and Map._worldRoot == mapId then
+    for _, entry in ipairs(Map.world or {}) do
+      placements[entry.id] = entry
+    end
+  end
+  local players = {}
+  for _, player in ipairs(roster:sorted()) do
+    if placements[player.map] then players[#players + 1] = player end
+  end
+  return players, placements
+end
+
 -- The depth nudge, for a standing avatar on a whole pixel.  A moving one is
 -- left alone: tickMotion rewrites py from the cell every frame of a step.
 function M.nudge3(eo)
@@ -916,11 +959,17 @@ function M:spawn3(player)
 
   local av = {
     id = player.id, lid = lid, eo = eo, name = def.name,
+    mapId = player.map, ox = 0, oy = 0,
     x = player.x, y = player.y, facing = eo.facing,
     gfx = gfx, gfxName = gfxName, sprite = player.sprite,
   }
   self.spawned[player.id] = av
-  inject3(Objects, av)
+  local target = avatarPool3(self, av)
+  if not target then
+    self:despawn3(player.id)
+    return nil
+  end
+  inject3(target, av)
   M.nudge3(eo)
   return lid
 end
@@ -931,6 +980,10 @@ function M:despawn3(playerId)
   self.spawned[playerId] = nil
   local Objects = objects3()
   if Objects then extract3(Objects, av) end
+  local Ghosts = Gen3.engine("src.core.game3.ghosts")
+  for _, pool in pairs(Ghosts and Ghosts._pools or {}) do
+    extract3({ _byId = pool.byId, _order = pool.order }, av)
+  end
   M.retire3(av.eo)
   self:freeLid3(av.lid)
   return true
@@ -985,6 +1038,28 @@ function M.purgeGhosts3()
   return n
 end
 
+-- The pools avatarPool3 made, out of the engine's table again, so an empty
+-- pool the mod brought into being does not outlive it until the next world
+-- rebuild (Ghosts.clear).  Only a pool still standing there as the one this
+-- file made: one the engine has since adopted into the live list
+-- (Ghosts.adopt), replaced with a capture (Ghosts.capture) or wiped with the
+-- rest (Ghosts.clear) is the engine's now, and an engine-built pool was
+-- never on the list.  Run after purgeGhosts3, so whatever the pool still
+-- held has been retired already.
+function M.dropPools3()
+  local Ghosts = Gen3.engine("src.core.game3.ghosts")
+  local pools = type(Ghosts) == "table" and Ghosts._pools or nil
+  local n = 0
+  for mapId, pool in pairs(madePools3) do
+    if type(pools) == "table" and pools[mapId] == pool then
+      pools[mapId] = nil
+      n = n + 1
+    end
+  end
+  madePools3 = setmetatable({}, { __mode = "v" })
+  return n
+end
+
 -- Where the avatar is right now, in cells: its cell while it stands (the
 -- nudge is a draw-order tie-break and nothing else), its pixel position
 -- mid-step so a nameplate glides with it.
@@ -992,11 +1067,12 @@ function M:cellOf3(playerId)
   local av = self.spawned[playerId]
   if not av then return nil end
   local eo = av.eo
+  local ox, oy = av.ox or 0, av.oy or 0
   if type(eo) == "table" then
-    if not eo.moving and eo.cellX and eo.cellY then return eo.cellX, eo.cellY end
-    if eo.px and eo.py then return eo.px / 16, eo.py / 16 end
+    if not eo.moving and eo.cellX and eo.cellY then return eo.cellX + ox, eo.cellY + oy end
+    if eo.px and eo.py then return eo.px / 16 + ox, eo.py / 16 + oy end
   end
-  return av.x, av.y
+  return av.x + ox, av.y + oy
 end
 
 function M:isWalking3(playerId)
@@ -1012,7 +1088,7 @@ function M:refresh3(player)
   if not objects3() then return nil end
   local av = self.spawned[player.id]
   if not av then return nil end
-  if player.map ~= self.mapId then return nil end
+  if player.map ~= av.mapId then return nil end
   local gfx, gfxName = self:spriteFor3(player.sprite, player)
   if not gfx then return nil end
   av.eo.graphicsId = gfx
@@ -1036,8 +1112,9 @@ function M:advance3(av, player)
 
   -- A reload wiped the list under us: the same object goes straight back,
   -- where it stood.
-  if type(Objects._byId) == "table" and Objects._byId[av.lid] ~= eo then
-    inject3(Objects, av)
+  local target = avatarPool3(self, av)
+  if target and type(target._byId) == "table" and target._byId[av.lid] ~= eo then
+    inject3(target, av)
   end
 
   -- mid-step: tickMotion finishes it
@@ -1093,11 +1170,27 @@ function M:sync3(roster, current)
   -- a list about to be wiped; the next tick after the load does it.
   if Objects._mapId ~= nil and Objects._mapId ~= current.mapId then return end
 
+  local Map = Gen3.engine("src.core.game3.map")
+  local Ghosts = Gen3.engine("src.core.game3.ghosts")
+  if Map and Map._worldRoot == current.mapId and Ghosts and Ghosts.sync then
+    Ghosts.sync()
+  end
+
   local seen = {}
-  for _, player in ipairs(roster:onMap(current.mapId)) do
+  local players, placements = self:visiblePlayers3(roster, current.mapId)
+  for _, player in ipairs(players) do
     seen[player.id] = true
     local av = self.spawned[player.id]
+    if av and av.mapId ~= player.map then
+      self:despawn3(player.id)
+      av = nil
+    end
     if av then self:advance3(av, player) else self:spawn3(player) end
+    av = self.spawned[player.id]
+    if av then
+      local placement = placements[player.map]
+      av.ox, av.oy = placement.ox or 0, placement.oy or 0
+    end
   end
 
   for id in pairs(self.spawned) do

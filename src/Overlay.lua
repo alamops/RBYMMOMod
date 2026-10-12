@@ -28,6 +28,7 @@ local Chars = need("Chars")
 local Toast = need("Toast")
 local Gen3 = need("Gen3")
 local Places = need("Places")
+local RegionMap3 = need("RegionMap3")
 
 local M = {}
 M.__index = M
@@ -1312,48 +1313,16 @@ end
 
 -- ------- the Gen 3 party screen
 --
--- Gen 1 draws party members on the TOWN MAP at their city.  The Gen 3
--- equivalent screen is the region map -- FireRed / LeafGreen's
--- src/ui/game3/region_map.lua (layer "region_map") and Emerald's
--- src/ui/game3/rse/region_map.lua ("rse_region_map") -- and a mark at a city
--- is the one thing it cannot be given honestly: a member standing indoors
--- is placed by the cart from their last outdoor warp, which only their own
--- copy knows, and a member from the other family is not on this map at all
--- (an Emerald player's Hoenn town has no square on FireRed's Kanto).  So
--- the region map gets a list instead: every party member who is somewhere,
--- by name, with the place their map is called -- in this cart's words for
--- its own region, in words cleaned from the id for the other (Places.name).
---
--- In a corner each layout leaves clear.  FireRed's: the open sea along the
--- bottom of its map window, stopping short of the region-switch button that
--- sits in the window's bottom-right corner (the window itself ends at x 216,
--- pokefirered/src/region_map.c:734 MAP_WINDOW; the button takes the last 22
--- pixels of it) -- its name box is top-left and the frame art runs down both
--- sides.  Emerald's: bottom-left, open sea, with its name box bottom-right.
---
--- Emerald has a second region map, and it is the one a player actually
--- carries: the PokéNav's HOENN MAP (src/ui/game3/rse/pokenav/region_map.lua,
--- pokeemerald/src/pokenav_region_map.c).  It is not a layer of its own -- the
--- whole PokéNav is one layer, "rse_pokenav", whatever screen it is showing --
--- so it counts only while the shell is on that screen with the map up
--- (pokenavOnMap below).  The same Hoenn picture fills the screen as on the
--- wall map, but the PokéNav frames it differently: its header art and the
--- "HOENN MAP" tab across the top, its help bar along the bottom-left (8..136
--- across, from 22 tiles down less the header's 32px slide: y 144,
--- pokenav/gfx.lua Gfx.drawHelpBar), and the place-name box sliding in along
--- the bottom-right (tile 17 across, pokenav_region_map.c:533).  So the list
--- keeps the wall map's column, the open sea in the bottom-left -- the same
--- picture under it, so the same margin clears the same markers -- but stands
--- on the help bar rather than over it: its foot a margin above the bar's top.
+-- Party figures on FireRed/LeafGreen's TOWN MAP and Emerald's wall map or
+-- PokéNav. Indoor maps use their named section; maps without a placeable
+-- section and partners in another region have no marker on this page.
+-- The projection follows the PokéNav's zoom and scroll.
 local REGION_MAP_LAYERS = { region_map = "frlg", rse_region_map = "rse", rse_pokenav = "pokenav" }
-local FRLG_PANEL_RIGHT = 194
-local POKENAV_HELP_TOP = 22 * 8 - 32
-local PANEL_FILL = { 0.06, 0.07, 0.12, 0.78 }
 
 -- True while the PokéNav's HOENN MAP is the screen it shows, faded all the
 -- way in.  Asked of the live shell (Pokenav.active): the screen it is on
 -- (menuId), that the map has been put up and not yet taken down (its own
--- `visible`), and that no fade is running -- so the list appears once the map
+-- `visible`), and that no fade is running -- so the figures appear once the map
 -- is there to read and is gone before it fades out, never over the main
 -- menu, the condition graphs or MATCH CALL that share the layer.  Only asked
 -- when that layer is on top, which only an Emerald boot ever puts there.
@@ -1384,79 +1353,62 @@ function M:regionMapState3()
   return layout
 end
 
--- Who goes in the list: every non-self party member the roster has on a
--- map, with that map's name and region.  Split from the drawing for the
--- reason townMapMarks is.
-function M:regionMapMarks3(game)
+-- Only partners whose map belongs to the displayed region/page are placed.
+function M:regionMapMarks3(game, layout)
   local out = {}
   local ctx = self.ctx
   local party = ctx and ctx.party
   if not (party and party:has()) then return out end
+  local view = RegionMap3.view(layout or self:regionMapState3())
+  if not view then return out end
   for _, member in ipairs(party:list()) do
     if not party:isSelf(member.id) then
       local player = ctx.roster:get(member.id)
-      local mapId = player and player.map
-      if type(mapId) == "string" and mapId ~= "" then
+      local pos = player and RegionMap3.position(game, player, view)
+      if pos then
+        local _, sprite = Chars.gfxForViewer(player.sprite, player.version, player.gender)
         out[#out + 1] = {
-          id = member.id, name = member.name or (player and player.name) or "?",
-          mapId = mapId, place = Places.name(game, mapId) or mapId,
-          region = Gen3.region(mapId),
+          id = member.id, name = member.name or player.name or "?",
+          mapId = player.map, place = Places.name(game, player.map) or player.map,
+          region = pos.region, x = pos.x, y = pos.y, sprite = sprite,
         }
       end
     end
   end
+  -- Two partners on one town remain two figures rather than covering each
+  -- other. Their shared anchor remains the town's cell.
+  if #out == 2 and out[1].x == out[2].x and out[1].y == out[2].y then
+    out[1].x, out[2].x = out[1].x - 5, out[2].x + 5
+  end
   return out
 end
 
--- Where the list's plate goes, in window pixels: its top-left for a plate
--- `boxW` x `boxH` over the 240x160 rect at (gameX, gameY) and `scale`, in
--- the corner the layout leaves clear (above).  A margin of 4 game pixels
--- from whatever it stands against.  Pure, so the suite pins the corners.
-function M.regionPanel3(layout, boxW, boxH, scale, gameX, gameY)
-  local margin = 4 * scale
-  local floor = (layout == "pokenav") and POKENAV_HELP_TOP or GEN3_VIEW_H
-  local top = gameY + floor * scale - margin - boxH
-  if layout == "rse" or layout == "pokenav" then return gameX + margin, top end
-  return gameX + FRLG_PANEL_RIGHT * scale - boxW, top
-end
-M.POKENAV_HELP_TOP = POKENAV_HELP_TOP
-
 function M:drawRegionMap3(font, game, layout, scale, gameX, gameY)
   local last = self.last
-  local marks = self:regionMapMarks3(game)
-  last.drawn = #marks
-  if #marks == 0 then
-    last.reached = "regionmap-nobody"
-    return marks
-  end
-  last.reached = "regionmap"
-
-  local pad = Toast.PAD
-  local rowH = font:getHeight() + pad
-  local maxW = math.floor(GEN3_VIEW_W * scale * 0.6)
-  local lines, width = {}, 0
-  for _, mark in ipairs(marks) do
-    local name = fitWidth(font, mark.name, maxW)
-    local place = fitWidth(font, mark.place, maxW)
-    lines[#lines + 1] = { name = name, place = place }
-    width = math.max(width, font:getWidth(name), font:getWidth(place))
-  end
-  local boxW = width + pad * 4
-  local boxH = #lines * rowH * 2 + pad * 2
-  local x, y = M.regionPanel3(layout, boxW, boxH, scale, gameX, gameY)
-  last.panel = { x = x, y = y, w = boxW, h = boxH, layout = layout }
-
+  local marks = self:regionMapMarks3(game, layout)
+  last.drawn = 0
+  last.reached = #marks == 0 and "regionmap-nobody" or "regionmap"
   local hudRestore = beginHud()
   love.graphics.setFont(font)
-  love.graphics.setColor(PANEL_FILL[1], PANEL_FILL[2], PANEL_FILL[3], PANEL_FILL[4])
-  love.graphics.rectangle("fill", x, y, boxW, boxH, pad, pad)
-  local ty = y + pad
-  for _, line in ipairs(lines) do
-    printLabel(font, line.name, x + pad * 2, ty, PARTY_GREEN)
-    self:note(line.name)
-    printLabel(font, line.place, x + pad * 2, ty + rowH, LABEL_WHITE)
-    self:note(line.place)
-    ty = ty + rowH * 2
+  for _, mark in ipairs(marks) do
+    local art = mark.sprite and Chars.portrait(mark.sprite)
+    if art then
+      local w, h = art.w or 16, art.h or 32
+      local fit = 16 / math.max(w, h)
+      local top = mark.y - h * fit / 2
+      love.graphics.setColor(1, 1, 1, 1)
+      love.graphics.draw(art.image, art.quad,
+        gameX + (mark.x - w * fit / 2) * scale, gameY + top * scale,
+        0, fit * scale, fit * scale)
+      last.drawn = last.drawn + 1
+      local labelTop = top
+      local header = layout == "pokenav" and 32 or 0
+      if top - LABEL_GAP - font:getHeight() / scale < header then
+        labelTop = mark.y + h * fit / 2 + LABEL_GAP * 2 + font:getHeight() / scale
+      end
+      self:drawLabel(font, mark.name, mark.x, labelTop, scale, gameX, gameY,
+        PARTY_GREEN, GEN3_VIEW_W, GEN3_VIEW_H)
+    end
   end
   endHud(hudRestore)
   return marks
@@ -1530,7 +1482,7 @@ function M:draw3(game, viewport)
     return
   end
 
-  local here = ctx.roster:onMap(current.mapId)
+  local here = ctx.avatars:visiblePlayers3(ctx.roster, current.mapId)
   last.here = #here
 
   local px, py, selfGfx = player3(game, current)

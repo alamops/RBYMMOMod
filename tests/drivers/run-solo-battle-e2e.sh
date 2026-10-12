@@ -57,7 +57,9 @@
 # straight through, and one list serves every cart in the run -- a name a cart
 # does not have is simply not driven there):
 #   every cart  singles (the wild / trainer / catch legs), obey (the group)
-#   Gen 3       double, badge, theft, or one of double-arena, double-classic,
+#   Gen 3       field (Safari, roamers, legends, ghosts, first battles and
+#               tutorials), frontier, tower, hill, tent, base, pairs,
+#               double, badge, theft, or one of double-arena, double-classic,
 #               double-ko, double-lastmon, double-refusal, double-handback,
 #               double-real, badge-boost, badge-guard, badge-trainer,
 #               obey-arena, obey-classic, obey-badge8, obey-outcomes,
@@ -81,12 +83,17 @@ set -uo pipefail
 
 # ------------------------------------------------------------------ layout
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+MOD_REAL="$(cd "$SCRIPT_DIR/../.." && pwd)"
+ENGINE_VIEW=""
+cleanup_layout() { [ -z "$ENGINE_VIEW" ] || rm -rf "$ENGINE_VIEW"; }
+trap cleanup_layout EXIT
 ENGINE_ROOT=""
 # An explicit override wins, and it is the one that matters when this mod is
 # being developed in a worktree: the *shared* gen1recomp checkout has
 # mods/rby_mmo pointing at the main clone, so a run started from a worktree
-# path would load a copy of this mod that has no src/SoloBattle.lua in it. Point
-# GEN1RECOMP_ROOT at a private engine view whose mods/rby_mmo is this branch.
+# path would otherwise load a different copy of this mod.
+# GEN1RECOMP_ROOT selects the engine. An isolated view below mounts this
+# checkout when that engine has a different mod installed.
 if [ -n "${GEN1RECOMP_ROOT:-}" ] && [ -f "${GEN1RECOMP_ROOT}/main.lua" ]; then
   ENGINE_ROOT="$GEN1RECOMP_ROOT"
 fi
@@ -106,18 +113,43 @@ if [ -z "$ENGINE_ROOT" ]; then
   echo "  !! could not find a Gen1Recomp checkout (main.lua + mods/)" >&2
   exit 2
 fi
+# Give this run its own mod mount when the engine has another checkout
+# installed. The shared engine and its installed mod are never changed.
+ENGINE_ROOT="$(cd "$ENGINE_ROOT" && pwd -P)"
+INSTALLED_MOD="$(cd "$ENGINE_ROOT/mods/rby_mmo" 2>/dev/null && pwd -P)" || INSTALLED_MOD=""
+if [ "$INSTALLED_MOD" != "$(cd "$MOD_REAL" && pwd -P)" ]; then
+  ENGINE_VIEW="$(mktemp -d "${TMPDIR:-/tmp}/rby-mmo-solo-engine.XXXXXX")" || exit 2
+  for entry in "$ENGINE_ROOT"/* "$ENGINE_ROOT"/.[!.]* "$ENGINE_ROOT"/..?*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    name="$(basename "$entry")"
+    case "$name" in mods|.git) continue ;; esac
+    ln -s "$entry" "$ENGINE_VIEW/$name" || exit 2
+  done
+  mkdir "$ENGINE_VIEW/mods" || exit 2
+  for entry in "$ENGINE_ROOT/mods"/*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    name="$(basename "$entry")"
+    [ "$name" = "rby_mmo" ] && continue
+    ln -s "$entry" "$ENGINE_VIEW/mods/$name" || exit 2
+  done
+  ln -s "$MOD_REAL" "$ENGINE_VIEW/mods/rby_mmo" || exit 2
+  ENGINE_ROOT="$ENGINE_VIEW"
+fi
 cd "$ENGINE_ROOT" || exit 1
 
 MOD_DIR="mods/rby_mmo"
-MOD_REAL="$(cd "$SCRIPT_DIR/../.." && pwd)"
-OUT="$MOD_DIR/tmp/e2e-solo-battle"
-[ -d "$MOD_DIR" ] || OUT="$MOD_REAL/tmp/e2e-solo-battle"
+# SOLO_E2E_OUT moves the logs, so two runs on one machine (one per cart, or
+# two agents' legs) never write over each other's solo-gen*.log.
+OUT="${SOLO_E2E_OUT:-}"
+if [ -z "$OUT" ]; then
+  OUT="$MOD_DIR/tmp/e2e-solo-battle"
+  [ -d "$MOD_DIR" ] || OUT="$MOD_REAL/tmp/e2e-solo-battle"
+fi
 mkdir -p "$OUT"
 
 fail() { echo "  !! $*" >&2; exit 2; }
 
-DRIVERS="$MOD_DIR/tests/drivers"
-[ -f "$DRIVERS/solo_battle_e2e.lua" ] || DRIVERS="$MOD_REAL/tests/drivers"
+DRIVERS="$MOD_REAL/tests/drivers"
 DRIVER="$DRIVERS/solo_battle_e2e.lua"
 [ -f "$DRIVER" ] || fail "missing solo_battle_e2e.lua beside this script"
 
@@ -228,8 +260,7 @@ fi
 # ------------------------------------------------------------- headless bar
 # Same gate the battlefield driver sets: a red suite means the LOVE run would
 # only be a slower way of learning the same thing.
-SUITE="$MOD_DIR/tests/rby_mmo_test.lua"
-[ -f "$SUITE" ] || SUITE="$MOD_REAL/tests/rby_mmo_test.lua"
+SUITE="$MOD_REAL/tests/rby_mmo_test.lua"
 echo
 echo "  running the mod's Lua suite…"
 if ! "$LUAJIT" "$SUITE" >"$OUT/suite.tail.txt" 2>&1; then
@@ -259,7 +290,7 @@ function love.load()
   love.event.quit()
 end
 PROBE_MAIN
-cleanup_probe() { rm -rf "$PROBE"; }
+cleanup_probe() { rm -rf "$PROBE"; cleanup_layout; }
 trap cleanup_probe EXIT
 
 save_dir_for() {
@@ -410,7 +441,8 @@ run_leg() {
     fi
   fi
 
-  save_dir="$(enable_mod_for "$identity")"
+  save_dir="$(enable_mod_for "$identity")" || return 1
+  [ -n "$save_dir" ] || return 1
   echo "    enabled rby_mmo (SOLO BATTLES seeded OFF) in $save_dir"
   mkdir -p "$shots"
   rm -f "$logfile"
@@ -521,7 +553,7 @@ run_leg() {
     return 1
   fi
   echo "    RESULT: $label passed -- GAPS:0. Screenshots in $shots"
-  rm -f "$logfile"
+  echo "    full log: $logfile"
   return 0
 }
 

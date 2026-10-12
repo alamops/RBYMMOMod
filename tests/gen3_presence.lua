@@ -682,6 +682,149 @@ local function cart(version)
     roster:move("p1", MAP, 4, 6, "down", false)
   end
 
+  -- Players on seamless neighbours use the engine's native ghost pools,
+  -- animate in local cells, and project plates into the active map.
+  do
+    local Map = Gen3.engine("src.core.game3.map")
+    local savedWorld, savedRoot = Map.world, Map._worldRoot
+    local defs = { [MAP] = { midLayout = { width = 13, height = 12 }, connections = {} } }
+    local expected = {
+      north = { 2, -10 }, south = { -3, 12 },
+      west = { -9, 4 }, east = { 13, -2 },
+    }
+    local oldDefs = {}
+    for dir, offset in pairs(expected) do
+      local id = "MMO_NEIGHBOUR_" .. dir
+      oldDefs[id] = game.data.maps[id]
+      local def = { midLayout = { width = 9, height = 10,
+        collAt = function() return 0 end }, objects = {
+        { localId = 1, graphicsId = gid(mySprite), x = 1, y = 1, movementType = 0 },
+      } }
+      defs[id], game.data.maps[id] = def, def
+      local along = (dir == "north" or dir == "south") and offset[1] or offset[2]
+      defs[MAP].connections[#defs[MAP].connections + 1] = { dir = dir, map = id, offset = along }
+      roster:put({ id = dir, name = dir, map = id, x = 3, y = 4,
+        facing = "down", sprite = mySprite, version = version })
+    end
+    Map.world = Map.computeWorld(defs, MAP, 1)
+    Map._worldRoot = MAP
+    Ghosts.clear()
+    avatars:sync(roster, here)
+    eq(#avatars:visiblePlayers3(roster, MAP), 5, label .. ": connected players included")
+    for dir, offset in pairs(expected) do
+      local neighbor = avatars.spawned[dir]
+      local pool = Ghosts._pools[roster:get(dir).map]
+      check(neighbor ~= nil, label .. ": " .. dir .. " avatar exists")
+      eq(Objects._byId[neighbor.lid], nil, label .. ": neighbour stays out of live objects")
+      eq(pool.byId[neighbor.lid], neighbor.eo, label .. ": neighbour injected into its pool")
+      check(pool.byId[1] ~= nil, label .. ": neighbouring NPC preserved")
+      check(contains(Ghosts.forDraw(roster:get(dir).map), neighbor.eo), label .. ": neighbour drawable")
+      local x, y = avatars:cellOf(dir)
+      eq(x, 3 + offset[1], label .. ": " .. dir .. " plate x offset")
+      eq(y, 4 + offset[2], label .. ": " .. dir .. " plate y offset")
+    end
+    -- A neighbour near the edge gets a plate through the actual HUD draw.
+    roster:move("west", roster:get("west").map, 8, 4, "down", false)
+    Avatars.placeAt3(avatars.spawned.west.eo, 8, 4, "down")
+    local printed, restoreLove = stubLove()
+    local worldCurrent = World.current
+    World.current = function() return here end
+    local P = Gen3.engine("src.core.game3.player")
+    local oldPx, oldPy = P.px, P.py
+    P.px, P.py = here.x * 16, here.y * 16
+    local overlay = Overlay.new({ roster = roster, avatars = avatars,
+      client = { isConnected = function() return true end } })
+    overlay:draw(game, { gameX = 0, gameY = 0, scale = 4 })
+    local plate
+    for _, line in ipairs(printed) do if line.text == "west" then plate = line end end
+    check(plate ~= nil, label .. ": neighbouring player's nameplate is printed")
+    eq(overlay:state().here, 5, label .. ": overlay includes connected players")
+    P.px, P.py = oldPx, oldPy
+    World.current = worldCurrent
+    restoreLove()
+
+    local north = avatars.spawned.north
+    roster:move("north", roster:get("north").map, 4, 4, "right", false)
+    avatars:sync(roster, here)
+    check(north.eo.moving, label .. ": neighbour starts an animated step")
+    for _ = 1, 16 do Ghosts.update(game) end
+    eq(north.eo.cellX, 4, label .. ": ghost update finishes neighbour step")
+    eq(north.eo.moving, false, label .. ": neighbour step lands")
+    eq(avatars:refresh(roster:get("north")), north.lid, label .. ": neighbour look can refresh")
+    local old = north.eo
+    roster:move("north", MAP, 3, 4, "right", false)
+    avatars:sync(roster, here)
+    eq(old.hidden, true, label .. ": crossing retires old neighbour object")
+    eq(Objects._byId[avatars.spawned.north.lid], avatars.spawned.north.eo,
+      label .. ": crossing creates one live avatar")
+    for _, pool in pairs(Ghosts._pools) do
+      for _, object in pairs(pool.byId) do
+        check(object.mmoAvatar ~= "north", label .. ": crossing leaves no duplicate in pools")
+      end
+    end
+    Map.world = {}
+    avatars:sync(roster, here)
+    eq(avatars.spawned.east, nil, label .. ": disconnected neighbour removed")
+    Map.world, Map._worldRoot = savedWorld, savedRoot
+    for dir in pairs(expected) do
+      roster:remove(dir)
+      local id = "MMO_NEIGHBOUR_" .. dir
+      game.data.maps[id] = oldDefs[id]
+    end
+    avatars:clear()
+    Ghosts.clear()
+  end
+
+  -- A connected map with no object events gets no ghost pool from the
+  -- engine (ghosts.lua defsFor answers nil), so avatarPool3 makes one to
+  -- stand the avatar in.  A clear takes that pool back out of the engine's
+  -- table -- and only that one: an engine-built pool, or a made one the
+  -- engine has since replaced (Ghosts.capture), is left where it is.
+  do
+    local Map = Gen3.engine("src.core.game3.map")
+    local savedWorld, savedRoot = Map.world, Map._worldRoot
+    local BARE, FULL = "MMO_NEIGHBOUR_bare", "MMO_NEIGHBOUR_full"
+    local defs = { [MAP] = { midLayout = { width = 13, height = 12 }, connections = {
+      { dir = "north", map = BARE, offset = 0 },
+      { dir = "south", map = FULL, offset = 0 },
+    } } }
+    defs[BARE] = { midLayout = { width = 9, height = 10, collAt = function() return 0 end } }
+    defs[FULL] = { midLayout = { width = 9, height = 10, collAt = function() return 0 end },
+      objects = { { localId = 1, graphicsId = gid(mySprite), x = 1, y = 1, movementType = 0 } } }
+    local oldDefs = { [BARE] = game.data.maps[BARE], [FULL] = game.data.maps[FULL] }
+    game.data.maps[BARE], game.data.maps[FULL] = defs[BARE], defs[FULL]
+    roster:put({ id = "bare", name = "bare", map = BARE, x = 3, y = 4,
+      facing = "down", sprite = mySprite, version = version })
+    roster:put({ id = "full", name = "full", map = FULL, x = 3, y = 4,
+      facing = "down", sprite = mySprite, version = version })
+    Map.world = Map.computeWorld(defs, MAP, 1)
+    Map._worldRoot = MAP
+    Ghosts.clear()
+    avatars:sync(roster, here)
+    local made, built = Ghosts._pools[BARE], Ghosts._pools[FULL]
+    local bare = avatars.spawned.bare
+    check(made ~= nil and bare ~= nil and made.byId[bare.lid] == bare.eo,
+      label .. ": a neighbour with no object events gets a pool the mod made")
+    check(built ~= nil and built.byId[1] ~= nil, label .. ": a neighbour with objects keeps the engine's")
+    avatars:clear()
+    eq(Ghosts._pools[BARE], nil, label .. ": the pool the mod made is dropped on a clear")
+    eq(Ghosts._pools[FULL], built, label .. ": the engine-built pool is left alone")
+    check(built.byId[1] ~= nil, label .. ": its own NPC still in it")
+    avatars:sync(roster, here)
+    local remade = Ghosts._pools[BARE]
+    check(remade ~= nil and remade ~= made, label .. ": the next sync makes a fresh one")
+    local captured = { byId = {}, order = {} }
+    Ghosts._pools[BARE] = captured
+    avatars:clear()
+    eq(Ghosts._pools[BARE], captured, label .. ": a made pool the engine has since replaced is the engine's")
+    Map.world, Map._worldRoot = savedWorld, savedRoot
+    roster:remove("bare")
+    roster:remove("full")
+    game.data.maps[BARE], game.data.maps[FULL] = oldDefs[BARE], oldDefs[FULL]
+    avatars:clear()
+    Ghosts.clear()
+  end
+
   -- the local player's own pace, for presence
   P.biking, P.running, P.moving, P.stepFrames = false, false, false, 16
   eq(Avatars.localFast3(), false, label .. ": walking is not fast")
@@ -799,88 +942,146 @@ local function cart(version)
     eq(overlay:state().reached, "roster", label .. ": under TILT the corner list stands in for the plates")
   end
 
-  -- the region map: the party list, in words, whatever the family
-  roster:move("p1", em and "FR_VIRIDIAN_CITY" or "EM_LITTLEROOT_TOWN", 3, 3, "down", false)
-  Stack.push(em and "rse_region_map" or "region_map", { draw = function() end })
+  -- Region-map figures: grid placement, safe sprite mapping and real HUD
+  -- drawing. Stand in only for ROM-derived geometry/art and open UI state.
+  local RegionMap3 = need("RegionMap3")
+  local ownMap = em and "EM_LITTLEROOT_TOWN" or "FR_PALLET_TOWN"
+  local otherMap = em and "FR_VIRIDIAN_CITY" or "EM_LITTLEROOT_TOWN"
+  local oldDef = game.data.maps[ownMap]
+  game.data.maps[ownMap] = { regionMapSectionId = 0, mapType = 1, width = 40, height = 40 }
+  local RM = Gen3.engine(em and "src.ui.game3.rse.region_map" or "src.ui.game3.region_map")
+  local restoreMap
+  local page = 0
+  if em then
+    local Sections = Gen3.engine("src.ui.game3.rse.mapsec")
+    local oldEntry, oldManifest, oldActive = Sections.entry, RM.manifest, RM.active
+    Sections.entry = function(id)
+      if id == 0 then return { x = 4, y = 6, width = 2, height = 2 } end
+    end
+    RM.manifest = function() return { offMap = {99}, mapsecs = {} } end
+    RM.active = function() return {} end
+    restoreMap = function() Sections.entry, RM.manifest, RM.active = oldEntry, oldManifest, oldActive end
+  else
+    local Extract = Gen3.engine("src.import.gba.region_map_extract")
+    local oldGeometry, oldLayouts, oldState = Extract.GEOMETRY, Extract.LAYOUTS, RM.state
+    Extract.GEOMETRY = { dimensions = { [0] = {2, 2} }, topLeft = { [0] = {4, 8} } }
+    Extract.LAYOUTS = { seviiMapsecs = { [0] = {}, {}, {} } }
+    RM.state = function() return { selectedRegion = page } end
+    restoreMap = function() Extract.GEOMETRY, Extract.LAYOUTS, RM.state = oldGeometry, oldLayouts, oldState end
+  end
+  local oldPortrait = Chars.portrait
+  local art = { image = {}, quad = {}, w = 16, h = 32 }
+  Chars.portrait = function() return art end
+  local drawCalls, oldDraw = {}, love.graphics.draw
+  love.graphics.draw = function(...) drawCalls[#drawCalls + 1] = {...} end
+  roster:move("p1", ownMap, 25, 3, "down", false)
+  local layer = em and "rse_region_map" or "region_map"
+  Stack.push(layer, { draw = function() end })
   eq(overlay:regionMapState3(), em and "rse" or "frlg", label .. ": the region map is recognised")
   local marks = overlay:regionMapMarks3(game)
-  eq(#marks, 1, label .. ": one partner listed (never yourself)")
-  eq(marks[1] and marks[1].place, em and "VIRIDIAN CITY" or "LITTLEROOT TOWN",
-     label .. ": the other region's place, named in words")
-  eq(marks[1] and marks[1].region, em and "kanto" or "hoenn", label .. ": and its region")
+  eq(#marks, 1, label .. ": one partner marked, never yourself")
+  eq(marks[1] and marks[1].x, em and 52 or 76, label .. ": route position uses scaled map width")
+  eq(marks[1] and marks[1].y, em and 68 or 100, label .. ": section y on the cart's grid")
   for i = #printed, 1, -1 do printed[i] = nil end
   overlay:draw(game, viewport)
-  eq(overlay:state().reached, "regionmap", label .. ": the party list is drawn over the region map")
-  local listed = false
-  for _, p in ipairs(printed) do
-    if p.text == (em and "VIRIDIAN CITY" or "LITTLEROOT TOWN") then listed = true end
+  eq(overlay:state().reached, "regionmap", label .. ": figures drawn on the region map")
+  eq(overlay:state().drawn, 1, label .. ": one character drawn")
+  eq(drawCalls[1] and drawCalls[1][1], art.image, label .. ": uses character art")
+  eq(drawCalls[1] and drawCalls[1][6], 2, label .. ": 32-pixel figure fitted to 16 map pixels at 4x")
+  local named = false
+  for _, line in ipairs(printed) do if line.text == "ASH" then named = true end end
+  check(named, label .. ": nameplate over the figure")
+  local savedList = plateParty.list
+  plateParty.list = function() return { {id = "me"}, {id = "p1", name = "ASH"}, {id = "p2", name = "MAY"} } end
+  roster:put({ id = "p2", name = "MAY", map = ownMap, x = 25, y = 3,
+    sprite = mySprite, version = version })
+  marks = overlay:regionMapMarks3(game)
+  eq(#marks, 2, label .. ": both partners get a figure")
+  eq(marks[2].x - marks[1].x, 10, label .. ": partners in the same town stand side by side")
+  eq(marks[1].y, marks[2].y, label .. ": co-located figures share their town row")
+  roster:remove("p2")
+  eq(#overlay:regionMapMarks3(game), 1, label .. ": missing roster member is omitted")
+  plateParty.list = savedList
+  game.data.maps[ownMap].mapType = 8
+  marks = overlay:regionMapMarks3(game)
+  eq(marks[1] and marks[1].x, em and 44 or 68, label .. ": indoor member placed in its named town section")
+  game.data.maps[ownMap].mapType = 1
+  roster:move("p1", otherMap, 3, 3, "down", false)
+  eq(#overlay:regionMapMarks3(game), 0, label .. ": other region has no figure on this map")
+  roster:move("p1", ownMap, 25, 3, "down", false)
+  game.data.maps[ownMap].regionMapSectionId = 99
+  eq(#overlay:regionMapMarks3(game), 0, label .. ": unknown/off-map section has no marker")
+  game.data.maps[ownMap].regionMapSectionId = 0
+  if not em then
+    page = 1
+    eq(#overlay:regionMapMarks3(game), 0, label .. ": Kanto partner hidden on a Sevii page")
+    local Extract = Gen3.engine("src.import.gba.region_map_extract")
+    local Sections = Gen3.engine("src.import.gba.map_sections_extract")
+    local island = Sections.ID_TO_SECTION.MAPSEC_ONE_ISLAND
+    local oldIslandDef = game.data.maps.FR_ONE_ISLAND
+    game.data.maps.FR_ONE_ISLAND = { regionMapSectionId = island, mapType = 1, width = 40, height = 40 }
+    Extract.GEOMETRY.dimensions[island], Extract.GEOMETRY.topLeft[island] = {2, 2}, {4, 8}
+    Extract.LAYOUTS.seviiMapsecs[0] = { island }
+    roster:move("p1", "FR_ONE_ISLAND", 25, 3, "down", false)
+    eq(#overlay:regionMapMarks3(game), 1, label .. ": partner on the selected Sevii page is marked")
+    page = 0
+    eq(#overlay:regionMapMarks3(game), 0, label .. ": Sevii partner hidden on the Kanto page")
+    roster:move("p1", ownMap, 25, 3, "down", false)
+    game.data.maps.FR_ONE_ISLAND = oldIslandDef
   end
-  check(listed, label .. ": with the partner's place on it")
-  Stack.pop(em and "rse_region_map" or "region_map")
+  Stack.pop(layer)
 
-  -- where the list stands, per layout (window pixels at 4x, rect at 0,0)
-  local fx, fy = Overlay.regionPanel3("frlg", 100, 60, 4, 0, 0)
-  eq(fx + 100, 194 * 4, label .. ": FRLG: the plate's right edge stops short of the region button")
-  eq(fy + 60, (160 - 4) * 4, label .. ": FRLG: ...a margin above the bottom")
-  local rx, ry = Overlay.regionPanel3("rse", 100, 60, 4, 0, 0)
-  eq(rx, 4 * 4, label .. ": Emerald wall map: bottom-left")
-  eq(ry + 60, (160 - 4) * 4, label .. ": Emerald wall map: ...a margin above the bottom")
-  local px, py = Overlay.regionPanel3("pokenav", 100, 60, 4, 0, 0)
-  eq(Overlay.POKENAV_HELP_TOP, 144, label .. ": the PokéNav help bar's top (22 tiles less the 32px header)")
-  eq(px, rx, label .. ": PokéNav: the plate keeps the wall map's column (same picture under it)")
-  eq(py + 60, (144 - 4) * 4, label .. ": PokéNav: ...its foot a margin above the help bar, not over it")
-  check(px + 100 <= 136 * 4, label .. ": PokéNav: ...clear of the place-name box at tile 17")
-  local ox, oy = Overlay.regionPanel3("pokenav", 100, 60, 3, 40, 50)
-  eq(ox, 40 + 4 * 3, label .. ": PokéNav: placed inside the letterboxed rect (x)")
-  eq(oy, 50 + (144 - 4) * 3 - 60, label .. ": PokéNav: ...and (y)")
-
-  -- The PokéNav's HOENN MAP (Emerald): the whole PokéNav is one layer, so
-  -- only its map screen counts, and only once the map is up and faded in.
+  -- PokéNav screen gating and zoom/scroll projection, including letterbox.
   if em then
     local Pokenav = require("src.ui.game3.rse.pokenav.init")
-    local Host = Pokenav.Host
-    local savedShell = Host._s
+    local Host, savedShell = Pokenav.Host, Pokenav.Host._s
     local fading = false
-    local shell = {
-      menuId = Pokenav.MENU.MAIN_MENU, phase = "menu", screen = { visible = true },
-      fadeActive = function() return fading end,
-    }
+    local screen = { visible = true, scale = 256, scrollX = 0, scrollY = 0, c = 0, d = 0 }
+    local shell = { menuId = Pokenav.MENU.MAIN_MENU, phase = "menu", screen = screen,
+      fadeActive = function() return fading end }
     Host._s = shell
     Stack.push(Pokenav.ID, { draw = function() end })
-    eq(Pokenav.ID, "rse_pokenav", label .. ": the PokéNav's layer is rse_pokenav")
-    eq(overlay:regionMapState3(), nil, label .. ": the PokéNav's main menu is not a map")
+    eq(overlay:regionMapState3(), nil, label .. ": PokéNav main menu has no markers")
     shell.menuId = Pokenav.MENU.MATCH_CALL
-    eq(overlay:regionMapState3(), nil, label .. ": ...nor is MATCH CALL")
+    eq(overlay:regionMapState3(), nil, label .. ": MATCH CALL has no markers")
     shell.menuId = Pokenav.MENU.REGION_MAP
-    eq(overlay:regionMapState3(), "pokenav", label .. ": the HOENN MAP is recognised")
+    eq(overlay:regionMapState3(), "pokenav", label .. ": HOENN MAP recognised")
     fading = true
-    eq(overlay:regionMapState3(), nil, label .. ": ...not while it is fading in or out")
+    eq(overlay:regionMapState3(), nil, label .. ": markers hidden during fade")
     fading = false
-    shell.screen.visible = false
-    eq(overlay:regionMapState3(), nil, label .. ": ...not once the map has been taken down")
-    shell.screen.visible = true
+    screen.visible = false
+    eq(overlay:regionMapState3(), nil, label .. ": closed map has no markers")
+    screen.visible = true
     shell.phase = "shutdown"
-    eq(overlay:regionMapState3(), nil, label .. ": ...nor while the PokéNav shuts")
+    eq(overlay:regionMapState3(), nil, label .. ": shutting PokéNav has no markers")
     shell.phase = "menu"
-    for i = #printed, 1, -1 do printed[i] = nil end
     overlay:draw(game, viewport)
-    local navState = overlay:state()
-    eq(navState.reached, "regionmap", label .. ": the party list is drawn over the PokéNav's map")
-    eq(navState.panel and navState.panel.layout, "pokenav", label .. ": ...in the PokéNav's corner")
-    eq(navState.panel and navState.panel.x, 4 * 4, label .. ": ...in the wall map's column")
-    check(navState.panel and navState.panel.y + navState.panel.h <= (Overlay.POKENAV_HELP_TOP - 4) * 4,
-          label .. ": ...and above the help bar")
-    local onNav = false
-    for _, p in ipairs(printed) do
-      if p.text == "VIRIDIAN CITY" then onNav = true end
-    end
-    check(onNav, label .. ": with the partner's place on it")
+    eq(overlay:state().drawn, 1, label .. ": character drawn on PokéNav map")
+    local full = overlay:regionMapMarks3(game)[1]
+    eq(full and full.x, 52, label .. ": unzoomed PokéNav x")
+    screen.scale, screen.c, screen.d = 128, 56, 72
+    screen.zoomed, screen.scrollX, screen.scrollY = true, 4, -2
+    local zoomed = overlay:regionMapMarks3(game)[1]
+    eq(zoomed and zoomed.x, 40, label .. ": zoomed marker follows horizontal scroll")
+    eq(zoomed and zoomed.y, 66, label .. ": zoomed marker follows vertical scroll")
+    local before = #drawCalls
+    overlay:draw(game, { gameX = 40, gameY = 50, scale = 3 })
+    local draw = drawCalls[before + 1]
+    eq(draw and draw[3], 40 + (40 - 4) * 3, label .. ": figure respects letterbox x")
+    eq(draw and draw[4], 50 + (66 - 8) * 3, label .. ": figure respects letterbox y")
+    screen.scrollX = 100
+    eq(#overlay:regionMapMarks3(game), 0, label .. ": scrolled-off marker hidden")
+    screen.zoomDisabled = true
+    eq(#overlay:regionMapMarks3(game), 0, label .. ": off-map PokéNav screen has no figures")
     shell.menuId = Pokenav.MENU.MAIN_MENU
     overlay:draw(game, viewport)
-    eq(overlay:state().reached, "not-overworld", label .. ": back on the PokéNav's menu, no list")
+    eq(overlay:state().reached, "not-overworld", label .. ": returning to menu removes markers")
     Stack.pop(Pokenav.ID)
     Host._s = savedShell
   end
+  Chars.portrait, love.graphics.draw = oldPortrait, oldDraw
+  game.data.maps[ownMap] = oldDef
+  restoreMap()
 
   World.current = worldCurrent
   restoreLove()

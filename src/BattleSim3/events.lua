@@ -2,14 +2,15 @@
 --
 -- Contract C5 (docs/plans/gen3-battle-sheet.md §7).  Every BattleSim2 kind is
 -- kept verbatim -- same name, same fields, same meaning -- so a client that
--- draws a Gen 2 stream already draws most of a Gen 3 one.  Gen 3 adds ten kinds
--- (`ability weather held form sub ball obey lesson palace arena`) and six fields
--- (`target spread stat stage delta holding`), each for a thing the cart shows
--- that the older vocabulary cannot say: an ability acting, the weather, a held
--- item doing something (and what the mon is left holding), a picture change,
--- the substitute doll, a ball's shakes (or its dodge), a mon disobeying its
--- trainer, PROF. OAK's voice-over in the first battle, the Battle Palace's two
--- lines of its own and the Battle Arena referee's steps.
+-- draws a Gen 2 stream already draws most of a Gen 3 one.  Gen 3 adds eleven
+-- kinds (`ability weather held form sub ball obey lesson palace arena
+-- wallyThrow`) and six fields (`target spread stat stage delta holding`), each
+-- for a thing the cart shows that the older vocabulary cannot say: an ability
+-- acting, the weather, a held item doing something (and what the mon is left
+-- holding), a picture change, the substitute doll, a ball's shakes (or its
+-- dodge), a mon disobeying its trainer, PROF. OAK's voice-over in the first
+-- battle, the Battle Palace's two lines of its own, the Battle Arena referee's
+-- steps and WALLY's recall-and-throw turn.
 --
 -- Mirrored, not imported, for the reason BattleSim2/events.lua gives: this
 -- directory runs with no Config, no Wire and no engine, because the same rules
@@ -33,7 +34,7 @@ local floor = math.floor
 -- the closed set
 -- ------------------------------------------------------------------
 --
--- BattleSim2's twenty, then Gen 3's ten:
+-- BattleSim2's twenty, then Gen 3's eleven:
 --
 --   ability  -- an ability visibly acted (amount = ability id, text = its name)
 --   weather  -- weather started (amount 1), continues (2) or ended (0);
@@ -67,13 +68,20 @@ local floor = math.floor
 --               tied, 0 lost the category; battle_arena.c:470), then `win`
 --               (side = the winner) or `draw`; the judged loser's `faint`
 --               follows the referee's own `msg`
+--   wallyThrow -- WALLY's B_ACTION_WALLY_THROW ran, in its turn order (Turn.
+--               create's `tutorial = "wally"`; contract C-W): `slot` /
+--               `side` = WALLY's field slot (side a's first seat, the only
+--               one that may throw -- so no seat id rides).  No `msg`
+--               follows: the recall, WALLY's slide-in and "You throw a BALL
+--               now, right?" (pokeemerald data/battle_scripts_2.s
+--               BattleScript_ActionWallyThrow) are the screen's to play
 M.KINDS = {
   msg = true, anim = true, damage = true, drain = true, faint = true,
   send = true, status = true, stat = true, switch = true, item = true,
   run = true, turn = true, over = true, wait = true, reconnect = true,
   chose = true, unchose = true, moves = true, exp = true, team = true,
   ability = true, weather = true, held = true, form = true, sub = true, ball = true,
-  obey = true, lesson = true, palace = true, arena = true,
+  obey = true, lesson = true, palace = true, arena = true, wallyThrow = true,
 }
 
 -- The closed token sets of the two facility kinds (Wire.PALACE_TOKENS3 /
@@ -173,6 +181,7 @@ M.SHAPES = {
                 slot = "mind / skill / body / win: the battler's field slot",
                 side = "mind / skill / body / win: whose",
                 amount = "mind / skill / body: the points awarded, 2 / 1 / 0" },
+  wallyThrow = { slot = "WALLY's field slot", side = "a" },
 }
 
 -- ------------------------------------------------------------------

@@ -38,7 +38,7 @@ local T = require("tests.modkit")
 local check, eq = T.check, T.eq
 
 local MOD_PATH = "mods/rby_mmo"
-if not io.open(MOD_PATH .. "/src/SoloBattle.lua", "rb") then
+do -- Prefer this suite's checkout over an older installed mod.
   local src = debug.getinfo(1, "S").source
   if type(src) == "string" and src:sub(1, 1) == "@" then
     local dir = src:sub(2):match("(.+)[/\\]")

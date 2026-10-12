@@ -378,6 +378,148 @@ for index, scn in ipairs(fixture.scenarios) do
   end
 end
 
+-- ------------------------------------------------------------------
+-- contract C-W: WALLY's throw (docs/plans/gen3-solo-remaining-fights.md,
+-- wave 4b), asserted on the replay itself -- what each w4b_wally_cw_* script
+-- must show whatever `--update` wrote, so a regenerated `expect` can never
+-- bless a turn order pret does not have.  pokeemerald battle_main.c:4819
+-- sorts B_ACTION_WALLY_THROW with the moves at priority 0 (MOVE_NONE, :4706);
+-- battle_util.c:625 HandleAction_WallyBallThrow sets gActionsByTurnOrder[1] =
+-- B_ACTION_FINISHED.
+-- ------------------------------------------------------------------
+
+do
+  local byName = {}
+  for index, scn in ipairs(fixture.scenarios) do byName[scn.name] = results[index] end
+  local function check(cond, name, what)
+    if cond then passed = passed + 1 else fail(name, what) end
+  end
+  -- The 1-based position of the first event `pred` takes, after `from`.
+  local function at(got, pred, from)
+    for i = (from or 0) + 1, #got.events do
+      if pred(got.events[i]) then return i end
+    end
+    return nil
+  end
+  local function isThrow(e) return e.t == "wallyThrow" end
+  local function used(who) return function(e) return e.t == "msg" and e.text:find("^" .. who .. " used ") ~= nil end end
+  local function turnOf(n) return function(e) return e.t == "turn" and e.amount == n and e.slot == nil end end
+  local function count(got, pred)
+    local n = 0
+    for _, e in ipairs(got.events) do if pred(e) then n = n + 1 end end
+    return n
+  end
+  local function scenario(name)
+    local got = byName[name]
+    if not got then fail(name, "C-W: scenario missing from the fixture or refused") end
+    return got
+  end
+
+  -- Thrown first: the event names WALLY's field slot (no seat id rides), and
+  -- the foe never acts that turn.
+  local got = scenario("w4b_wally_cw_throw_first")
+  if got then
+    local t3, t4 = at(got, turnOf(3)), at(got, turnOf(4))
+    local thr = at(got, isThrow)
+    check(t3 and thr and t4 and t3 < thr and thr < t4, "w4b_wally_cw_throw_first",
+      "C-W: the throw runs in turn 3, and turn 4 opens after it")
+    local ev = thr and got.events[thr] or {}
+    check(ev.seat == nil and ev.slot == 0 and ev.side == "a", "w4b_wally_cw_throw_first",
+      "C-W: wallyThrow { slot = 0, side = a }, no seat")
+    check(t3 and t4 and (at(got, used("RALTS"), t3) or math.huge) > t4, "w4b_wally_cw_throw_first",
+      "C-W: thrown first, the foe's slot is cancelled -- no RALTS move in turn 3")
+    check(count(got, isThrow) == 1, "w4b_wally_cw_throw_first", "C-W: one throw, one event")
+    check(got.outcome.how == "catch" and got.outcome.given == false, "w4b_wally_cw_throw_first",
+      "C-W: turn 4's ball is the forced catch")
+  end
+  -- The foe first (faster, a tie it wins, a +1 move, a QUICK CLAW): it acts,
+  -- then the throw; the turn then ends.
+  for _, name in ipairs({ "w4b_wally_cw_foe_first", "w4b_wally_cw_tie_foe_first",
+                          "w4b_wally_cw_priority_foe", "w4b_wally_cw_quick_claw_foe" }) do
+    got = scenario(name)
+    if got then
+      local foe, thr, t2 = at(got, used("RALTS")), at(got, isThrow), at(got, turnOf(2))
+      check(foe and thr and t2 and foe < thr and thr < t2, name,
+        "C-W: the foe acts first, then the throw, then turn 2")
+    end
+  end
+  -- The throw first (a tie it wins, a foe's -6 move): the foe is silent.
+  for _, name in ipairs({ "w4b_wally_cw_tie_throw_first", "w4b_wally_cw_negative_priority_foe" }) do
+    got = scenario(name)
+    if got then
+      local thr, t2 = at(got, isThrow), at(got, turnOf(2))
+      check(thr and t2 and thr < t2 and at(got, used("RALTS")) == nil, name,
+        "C-W: thrown first, the foe never acts that turn")
+    end
+  end
+  -- A thrower knocked out before its turn throws nothing.
+  got = scenario("w4b_wally_cw_thrower_down")
+  if got then
+    check(count(got, isThrow) == 0 and got.outcome.how == "ko", "w4b_wally_cw_thrower_down",
+      "C-W: no throw from a fainted thrower; the fight is lost")
+  end
+  -- The SECOND slot, whoever holds it: the faster partner is cancelled, the
+  -- wild seat after it still acts.
+  got = scenario("w4b_wally_cw_second_slot_partner")
+  if got then
+    local thr = at(got, isThrow)
+    check(thr and at(got, used("PARTNER")) == nil and (at(got, used("RALTS"), thr) or 0) > thr,
+      "w4b_wally_cw_second_slot_partner", "C-W: gActionsByTurnOrder[1] is the partner's; the third slot acts")
+  end
+  -- Refused everywhere else (the result `false`), and no event.
+  for name, slot in pairs({
+    w4b_wally_cw_refused_plain_wild = 1, w4b_wally_cw_refused_old_man = 1,
+    w4b_wally_cw_refused_pokedude = 1, w4b_wally_cw_refused_1v1 = 1,
+    w4b_wally_cw_refused_no_battler = 1, w4b_wally_cw_refused_replacing = 3,
+  }) do
+    got = scenario(name)
+    if got then
+      check(got.results[slot] == false and count(got, isThrow) == 0, name,
+        "C-W: wallyThrow refused (result " .. slot .. " false) and never emitted")
+    end
+  end
+  got = scenario("w4b_wally_cw_refused_side_b")
+  if got then
+    check(got.results[1] == false and got.results[3] == true and count(got, isThrow) == 1
+      and got.events[at(got, isThrow)].side == "a", "w4b_wally_cw_refused_side_b",
+      "C-W: side b's throw refused, side a's taken")
+  end
+  -- WALLY's seat alone: side a's SECOND seat (a coop partner) is refused like
+  -- side b -- pokeemerald's WALLY controller drives B_POSITION_PLAYER_LEFT
+  -- only -- so a turn where both side-a seats file one holds one throw, and
+  -- one recall (WALLY's, slot 0).
+  got = scenario("w4b_wally_cw_refused_partner")
+  if got then
+    local thr = at(got, isThrow)
+    check(got.results[1] == false and got.results[2] == true and count(got, isThrow) == 1
+      and thr and got.events[thr].slot == 0 and got.events[thr].side == "a", "w4b_wally_cw_refused_partner",
+      "C-W: the partner's throw refused, WALLY's taken; one throw, from slot 0")
+  end
+
+  -- The throw draws nothing: with no tie and no QUICK CLAW, a turn whose foe
+  -- is cancelled leaves the generator where it was.
+  local scn
+  for _, s in ipairs(fixture.scenarios) do
+    if s.name == "w4b_wally_cw_throw_first" then scn = s end
+  end
+  if scn then
+    local opts = plain(scn.create)
+    opts.typeTable, opts.movePool = plain(fixture.typeTable), plain(fixture.movePool)
+    opts.wildPick = nil
+    local battle = Turn.create(opts)
+    battle:drainEvents()
+    local before = battle:snapshot().rngState
+    battle:submitChoice("p1", { action = "wallyThrow" })
+    battle:submitChoice("wild", { action = "fight", move = 0 })
+    check(battle:snapshot().rngState == before and battle:snapshot().turn == 2, "C-W draws",
+      "C-W: the throw turn drew nothing and closed")
+    -- A choice the throw ignores: nothing but the action is read.
+    local b2 = Turn.create(opts)
+    check(b2:submitChoice("p1", { action = "wallyThrow", move = 1, item = 4, slot = 1, target = 3 }) == true,
+      "C-W stray", "C-W: stray fields on a wallyThrow are ignored, not refused")
+  end
+end
+
 if UPDATE then
   -- Rewrite the fixture: inputs as they were, expectations from this run,
   -- one event per line so a diff reads as a turn-by-turn change.

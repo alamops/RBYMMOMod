@@ -130,6 +130,15 @@ local function legOn(name, group)
   return group ~= nil and SOLO_LEGS[group] == true
 end
 
+-- The Gen 3 fight-family legs, one module each beside this driver (see
+-- `familyLegs` in runGen3): the field families (Safari, roamers and scripted
+-- legendaries, the ghost, the first battles, the tutorials), the Battle
+-- Frontier's halls, and the rest of the facilities and doubles (Trainer
+-- Tower / Hill, the tents, Secret Bases, two-trainer pairs, Steven).
+local FAMILY_LEGS3 = { "solo3_e2e_field", "solo3_e2e_frontier", "solo3_e2e_facility" }
+local DRIVER_DIR = debug.getinfo(1, "S").source:sub(2):match("(.+)[/\\]")
+  or "mods/rby_mmo/tests/drivers"
+
 -- ==================================================================
 -- Gen 3 (FireRed / LeafGreen / Emerald)
 -- ==================================================================
@@ -2700,9 +2709,42 @@ local function runGen3(game, H, U, env)
     setOption("classicui", false)
   end
 
+  -- The fight families SOLO BATTLES took from the cart (docs/plans/gen3-solo-
+  -- remaining-fights.md) live beside this driver, one module per group
+  -- (FAMILY_LEGS3), each a `function(kit)` driving its own SOLO_LEGS names
+  -- through the readers and drivers above. Every listed module is required.
+  local function familyLegs()
+    local kit = {
+      game = game, H = H, U = U, env = env, log = log, check = check, skip = skip,
+      legOn = legOn, VERSION = VERSION, emerald = emerald, tagGame = tagGame,
+      shot = shot, exports = exports, ctx = ctx, solo = solo, session = session,
+      setOption = setOption, fight = fight, layerId = layerId, shown = shown,
+      said = said, awaitChoose = awaitChoose, nudge = nudge, bestMove = bestMove,
+      fightWith = fightWith, command = command, driveToEnd = driveToEnd,
+      settle = settle, party = party, lead = lead, ppSum = ppSum, seed = seed,
+      wildOf = wildOf, STARTER = STARTER, WILD = WILD, GRASS_MAP = GRASS_MAP,
+    }
+    for _, name in ipairs(FAMILY_LEGS3) do
+      local path = DRIVER_DIR .. "/" .. name .. ".lua"
+      local fh = io.open(path, "r")
+      if not fh then
+        check(false, name .. " is present", "missing " .. path)
+      else
+        fh:close()
+        local okLoad, legs = pcall(dofile, path)
+        if check(okLoad and type(legs) == "function", name .. " loads", tostring(legs)) then
+          local okRun, err = pcall(legs, kit)
+          check(okRun, name .. " runs to its end", tostring(err))
+          settle()
+        end
+      end
+    end
+  end
+
   if not legOn("singles") then
     doubleLegs()
     badgeLegs()
+    familyLegs()
     return
   end
 
@@ -3457,10 +3499,11 @@ local function runGen3(game, H, U, env)
 
   doubleLegs()
   badgeLegs()
+  familyLegs()
 end
 
 return function(game)
-  local H = dofile("mods/rby_mmo/tests/drivers/mmo_util.lua")
+  local H = dofile(DRIVER_DIR .. "/mmo_util.lua")
   local U = H.U
   local TAG = "SOLO_E2E:"
   local SHOT_DIR = os.getenv("SHOT_DIR") or "/tmp/rby_mmo_solo_shots"

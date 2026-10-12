@@ -658,7 +658,18 @@ end
 -- wiped. Returns the same pair M:consume has always returned: whether there
 -- was anything to finish at all, and -- when there was -- whether the engine
 -- ran the blackout ritual itself so the caller must not run a second one.
+--
+-- A Gen 3 stand-in that is already finished -- its ritual ran, or it was
+-- handed back and the cart's own battle owns the ending (CoopField
+-- Stand:finish / fightAlone) -- answers `true, true`: handled, and the ritual
+-- is somebody else's.  Not `false`: to M:onBattleOver false means "no engine
+-- battle behind this one", and it would then finish a walk-in trainer again
+-- off the plan's npcId (M:syntheticFinish3 pays the prize and sets the flag a
+-- second time -- it is not idempotent) or run a second whiteout on a loss.
 function M.finishBuriedBattle(engine, game, result, blackout)
+  if engine and engine.gen3Divert then
+    if engine.finished then return true, true end
+  end
   local finish = M.buriedFinisher(engine)
   if not finish then return false end
 
@@ -3507,6 +3518,16 @@ function M:onBattleOver(result, game, state, toLearn)
   -- both touch the same party. Asked later it would be answering about the
   -- world after the fix rather than the world that needed one.
   local blackout = M.blacksOut(outcome, game)
+  -- A knockout draw is one decision for every client: the referee's sheets
+  -- say both sides are down. Leftover HP on this save does not complete the
+  -- trainer. A timeout, a disconnect and a forfeit stay draws, and halt
+  -- when this party is still standing. Gen 3's rule (BattleSim3's knockout
+  -- draw, read off the outcome's `reason` -- the hub sends no `how`); Red and
+  -- Gold keep deciding a draw's blackout from this save alone.
+  if outcome == "draw" and state and state.gen3
+     and CoopField.knockoutHow3(state.medEndHow, state.medEndReason) then
+    blackout = true
+  end
 
   self:offerForgets(game, toLearn)
   -- Consumed, not dropped. The trainer has been fought -- by four of them --
@@ -3538,7 +3559,7 @@ function M:onBattleOver(result, game, state, toLearn)
   -- win, finish the trainer off synthetically from the waiter's npcId --
   -- defeat flag, prize, afterBattle -- without pushing a fake battle. Never
   -- when consume already ran (walk-in engineBattle): that would double-pay.
-  if not handled and result == "win" and plan and plan.npcId then
+  if not handled and outcome == "win" and plan and plan.npcId then
     handled = self:syntheticFinish(game, plan, state)
   end
   -- Gen 3 never whites out a won battle, whatever it cost one player's team.
@@ -3550,7 +3571,7 @@ function M:onBattleOver(result, game, state, toLearn)
   -- writeback does for any win. Running the ritual here was worse than a
   -- divergence: the trainer's beaten script (the badge, the TM, the words)
   -- runs after the win, and the warp halted it halfway through.
-  if onGen3() and result == "win" then return end
+  if onGen3() and outcome == "win" then return end
   if blackout and not (handled and engineRitual) then self:blackout(game) end
 end
 

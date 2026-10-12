@@ -591,6 +591,43 @@ block("Steven lost", function()
   eq(Doubles.Partner:word({}, {}, { result = "win", word = "win" }), "win", "Steven word: a win 'win'")
 end)
 
+-- A knockout draw with no stand-in: his three stay in session.party past
+-- `playerHalf` (Doubles.partnerMons, doStevenBattle's layout), uncovered by
+-- the player's sheets and at the HP they started with.  They are not the
+-- player's, so they are no disagreement: the draw stays B_OUTCOME_DREW
+-- (VAR_RESULT 3) -- never promoted to a win, no prize.
+block("Steven drawn with no stand-in", function()
+  R.newGame("emerald")
+  local mine = { mon(16, 30, { moves = { 300 } }) }
+  local his = stevenThree()
+  local party = R.session().party
+  for _, m in ipairs(mine) do party[#party + 1] = m end
+  for _, m in ipairs(his) do party[#party + 1] = m end
+  local money = R.session().money
+  local solo = R.newSolo()
+  local rec = nativeDone()
+  local opts = stevenOpts(#mine)
+  opts.done = rec.done
+  check(solo:fromGen3Trainer(R.game(), R.FakeTrainers.foeFromId(MAXIE), opts),
+        "Steven drawn: taken with no stand-in")
+  eq(solo.gen3 and solo.gen3.name, "partner", "Steven drawn: ...as the partner kind")
+  eq(#R.session().party, 4, "Steven drawn: ...his three left in the session party")
+  local sim = solo.sim
+  for _, s in ipairs(sim.byId.solo_player.mons) do s.hp = 0 end
+  local up = 0
+  for i = #mine + 1, #R.session().party do
+    if (tonumber(R.session().party[i].hp) or 0) > 0 then up = up + 1 end
+  end
+  eq(up, 3, "Steven drawn: his three still stand in the save, past the player's half")
+  sim:_finish("draw", nil, nil, "ko", "ko")
+  R.playDouble(solo)
+  check(solo.fight == nil, "Steven drawn: the fight ended")
+  eq(table.concat(rec.heard, ","), "draw", "Steven drawn: the native hears 'draw', not 'win'")
+  eq(rec.code, 3, "Steven drawn: ...B_OUTCOME_DREW")
+  eq(R.session().money, money, "Steven drawn: no prize")
+  eq(R.FakeVm.halted, 0, "Steven drawn: no script halted")
+end)
+
 block("Steven handed back", function()
   R.newGame("emerald")
   local mine = { mon(16, 30, { moves = { 300 } }), mon(29, 30, { moves = { 300 } }) }

@@ -16,15 +16,25 @@
 --
 --   1. The module: found by name, its pure answers (the hall, the rules per
 --      hall, the screen's prompts).
---   2. The hand-backs: the Palace and the Arena (the halls and the tents),
---      a Tower multi, the Pike's two-trainer double, a Pyramid floor whose
---      run rule cannot be read -- nothing built, nothing taken.
+--   2. The hand-backs: a Palace whose cart tables cannot be read, an Arena
+--      double, a Palace double the double screen cannot pick for, a Tower
+--      multi and the Pike's two-trainer double with no multi module, a
+--      Pyramid floor whose run rule cannot be read -- nothing built, nothing
+--      taken.
 --   3. Each hall, through the referee: the Battle Tower (win, forfeit, loss,
 --      draw, the interview record, the double), the Dome (its last moves,
 --      Battle._nextFacility taken and put back), the Factory and the Pike
 --      (their AI flags and rules), the Pike and Pyramid wilds (Pay Day kept,
 --      the Pyramid's run rule, bag and Pickup), Trainer Hill (the item quirk),
---      FireRed's Trainer Tower and an Emerald Secret Base.
+--      FireRed's Trainer Tower and an Emerald Secret Base; the Battle Palace
+--      (its rules, both sides' nature picks, the FIGHT callback, the
+--      "unable" turn, the low-HP half, a double's target) and the Battle
+--      Arena (its rules and Mind ratings, no switching, the judge's win /
+--      loss / draw and the judged monster's HP and status kept).
+--   4. The multi fights' module: the delegation contract with a stand-in
+--      src/Solo3/FacilityMulti.lua.
+--   5. The screen options the halls set: the victory jingle (the Frontier
+--      Brain's, everyone else's, none for a Secret Base) and the Pyramid bag.
 --
 -- Legal: every species, move, trainer and item row below is either the SDK
 -- fixture's or invented here with synthetic numbers; the only real values are
@@ -41,7 +51,7 @@ local T = require("tests.modkit")
 local check, eq = T.check, T.eq
 
 local MOD_PATH = "mods/rby_mmo"
-if not io.open(MOD_PATH .. "/src/SoloBattle.lua", "rb") then
+do -- Prefer the checkout containing this suite over the installed mod.
   local src = debug.getinfo(1, "S").source
   if type(src) == "string" and src:sub(1, 1) == "@" then
     local dir = src:sub(2):match("(.+)[/\\]")
@@ -72,9 +82,21 @@ local stubMod = {
 }
 
 local loadstr = loadstring or load
+-- A module the suite stands in (OVERRIDE) or hides (HIDDEN: read as a file
+-- that is not there) -- src/Solo3/FacilityMulti.lua, which the facility kind
+-- reads only when it is installed, is pinned to one or the other wherever a
+-- scenario depends on it.
+local OVERRIDE, HIDDEN = {}, {}
+-- This suite's facility is the singles' and the halls' (tests/gen3_solo_multi.lua
+-- holds the multi fights): the multi module is not there unless a scenario
+-- stands one in.
+local MULTI = "Solo3/FacilityMulti"
+HIDDEN[MULTI] = true
 local function newNeed()
   local cache = {}
   local function need(n)
+    if HIDDEN[n] then error("hidden by the suite: src/" .. n .. ".lua") end
+    if OVERRIDE[n] ~= nil then return OVERRIDE[n] end
     if cache[n] ~= nil then return cache[n] end
     local h = assert(io.open(MOD_PATH .. "/src/" .. n .. ".lua", "rb"))
     local body = h:read("*a")
@@ -125,6 +147,11 @@ P3._moveNames[300] = "MINDBLAST"
 ROM[6] = { effect = 34, power = 40, type = 0, accuracy = 100, pp = 20,
            secondaryChance = 100, target = 0, priority = 0, flags = 2 }
 P3._moveNames[6] = "PAYDAY"
+-- A move aimed at its user (pret MOVE_TARGET_USER, 16): the Battle Palace's
+-- DEFENSE group.  pret EFFECT_EVASION_UP (16) on an invented row.
+ROM[104] = { effect = 16, power = 0, type = 0, accuracy = 0, pp = 15,
+             secondaryChance = 0, target = 16, priority = 0, flags = 0 }
+P3._moveNames[104] = "DOUBLETEAM"
 ITEMS[1] = { name = "MASTER BALL", pocket = "POKE_BALLS", price = 0 }
 ITEMS[21] = { name = "HYPER POTION", pocket = "ITEMS", price = 1200 }
 ITEMS[127] = { name = "AMULET COIN", pocket = "ITEMS", price = 100, holdEffect = 32 }
@@ -801,6 +828,27 @@ local interviews = {}
 local FakeTower = {}
 function FakeTower.setInterviewData(sess) interviews[#interviews + 1] = sess.lastFrontierBattle end
 
+-- The Frontier's tables the cart owns (rse/frontier/f2_data.lua's manifest,
+-- decoded from the ROM at import), invented here: the Battle Palace's
+-- per-nature move-group likelihoods (the high-HP pair, then the low-HP pair),
+-- double-battle target preferences and half-HP flavor lines, and the Battle
+-- Arena's Mind ratings (move id + 1).  PALACE_TABLES = nil reads as a cart
+-- whose tables could not be decoded.
+local PALACE = { moveGroupLikelihood = {}, moveTarget = {}, flavorTextId = {} }
+for n = 1, 25 do
+  PALACE.moveGroupLikelihood[n] = { 60, 80, 20, 40 }
+  PALACE.moveTarget[n] = (n - 1) % 3
+  PALACE.flavorTextId[n] = (n - 1) % 4
+end
+local PALACE_TABLES = PALACE
+local ARENA = { mindRatings = {} }
+for id = 0, 400 do ARENA.mindRatings[id + 1] = 1 end
+ARENA.mindRatings[300 + 1] = 0
+local FakeF2 = {}
+function FakeF2.palace() return PALACE_TABLES end
+function FakeF2.arena() return ARENA end
+
+stub("src.core.game3.rse.frontier.f2_data", FakeF2)
 stub("src.core.game3.rse.frontier.pyramid", FakePyramid)
 stub("src.core.game3.rse.trainer_hill", FakeHill)
 stub("src.core.game3.rse.secret_base", FakeSecretBase)
@@ -1010,6 +1058,30 @@ do
   local pikeWild = { bag = false }
   for k, v in pairs(frontier) do pikeWild[k] = v end
   same(R("pike", "wild"), pikeWild, "rules (Pike wild): no forfeit -- a wild RUN stays a RUN")
+  -- The Palace and the Arena (wave 4): the Frontier's, plus their own.
+  local flavor = {}
+  for n = 1, 25 do flavor[n] = PALACE.flavorTextId[n] end
+  local palace = { bag = false, forfeit = true, palace = { flavor = flavor } }
+  for k, v in pairs(frontier) do palace[k] = v end
+  same(R("palace", "trainer"), palace, "rules (Palace): the Frontier's, and the cart's flavor table")
+  local arena = { bag = false, forfeit = true, arena = true }
+  for k, v in pairs(frontier) do arena[k] = v end
+  same(R("arena", "trainer"), arena, "rules (Arena): the Frontier's, and the judge")
+  PALACE_TABLES = { moveGroupLikelihood = PALACE.moveGroupLikelihood, moveTarget = PALACE.moveTarget,
+                    flavorTextId = { 0, 1, 2 } }
+  local short, whyShort = R("palace", "trainer")
+  eq(short, nil, "rules (Palace): a flavor table short of 25 natures seats nothing")
+  check(type(whyShort) == "string", "rules (Palace): ...and says why")
+  PALACE_TABLES = { moveGroupLikelihood = PALACE.moveGroupLikelihood, moveTarget = { 9 },
+                    flavorTextId = PALACE.flavorTextId }
+  eq(R("palace", "trainer"), nil, "rules (Palace): ...nor does a target table out of its range")
+  PALACE_TABLES = PALACE
+  local t3 = Facility.palaceTables3()
+  eq(t3 and #t3.likelihood, 25, "palace tables: 25 natures of likelihoods")
+  eq(t3 and t3.likelihood[1][2], 80, "palace tables: ...as the cart has them")
+  check(t3 and t3.likelihood[1] ~= PALACE.moveGroupLikelihood[1], "palace tables: ...copied")
+  eq(t3 and t3.moveTarget[2], 1, "palace tables: the target preferences")
+  eq(t3 and t3.flavor[4], 3, "palace tables: the flavor lines")
   local pyramid = { pyramidBag = true, pyramidRun = 4, forfeit = true }
   for k, v in pairs(frontier) do pyramid[k] = v end
   PYR.mult = 4
@@ -1039,23 +1111,42 @@ end
 
 do
   -- The Palace and the Arena (and Verdanturf's / Fallarbor's tents, which the
-  -- engine starts as those halls): wave 3's rules, the cart's fight for now.
-  for _, hall in ipairs({ "palace", "arena" }) do
+  -- engine starts as those halls) are taken since wave 4 (section 3 (l) /
+  -- (m)); what stays the cart's: a Palace whose tables this cart could not
+  -- decode, an Arena double (no start makes one), and a Palace double while
+  -- the double screen has no Palace pick (CoopBattle.SOLO_DOUBLE_PALACE3).
+  local function handedBack(hall, opts, label)
     fresh()
     SESSION.party = { monOf(4, 30), monOf(5, 30) }
     local rulesObj = { kind = hall }
     BattleMod._nextFacility = rulesObj
     local solo = newSolo()
-    local taken, stand = offerTrainer(solo, frontierFoe({ monOf(16, 30) }), startOpts(hall))
-    eq(taken, false, "hand-back: a Battle " .. hall .. " fight is the cart's")
-    eq(stand and stand.facility3, hall, "hand-back: ...the door named the hall")
-    eq(solo:isRunning(), false, "hand-back (" .. hall .. "): nothing is running")
-    eq(Stack.depth(), 0, "hand-back (" .. hall .. "): nothing went onto the stack")
+    local taken, stand = offerTrainer(solo, frontierFoe({ monOf(16, 30), monOf(16, 31) }), opts)
+    eq(taken, false, "hand-back: " .. label .. " is the cart's")
+    eq(stand and stand.facility3, hall, "hand-back (" .. label .. "): the door named the hall")
+    eq(solo:isRunning(), false, "hand-back (" .. label .. "): nothing is running")
+    eq(Stack.depth(), 0, "hand-back (" .. label .. "): nothing went onto the stack")
     eq(rawget(BattleMod, "_nextFacility"), rulesObj,
-       "hand-back (" .. hall .. "): the hall's rules object is still there for the cart's start")
+       "hand-back (" .. label .. "): the hall's rules object is still there for the cart's start")
   end
+  local mark = #warns
+  PALACE_TABLES = nil
+  handedBack("palace", startOpts("palace"), "a Battle Palace fight whose tables cannot be read")
+  check(countIn(warns, "Battle Palace's tables could not be read") == 1,
+        "hand-back (Palace tables): ...said once, with a remedy")
+  dropWarnsSince(mark)
+  PALACE_TABLES = PALACE
+  handedBack("arena", startOpts("arena", { double = true }), "a Battle Arena double")
+  local declared = CoopBattle.SOLO_DOUBLE_PALACE3
+  CoopBattle.SOLO_DOUBLE_PALACE3 = nil
+  handedBack("palace", startOpts("palace", { double = true }),
+             "a Battle Palace double the double screen cannot pick for")
+  CoopBattle.SOLO_DOUBLE_PALACE3 = declared
 
-  -- A Battle Tower multi: a partner and two trainers.
+  -- A Battle Tower multi: a partner and two trainers -- the cart's while
+  -- src/Solo3/FacilityMulti.lua is not installed (hidden here; section 4
+  -- stands one in).
+  Facility.resetMulti3()
   fresh()
   local mine = { monOf(4, 30), monOf(5, 30) }
   local partnerMons = { monOf(29, 30), monOf(151, 30) }
@@ -1066,7 +1157,7 @@ do
                          frontierPartner = 9, partnerName = "LUCY", partnerPicId = 4,
                          frontierFoeHalf = 2, frontierOpponentB = 12,
                          frontierTrainerB = { class = 61, className = "EXPERT", name = "OWEN", pic = 31 } }))
-  eq(taken, false, "hand-back: a Battle Tower multi is the cart's (the partner work comes later)")
+  eq(taken, false, "hand-back: a Battle Tower multi is the cart's (no multi module installed)")
   eq(#SESSION.party, 4, "hand-back (multi): the partner's monsters are back on the party")
   eq(SESSION.party[3], partnerMons[1], "hand-back (multi): ...in their place")
   eq(solo:isRunning(), false, "hand-back (multi): nothing is running")
@@ -1079,7 +1170,7 @@ do
     startOpts("pike", { double = true, twoOpponents = true, frontierFoeHalf = 1, frontierOpponentB = 12,
                         frontierTrainerB = { class = 61, className = "EXPERT", name = "OWEN", pic = 31 },
                         defeatTextB = "OWEN: Hmm." }))
-  eq(taken, false, "hand-back: the Pike's two-trainer double is the cart's (the pair work comes later)")
+  eq(taken, false, "hand-back: the Pike's two-trainer double is the cart's (no multi module installed)")
   eq(solo:isRunning(), false, "hand-back (Pike double): nothing is running")
 
   -- A Pyramid floor whose run rule cannot be read.
@@ -1749,6 +1840,506 @@ do
   eq(SESSION.money, 1000, "secret base loss: no money lost")
   eq(weak.hp, 0, "secret base loss: the heal is the script's, later")
   check(not textOf(lf):find("STRINGID_PLAYERWHITEOUT", 1, true), "secret base loss: no lines")
+end
+
+-- A generator answering the queued values first (clamped into the range
+-- asked), then the bottom of every range; and one that always answers the
+-- bottom.
+local function queuedRng(values)
+  local q = {}
+  for i, v in ipairs(values) do q[i] = v end
+  return function(lo, hi)
+    if hi == nil then lo, hi = 1, lo end
+    if #q > 0 then
+      local v = table.remove(q, 1)
+      if v < lo then v = lo end
+      if v > hi then v = hi end
+      return v
+    end
+    return lo
+  end
+end
+local function lowRng(lo, hi) if hi == nil then return 1 end return lo end
+
+-- Every choice filed with this referee, in order, whoever filed it.
+local function recordFiled(sim)
+  local filed = {}
+  local real = sim.submitChoice
+  sim.submitChoice = function(self_, id, choice)
+    filed[#filed + 1] = { id = id, choice = choice }
+    return real(self_, id, choice)
+  end
+  return filed
+end
+local function lastFiled(filed, id)
+  for i = #filed, 1, -1 do
+    if filed[i].id == id then return filed[i].choice end
+  end
+  return nil
+end
+
+-- (l) the Battle Palace (and Verdanturf's tent, started as the Palace) -------
+do
+  -- Taken: the hall's rules, the screen's options, both minds by nature.
+  fresh()
+  local lead = monOf(4, 60, { moves = { 10, 45, 104 }, pp = { 35, 40, 15 }, maxPp = { 35, 40, 15 },
+                              nature = 0 })
+  SESSION.party = { lead }
+  local rulesObj = { kind = "palace" }
+  BattleMod._nextFacility = rulesObj
+  local solo = newSolo()
+  local foeOpts = { moves = { 33, 45 }, pp = { 35, 40 }, maxPp = { 35, 40 }, nature = 0 }
+  local taken, stand = offerTrainer(solo, frontierFoe({ monOf(16, 60, foeOpts), monOf(16, 60, foeOpts) }),
+    startOpts("palace"))
+  check(taken, "palace: a Battle Palace single is taken (" .. table.concat(warns, " / ") .. ")")
+  eq(stand and stand.facility3, "palace", "palace: the door says the Palace")
+  local pr = createdWith and createdWith.rules and createdWith.rules.palace
+  eq(pr and #pr.flavor, 25, "palace rules: the cart's flavor table, a line per nature")
+  eq(pr and pr.flavor[7], PALACE.flavorTextId[7], "palace rules: ...as the cart has it")
+  check(solo.sim.rules.palace ~= nil, "palace rules: the referee plays the Palace")
+  eq(createdWith.rules.forfeit, true, "palace rules: RUN forfeits")
+  eq(createdWith.rules.bag, false, "palace rules: no bag")
+  eq(screenedWith.rules and screenedWith.rules.forfeit, true, "palace screen: RUN asks to forfeit")
+  eq(type(screenedWith.palace and screenedWith.palace.pick), "function",
+     "palace screen: FIGHT is handed the Palace's pick")
+  eq(screenedWith.victorySong, "MUS_VICTORY_TRAINER", "palace screen: the Frontier trainer's jingle")
+  local foeBrain = solo.gen3.npcs[FOE]
+  check(type(foeBrain) == "table" and foeBrain.palace3 ~= nil, "palace brain: the trainer picks by nature")
+  eq(foeBrain.aiFlags, 7, "palace brain: ...scoring with the facility's scripts")
+  eq(foeBrain.noItems, true, "palace brain: ...and no items")
+  local mine = solo.gen3.palaceBrain3
+  check(type(mine) == "table" and mine.palace3 ~= nil, "palace: the player's monster picks by nature too")
+  eq(mine and mine.side3, "a", "palace: ...from side a")
+  eq(mine and mine.aiFlags, 7, "palace: ...with the FRONTIER's scripts (BattleAI_SetupAIData)")
+  eq(mine and mine.noItems, true, "palace: ...and no bag")
+  local sim = solo.sim
+  local f = solo.fight
+  for _ = 1, 10 do f:update(2.0); solo:update(0.5, GAME) end
+  eq(rawget(BattleMod, "_nextFacility"), nil, "palace: the hall's rules object is taken off the engine")
+
+  -- The trainer's first pick was filed as the fight opened: one of the group
+  -- its nature drew, or the out-of-group fallback.
+  local c1 = sim.byId[FOE].choice
+  local d1 = foeBrain.lastPalace3
+  check(c1 and c1.action == "fight" and d1 ~= nil, "palace: the trainer's pick is filed as the turn opens")
+  check(d1 and (d1.fallback or d1.mask[c1.move] == true),
+        "palace: ...inside the group its nature drew (or the fallback)")
+
+  -- Turn 1, the player: FIGHT through the screen's callback.  Under 60 is
+  -- the ATTACK group (the high-HP pair is 60 / 80): SCRATCH.  (The screen's
+  -- own state after the callback is its own; the referee's events are read
+  -- on their way to it.)
+  local filed = recordFiled(sim)
+  local fed = {}
+  do
+    local feed = solo._feed
+    solo._feed = function(self_, ev)
+      fed[#fed + 1] = ev
+      return feed(self_, ev)
+    end
+  end
+  mine.rng = queuedRng({ 10 })
+  -- The trainer's turn 2: 70 is DEFENSE, which it has none of -- the
+  -- fallback: a random usable move (no group has two, so any), slot 1, then
+  -- the coin: 80 >= 50, "unable".
+  foeBrain.rng = queuedRng({ 70, 0, 80 })
+  eq(screenedWith.palace.pick(f), true, "palace pick: FIGHT files the nature's pick")
+  local p1 = lastFiled(filed, PLAYER)
+  eq(p1 and p1.move, 0, "palace pick: under 60 the ATTACK group -- SCRATCH")
+  eq(mine.lastPalace3 and mine.lastPalace3.group, 0, "palace pick: ...the group drawn")
+  eq(mine.lastPalace3 and mine.lastPalace3.low, false, "palace pick: ...from the high-HP pair")
+  solo:update(0.5, GAME)
+  local u = lastFiled(filed, FOE)
+  eq(u and u.unable, true, "palace (trainer): no move of its group left, the fallback failed: 'unable'")
+  check(foeBrain.lastPalace3 and foeBrain.lastPalace3.fallback, "palace (trainer): ...by the fallback")
+  eq(sim.byId[FOE].choice and sim.byId[FOE].choice.palace, "unable",
+     "palace (trainer): ...the referee fails it at its turn")
+
+  -- Turn 2, the player: a FIGHT the screen filed with a move of its own is
+  -- the nature's pick all the same.  90 is SUPPORT: GROWL, not the SCRATCH
+  -- the screen named.
+  mine.rng = queuedRng({ 90 })
+  foeBrain.rng = queuedRng({ 95 })
+  check(solo:_choose({ action = "fight", move = 0 }), "palace: a FIGHT through the menu is taken")
+  local p2 = lastFiled(filed, PLAYER)
+  eq(p2 and p2.move, 1, "palace: ...as the nature's pick (SUPPORT -- GROWL), whatever the menu named")
+  eq(p2 and p2.unable, nil, "palace: ...a move of the group, never 'unable'")
+  solo:update(0.5, GAME)
+  local unableEvent, unableLine = false, false
+  for _, ev in ipairs(fed) do
+    if ev.t == "palace" and ev.text == "unable" and ev.side == "b" then unableEvent = true end
+    if ev.t == "msg" and tostring(ev.text):find("appears incapable of using its power", 1, true) then
+      unableLine = true
+    end
+  end
+  check(unableEvent, "palace (trainer): the failed pick ran as the referee's `palace` event 'unable'")
+  check(unableLine, "palace (trainer): ...and 'appears incapable of using its power!'")
+  local t3 = lastFiled(filed, FOE)
+  eq(t3 and t3.move, 1, "palace (trainer): 95 is SUPPORT -- GROWL")
+
+  -- Turn 3: the player's monster at half HP or under has its bit set: the
+  -- low-HP pair (20 / 40) -- 30 is DEFENSE there (it was ATTACK above).
+  sim.byId[PLAYER].b.palaceLow = true
+  check(sim:palaceLow(sim.byId[PLAYER].slot), "palace: the referee reads the bit")
+  mine.rng = queuedRng({ 30 })
+  eq(screenedWith.palace.pick(f), true, "palace (low HP): filed")
+  local p3 = lastFiled(filed, PLAYER)
+  eq(mine.lastPalace3 and mine.lastPalace3.low, true, "palace (low HP): the low-HP pair")
+  eq(p3 and p3.move, 2, "palace (low HP): 30 is DEFENSE there -- DOUBLETEAM")
+
+  -- The player's own failed fallback: a monster with no DEFENSE move.
+  solo:reset()
+  BattleMod._nextFacility = nil
+
+  fresh()
+  local plain = monOf(4, 60, { moves = { 10, 45 }, pp = { 35, 40 }, maxPp = { 35, 40 }, nature = 0 })
+  SESSION.party = { plain }
+  local s2 = newSolo()
+  check(offerTrainer(s2, frontierFoe({ monOf(16, 60, foeOpts) }), startOpts("palace")), "palace unable: taken")
+  local filed2 = recordFiled(s2.sim)
+  s2.gen3.palaceBrain3.rng = queuedRng({ 70, 1, 75 })
+  eq(screenedWith.palace.pick(s2.fight), true, "palace unable: filed")
+  local pu = lastFiled(filed2, PLAYER)
+  eq(pu and pu.unable, true, "palace unable: DEFENSE drawn, none known, the coin fails -- 'unable'")
+  s2.gen3.palaceBrain3.rng = queuedRng({ 70, 1, 10 })
+  s2:reset()
+
+  -- A won fight: the Frontier's after-words, the hall's jingle on the screen.
+  fresh()
+  local strongLead = monOf(4, 60, { moves = { 300, 45 }, pp = { 10, 40 }, maxPp = { 10, 40 }, nature = 0 })
+  SESSION.party = { strongLead }
+  local result
+  local w = newSolo()
+  check(offerTrainer(w, frontierFoe({ monOf(16, 20, foeOpts) }), startOpts("palace", {
+    done = function(r) result = r end })), "palace win: taken")
+  w.gen3.palaceBrain3.rng = lowRng
+  w.gen3.npcs[FOE].rng = lowRng
+  local _, wf = drive(w, function(fx) fx:pickMove(1) end)
+  eq(result, "win", "palace win: done('win')")
+  check(textOf(wf):find("ANABEL: Splendid!", 1, true) ~= nil, "palace win: the trainer's defeat words")
+  eq(wf and wf.victorySong, "MUS_VICTORY_TRAINER", "palace win: the screen plays the hall's jingle")
+  eq(SESSION.frontier and SESSION.frontier.disableRecordBattle, 1, "palace win: not recordable")
+
+  -- Handed back mid-fight: the hall's rules object goes back to the engine.
+  fresh()
+  SESSION.party = { monOf(4, 30) }
+  BattleMod._nextFacility = rulesObj
+  local h = newSolo()
+  check(offerTrainer(h, frontierFoe({ monOf(16, 30) }), startOpts("palace")), "palace hand-back: taken")
+  eq(rawget(BattleMod, "_nextFacility"), nil, "palace hand-back: taken off the engine")
+  h:reset()
+  eq(rawget(BattleMod, "_nextFacility"), rulesObj, "palace hand-back: put back for the cart's start")
+  BattleMod._nextFacility = nil
+
+  -- A Palace double, once the double screen files the pick: the second
+  -- seat's SELECTED move aimed by the nature (nature 0: STRONGER) at the
+  -- stronger foe.
+  local declared = CoopBattle.SOLO_DOUBLE_PALACE3
+  CoopBattle.SOLO_DOUBLE_PALACE3 = true
+  fresh()
+  SESSION.party = { monOf(4, 60, { moves = { 10, 45 }, pp = { 35, 40 }, maxPp = { 35, 40 }, nature = 0 }),
+                    monOf(5, 60, { moves = { 10, 45 }, pp = { 35, 40 }, maxPp = { 35, 40 }, nature = 0 }) }
+  local weakFoe = monOf(16, 60, foeOpts)
+  weakFoe.hp = 10
+  -- Which seats the nature's pick ran for, as the brain loop asked them.
+  local pickedFor = {}
+  local realPalace = Brain._palace3
+  Brain._palace3 = function(self_, bctx, legal)
+    pickedFor[#pickedFor + 1] = bctx.b and bctx.b.slot
+    return realPalace(self_, bctx, legal)
+  end
+  local d = newSolo()
+  check(offerTrainer(d, frontierFoe({ weakFoe, monOf(16, 60, foeOpts) }), startOpts("palace", { double = true })),
+        "palace double: taken once the double screen picks")
+  Brain._palace3 = realPalace
+  eq(table.concat(pickedFor, ","), "3,4",
+     "palace double: the trainer's two seats each picked by nature, through the brain loop")
+  local fa, fb = d.sim.byId[FOE], d.sim.seatsOf and d.sim:seatsOf(FOE)[2]
+  check(fa and fa.choice and fa.choice.action == "fight", "palace double: ...its left seat's pick filed")
+  check(fb and fb.choice and fb.choice.action == "fight", "palace double: ...and its right seat's")
+  eq(d.gen3 and d.gen3.screen, "double", "palace double: on the double screen")
+  eq(type(doubledWith and doubledWith.palace and doubledWith.palace.pick), "function",
+     "palace double: the double screen is handed the pick")
+  -- B on the second seat takes the first seat's pick back, and the cart
+  -- puts gRngValue back where that pick started (battle_main.c:4307): the
+  -- pick made again is the same pick.  The player's Palace generator is its
+  -- own, seeded off the fight's seed.
+  local mine = d.gen3.palaceBrain3
+  local gen = mine and mine.palaceRng3
+  check(gen ~= nil and type(gen.state) == "function", "palace cancel: the player's pick draws from its own generator")
+  eq(gen and gen:state(), (d.gen3.create.seed + Facility.PALACE_RNG_SALT) % 4294967296,
+     "palace cancel: ...seeded off the fight's seed, salted")
+  local filedC = recordFiled(d.sim)
+  local before = gen:state()
+  eq(doubledWith.palace.pick(d.fight, 0), true, "palace cancel: the first seat picks")
+  local first = filedC[#filedC] and filedC[#filedC].choice
+  local afterPick = gen:state()
+  check(afterPick ~= before, "palace cancel: ...drawing from the generator")
+  local firstDraw = mine.lastPalace3 and mine.lastPalace3.percent
+  check(d:_choose({ action = "cancel", seat = 0 }), "palace cancel: B on the second seat takes it back")
+  eq(d.sim.byId[PLAYER].choice, nil, "palace cancel: ...the referee un-files it")
+  eq(gen:state(), before, "palace cancel: ...and the generator is back where the pick started")
+  eq(doubledWith.palace.pick(d.fight, 0), true, "palace cancel: the first seat picks again")
+  local again = filedC[#filedC] and filedC[#filedC].choice
+  eq(gen:state(), afterPick, "palace cancel: ...drawing exactly what it drew before")
+  eq(mine.lastPalace3 and mine.lastPalace3.percent, firstDraw, "palace cancel: ...the same nature draw")
+  eq(again and again.move, first and first.move, "palace cancel: ...the same move")
+  eq(again and again.target, first and first.target, "palace cancel: ...at the same target")
+  eq(again and again.unable, first and first.unable, "palace cancel: ...or the same failure")
+  check(d:_choose({ action = "cancel", seat = 0 }), "palace cancel: taken back once more")
+  eq(gen:state(), before, "palace cancel: ...rewound once more")
+  eq(d:_choose({ action = "cancel", seat = 0 }), false, "palace cancel: nothing filed -- refused")
+  eq(gen:state(), before, "palace cancel: ...and nothing rewound")
+  local filedD = recordFiled(d.sim)
+  d.gen3.palaceBrain3.rng = queuedRng({ 90 })
+  eq(doubledWith.palace.pick(d.fight, 0), true, "palace double: the first seat's pick (field slot 0) is filed")
+  eq(#filedD, 1, "palace double: ...that seat's alone")
+  eq(filedD[1] and filedD[1].id, PLAYER, "palace double: ...for the player's first seat")
+  eq(filedD[1] and filedD[1].choice.move, 1, "palace double: ...SUPPORT -- GROWL")
+  d.gen3.palaceBrain3.rng = queuedRng({ 10 })
+  eq(doubledWith.palace.pick(d.fight, 1), true, "palace double: the second seat's pick is filed")
+  eq(#filedD, 2, "palace double: ...that seat's alone")
+  local seat2 = filedD[#filedD]
+  check(seat2 and seat2.id ~= PLAYER, "palace double: ...for the second seat (" .. tostring(seat2 and seat2.id) .. ")")
+  eq(seat2 and seat2.choice.move, 0, "palace double: ATTACK -- SCRATCH")
+  eq(seat2 and seat2.choice.target, 4, "palace double: ...at the stronger foe (STRONGER: slot 4, full HP)")
+  d:reset()
+  CoopBattle.SOLO_DOUBLE_PALACE3 = declared
+end
+
+-- (m) the Battle Arena (and Fallarbor's tent, started as the Arena) ----------
+do
+  Sheet3.resetArenaMinds()
+  local function arenaFight(lead, foeMon, extra)
+    fresh()
+    SESSION.party = type(lead) == "table" and lead[1] and lead or { lead }
+    FakeVm.running = true
+    local out = {}
+    local solo = newSolo()
+    out.taken = offerTrainer(solo, frontierFoe({ foeMon }), startOpts("arena", {
+      done = function(r) out.result = r end }))
+    out.solo, out.sim = solo, solo.sim
+    return out
+  end
+
+  -- Both use GROWL: Mind, Skill and Body tie -- both judged, a draw.
+  local lead = monOf(4, 50, { moves = { 45 }, pp = { 40 }, maxPp = { 40 } })
+  local x = arenaFight(lead, monOf(16, 50, { moves = { 45 }, pp = { 40 }, maxPp = { 40 } }))
+  check(x.taken, "arena: a Battle Arena fight is taken (" .. table.concat(warns, " / ") .. ")")
+  eq(createdWith.rules.arena, true, "arena rules: the judge")
+  eq(x.sim.rules.arena, true, "arena rules: ...the referee plays it")
+  eq(createdWith.rules.forfeit, true, "arena rules: RUN forfeits")
+  eq(createdWith.sides.a[1].mons[1].moves[1].arenaMind, 1, "arena: the player's moves carry the cart's Mind rating")
+  eq(createdWith.sides.b[1].mons[1].moves[1].arenaMind, 1, "arena: ...and the trainer's")
+  eq(x.solo.gen3.npcs[FOE].arena3, true, "arena brain: never switches, party order")
+  eq(screenedWith.victorySong, "MUS_VICTORY_TRAINER", "arena screen: the Frontier trainer's jingle")
+  local _, xf = drive(x.solo, function(f) f:pickMove(1) end)
+  local o = x.sim:outcome()
+  eq(o and o.how, "judge", "arena draw: the judge ended it")
+  eq(x.result, "draw", "arena draw: done('draw') -- the battle room reads anything but a win as a loss")
+  eq(SESSION.battleOutcome, 3, "arena draw: B_OUTCOME_DREW")
+  eq(FakeVm.halted, 0, "arena draw: the script is answered, never halted")
+  check(textOf(xf):find("ANABEL: Too bad!", 1, true) ~= nil,
+        "arena draw: the trainer's win words (LocalBattleLostPrintTrainersWinText)")
+  check(not textOf(xf):find("STRINGID_PLAYERWHITEOUT", 1, true), "arena draw: no whiteout lines")
+  eq(lead.hp, lead.maxHp, "arena draw: the judged monster keeps its HP")
+  eq(#fieldCalls, 0, "arena draw: no whiteout")
+
+  -- The player's GROWL against a SCRATCH, poisoned: the Body is the trainer's
+  -- -- the player's one monster judged, a loss.
+  local sick = monOf(4, 50, { moves = { 45 }, pp = { 40 }, maxPp = { 40 }, status = "PSN" })
+  local y = arenaFight(sick, monOf(16, 5, { moves = { 10 }, pp = { 35 }, maxPp = { 35 } }))
+  check(y.taken, "arena loss: taken")
+  local _, yf = drive(y.solo, function(f) f:pickMove(1) end)
+  local oy = y.sim:outcome()
+  eq(oy and oy.how, "judge", "arena loss: the judge ended it")
+  eq(oy and oy.judged and oy.judged.a and oy.judged.a[1], 0, "arena loss: ...the player's monster judged")
+  eq(y.result, "lose", "arena loss: done('lose')")
+  eq(SESSION.battleOutcome, 2, "arena loss: B_OUTCOME_LOST")
+  eq(FakeVm.halted, 0, "arena loss: answered, not halted, with the judged monster still standing")
+  check(sick.hp > 0 and sick.hp < sick.maxHp, "arena loss: the judged monster keeps the HP it fought down to")
+  eq(sick.hp, y.sim.byId[PLAYER].mons[1].hp, "arena loss: ...the referee's")
+  eq(sick.status, "PSN", "arena loss: ...and its status")
+  check(textOf(yf):find("ANABEL: Too bad!", 1, true) ~= nil, "arena loss: the trainer's win words")
+  check(not textOf(yf):find("STRINGID_PLAYERWHITEOUT", 1, true), "arena loss: no whiteout lines")
+  eq(#fieldCalls, 0, "arena loss: no whiteout")
+
+  -- The player's SCRATCH against a GROWL: the trainer's monster judged.
+  local z = arenaFight(monOf(4, 5, { moves = { 10 }, pp = { 35 }, maxPp = { 35 } }),
+                       monOf(16, 50, { moves = { 45 }, pp = { 40 }, maxPp = { 40 } }))
+  check(z.taken, "arena win: taken")
+  local _, zf = drive(z.solo, function(f) f:pickMove(1) end)
+  local oz = z.sim:outcome()
+  eq(oz and oz.how, "judge", "arena win: the judge ended it")
+  eq(z.result, "win", "arena win: done('win')")
+  check(textOf(zf):find("STRINGID_PLAYERDEFEATEDTRAINER1", 1, true) ~= nil, "arena win: 'PLAYER defeated ...!'")
+  check(textOf(zf):find("ANABEL: Splendid!", 1, true) ~= nil, "arena win: the trainer's defeat words")
+  FakeVm.running = false
+
+  -- No switching: the party menu's line, the menu back, nothing spent; the
+  -- trainer never switches either, whatever its scripts would say.
+  local two = { monOf(4, 50, { moves = { 45 }, pp = { 40 }, maxPp = { 40 } }), monOf(5, 50) }
+  local s = arenaFight(two, monOf(16, 50, { moves = { 45 }, pp = { 40 }, maxPp = { 40 } }))
+  check(s.taken, "arena switch: taken")
+  toMenu(s.solo)
+  check(s.solo:_choose({ action = "switch", slot = 1 }), "arena switch: the choice is answered")
+  check(type(s.solo.cantEscape) == "string" and s.solo.cantEscape:find("gText_PkmnCantSwitchOut", 1, true) ~= nil,
+        "arena switch: ...with the party menu's line, owed a fresh menu")
+  eq(s.sim.byId[PLAYER].choice, nil, "arena switch: nothing filed")
+  eq(s.sim:submitChoice(PLAYER, { action = "switch", slot = 1 }), false, "arena switch: the referee refuses it too")
+  local foeSeat = s.sim.byId[FOE]
+  foeSeat.b.perishTurns = 0
+  local c = s.solo.gen3.npcs[FOE]:choose(s.solo:_npcView3(foeSeat))
+  eq(c and c.action, "fight", "arena brain: a perish count that would switch anywhere else does not here")
+  s.solo:reset()
+  FakeVm.running = false
+end
+
+-- ===================================================================
+-- 4. the multi fights' module (src/Solo3/FacilityMulti.lua, stood in)
+-- ===================================================================
+
+do
+  -- takes: the facility's common part, then the module's say.
+  local calls = {}
+  local stubM = {}
+  function stubM.takes(ctx, shape)
+    calls[#calls + 1] = { ctx = ctx, shape = shape }
+    return false, "the stand-in says no"
+  end
+  OVERRIDE[MULTI], HIDDEN[MULTI] = stubM, nil
+  Facility.resetMulti3()
+  fresh()
+  SESSION.party = { monOf(4, 30), monOf(5, 30), monOf(29, 30), monOf(151, 30) }
+  local solo = newSolo()
+  local taken = offerTrainer(solo, frontierFoe({ monOf(16, 30), monOf(16, 31), monOf(16, 32), monOf(16, 33) }),
+    startOpts("tower", { double = true, partner = true, playerHalf = 2, twoOpponents = true,
+                         frontierPartner = 9, partnerName = "LUCY", partnerPicId = 4,
+                         frontierFoeHalf = 2, frontierOpponentB = 12,
+                         frontierTrainerB = { class = 61, className = "EXPERT", name = "OWEN", pic = 31 } }))
+  eq(taken, false, "multi: the module's no is the fight's")
+  eq(#calls, 1, "multi: FacilityMulti.takes was asked once")
+  local c = calls[1] and calls[1].ctx or {}
+  eq(calls[1] and calls[1].shape, "partner", "multi: ...with the shape (a Tower multi: partner)")
+  eq(c.facilityMulti3, "partner", "multi: the fight is marked")
+  eq(c.facilityMultiMod3, stubM, "multi: ...with the module")
+  eq(c.facility3, "tower", "multi: after the common part -- the hall")
+  eq(c.facilityRules3 and c.facilityRules3.forfeit, true, "multi: ...the rules")
+  eq(c.trainer and c.trainer.trainerName, "ANABEL", "multi: ...trainer A's record")
+  eq(c.noDexSeen, true, "multi: ...the flags")
+
+  fresh()
+  SESSION.party = { monOf(4, 30), monOf(5, 30) }
+  calls = {}
+  solo = newSolo()
+  offerTrainer(solo, frontierFoe({ monOf(16, 30), monOf(16, 31) }),
+    startOpts("pike", { double = true, twoOpponents = true, frontierFoeHalf = 1, frontierOpponentB = 12,
+                        frontierTrainerB = { class = 61, className = "EXPERT", name = "OWEN", pic = 31 } }))
+  eq(calls[1] and calls[1].shape, "twoOpponents", "multi: the Pike's double is 'twoOpponents'")
+
+  -- The hooks, by the contract.
+  local K = Facility.kinds3.facility
+  local log = {}
+  local stub2 = {
+    screen = function(_, o) log[#log + 1] = "screen"; o.multi = true; return { extra = 1 } end,
+    seat = function() log[#log + 1] = "seat"; return { rules = "R" }, { b = { "B" } } end,
+    choose = function(_, payload)
+      log[#log + 1] = "choose"
+      if payload.action == "item" then return true, false end
+      return false
+    end,
+    note = function() log[#log + 1] = "note" end,
+    handBack = function() log[#log + 1] = "handBack"; return true end,
+  }
+  local filedX = {}
+  local held = { kind = "held" }
+  local ctx = {
+    facilityMulti3 = "partner", facilityMultiMod3 = stub2, kind = "trainer", facility3 = "tower",
+    facilityRules3 = { bag = false, forfeit = true }, opts = {}, nextFacility3 = held,
+    solo = { file3 = function(_, p, s) filedX[#filedX + 1] = { p, s }; return true end },
+  }
+  local so = {}
+  local extra = K:screen(ctx, so)
+  eq(extra and extra.extra, 1, "multi hooks: screen is FacilityMulti's, its answer passed on")
+  eq(so.multi, true, "multi hooks: ...it saw the options")
+  eq(so.rules, nil, "multi hooks: ...in place of the facility's own")
+  local e1, s1 = K:seat(ctx, {})
+  eq(e1 and e1.rules, "R", "multi hooks: seat's create options")
+  eq(s1 and s1.b and s1.b[1], "B", "multi hooks: ...and its sides")
+  eq(K:word(ctx, {}, { word = "draw" }), "draw", "multi hooks: a hook it does not have is the facility's own")
+  local hd, tk = K:choose(ctx, { action = "item" }, PLAYER)
+  eq(hd, true, "multi hooks: choose -- FacilityMulti's first")
+  eq(tk, false, "multi hooks: ...its answer")
+  hd, tk = K:choose(ctx, { action = "run" }, PLAYER)
+  eq(hd, true, "multi hooks: ...not handled there: the facility's forfeit")
+  eq(tk, true, "multi hooks: ...filed")
+  eq(#filedX, 1, "multi hooks: ...once")
+  K:note(ctx, { t = "msg" })
+  eq(ctx.facilityOnScreen3, true, "multi hooks: note -- the facility's couplings first")
+  eq(log[#log], "note", "multi hooks: ...then FacilityMulti's")
+  BattleMod._nextFacility = nil
+  eq(K:handBack(ctx), true, "multi hooks: handBack answers FacilityMulti's word")
+  eq(rawget(BattleMod, "_nextFacility"), held, "multi hooks: ...after the facility put the rules object back")
+  BattleMod._nextFacility = nil
+  OVERRIDE[MULTI], HIDDEN[MULTI] = nil, true
+  Facility.resetMulti3()
+end
+
+-- ===================================================================
+-- 5. the screen options the halls set
+-- ===================================================================
+
+do
+  local V = Facility.victorySong3
+  eq(V({ kind = "trainer", facility3 = "tower", trainer = { frontierTrainerId = 300 } }), "MUS_VICTORY_TRAINER",
+     "jingle: a Frontier trainer's (HandleEndTurn_BattleWon's FRONTIER arm)")
+  eq(V({ kind = "trainer", facility3 = "dome", trainer = { frontierTrainerId = 1022 } }), "MUS_VICTORY_GYM_LEADER",
+     "jingle: the Frontier Brain's (TRAINER_FRONTIER_BRAIN)")
+  eq(V({ kind = "trainer", facility3 = "pyramid", trainer = {}, session = { frontierOpponentA = 1022 } }),
+     "MUS_VICTORY_GYM_LEADER", "jingle: ...read off the session when the record has no id")
+  eq(V({ kind = "trainer", facility3 = "hill", trainer = {} }), "MUS_VICTORY_TRAINER", "jingle: Trainer Hill")
+  eq(V({ kind = "trainer", facility3 = "trainerTower", trainer = {} }), "MUS_VICTORY_TRAINER",
+     "jingle: FireRed's Trainer Tower")
+  eq(V({ kind = "trainer", facility3 = "secretBase", trainer = {} }), nil, "jingle: a Secret Base's is the class's")
+  eq(V({ kind = "wild", facility3 = "pike" }), nil, "jingle: none for a wild")
+
+  -- Through the door: a Frontier Brain on the screen.
+  fresh()
+  SESSION.party = { monOf(4, 30) }
+  local brainFoe = frontierFoe({ monOf(16, 30) })
+  brainFoe.frontierTrainerId = 1022
+  local solo = newSolo()
+  check(offerTrainer(solo, brainFoe, startOpts("tower")), "jingle (brain): taken")
+  eq(screenedWith.victorySong, "MUS_VICTORY_GYM_LEADER", "jingle (brain): the screen is told the Brain's")
+  eq(solo.fight and solo.fight.victorySong, "MUS_VICTORY_GYM_LEADER", "jingle (brain): ...and keeps it")
+  solo:reset()
+  -- A Secret Base: the screen is told nothing.
+  fresh()
+  SESSION.party = { monOf(4, 30) }
+  solo = newSolo()
+  check(offerTrainer(solo, { party = { monOf(16, 12) }, trainerId = 1024, trainerClass = 5,
+                             trainerClassName = "PKMN BREEDER", trainerName = "AYA", trainerPicId = 7,
+                             species = 16, level = 12 },
+                     { wild = false, trainerId = 1024, trainerName = "AYA", trainerClass = 5,
+                       trainerClassName = "PKMN BREEDER", trainerPicId = 7, secretBase = true,
+                       noWhiteout = true, deferHeal = true }), "jingle (secret base): taken")
+  eq(screenedWith.victorySong, nil, "jingle (secret base): left to the class")
+  solo:reset()
+
+  -- The Pyramid: the screen fights with the Pyramid bag.
+  fresh()
+  SESSION.party = { strong(4, 60) }
+  PYR.items, PYR.qty = { 13, 21 }, { 1, 2 }
+  PYR.active = true
+  solo = newSolo()
+  check(offerTrainer(solo, frontierFoe({ monOf(16, 5) }), startOpts("pyramid")), "pyramid bag option: taken")
+  local bag = screenedWith.bag or {}
+  eq(#bag, 2, "pyramid bag option: the screen is handed the Pyramid's entries")
+  eq(bag[1] and bag[1].id, 13, "pyramid bag option: ...by id")
+  eq(bag[2] and bag[2].count, 2, "pyramid bag option: ...with their counts")
+  eq(solo.fight.bagSheet and solo.fight.bagSheet[21], 2, "pyramid bag option: the screen's menu lists them")
+  solo:reset()
+  PYR.active = false
 end
 
 Turn3.create, Mediated.new, CoopBattle.newSoloDouble = realCreate, realNew, realDouble

@@ -60,6 +60,9 @@ tests/solo_battle.lua
 tests/solo_brain.lua
 tests/drivers/solo_battle_e2e.lua
 tests/drivers/run-solo-battle-e2e.sh
+tests/drivers/solo3_e2e_field.lua
+tests/drivers/solo3_e2e_frontier.lua
+tests/drivers/solo3_e2e_facility.lua
 # README arena-background recapture: warps Route 1 / Red's house / Pewter Gym
 # and shots the mediated idle. Reaches tests/drivers/util.lua.
 tests/drivers/arena_bg_shot.lua
@@ -133,6 +136,8 @@ tests/gen3_solo_facility.lua
 tests/gen3_solo_pairs.lua
 tests/gen3_solo_first.lua
 tests/gen3_solo_safari.lua
+tests/gen3_solo_multi.lua
+tests/gen3_solo_tutorial.lua
 tests/fixtures/gen3_solo_dbl_rig.lua
 tests/gen3_ui.lua
 tests/trade3.lua
@@ -268,6 +273,8 @@ docs/plans/gen3-battle-sheet.md
 docs/plans/gen3-known-gaps.md
 docs/plans/gen3-solo-doubles.md
 docs/plans/gen3-badge-rules.md
+docs/plans/gen3-solo-remaining-fights.md
+docs/plans/gen3-solo-remaining-fights-research.md
 docs/plans/gen12-referee-fidelity.md
 docs/plans/gen12-referee-known-gaps.md
 docs/plans/gen12-referee-gaps-fix.md

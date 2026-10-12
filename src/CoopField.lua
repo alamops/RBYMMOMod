@@ -68,6 +68,7 @@ local Config = need("Config")
 local Wire = need("Wire")
 local Gen3 = need("Gen3")
 local Gen3Ui = need("Gen3Ui")
+local Borrow3 = need("Borrow3")
 
 local M = {}
 
@@ -392,18 +393,12 @@ end
 --     `done(result)`, which is what sets the trainer flag on a win, jumps to
 --     the CONTINUE_SCRIPT and ticks the script VM on.
 --
--- A draw that is not a whiteout (a refereed fight that could not finish, a
--- lost connection -- a draw that leaves this player's team standing) is never
--- handed to the opcode at all.  The opcode has no third answer: "lose" skips
--- the flag but then runs the post-battle bytes after the trainerbattle
--- command (a gym leader's TM, the badge branch), and anything else marks the
--- trainer beaten.  So the script waiting on the trainer is halted instead
--- (Vm:halt, what the cart's own whiteout does to it), with no whiteout: the
--- trainer stays unbeaten, nothing after the battle runs, and nobody is sent to
--- a POKeMON CENTER for a fight nobody lost.  A draw that *does* leave the team
--- on nothing is a whiteout on the cart (pret IsPlayerDefeated counts
--- B_OUTCOME_DREW) and reaches here as "lose" -- Coop.finishBuriedBattle and
--- SoloBattle both map it.
+-- An unfinished trainer draw (the clock, a disconnect, a forfeit) does not
+-- beat the trainer: the script is halted where it waits, the flag stays
+-- unset and no prize is paid. A wiped draw is a whiteout and reaches here
+-- as "lose". A knockout whose sheets and the save disagree is a win, and
+-- that decision is made once for the fight (solo compares the sheets to
+-- the save; co-op trusts the referee and whites every client out).
 --
 -- While a divert is deciding (a co-op wait for the partner) the stand-in is
 -- also the *cover*: a Gen 3 layer holding the field still, with the cart's
@@ -492,6 +487,28 @@ function M.isEgg3(mon)
   if type(mon) ~= "table" then return false end
   return mon.isEgg == true or mon.egg == true
     or tonumber(mon.species or mon.speciesId) == SPECIES_EGG3
+end
+
+-- The referee's how, when this draw is a knockout. "ko" and an Arena
+-- "judge" count, and so does a knockout that arrived with no how -- which is
+-- every co-op one: a hub's outcome carries `reason` and never `how`
+-- (Wire.battleOutcome / the hub's Relay.settleMediated name their fields), so
+-- `reason == "ko"` is how co-op tells a knockout draw.  A timeout, a
+-- disconnect and a forfeit do not.
+function M.knockoutHow3(how, reason)
+  if how == "ko" or how == "judge" then return how end
+  if how == nil and reason == "ko" then return "ko" end
+  return nil
+end
+
+-- A draw is a win only when the caller has already decided, once for the
+-- fight, that a knockout's sheets and the save disagree (`standing`).
+-- Co-op passes false: the hub's draw is the decision, and a client's own
+-- party must not complete the trainer on its own.
+function M.trainerDrawResult3(result, how, standing)
+  if result ~= "draw" or standing ~= true then return result end
+  if not M.knockoutHow3(how) then return result end
+  return "win"
 end
 
 -- ------- which fights a divert may take
@@ -1741,6 +1758,32 @@ end
 --     script's own LoadPlayerParty puts the saved party back afterwards, as
 --     on the cart.
 --   * Battle._nextFacility (see Stand:begin3).
+--   * the POKe DUDE's demonstration (M.pokedudeStand3, taken by the TEACHY TV
+--     wrap's divertPokedude): what the engine's own startTeachyTvBattle does
+--     around its battle (battle/pokedude.lua start(); pret teachy_tv.c:1172
+--     TeachyTvPrepBattle) -- the TEACHY TV's layers off the modal stack and
+--     the bag and START menus hidden (`teachyCover3`), the POKe DUDE's bag in
+--     place of the player's (TeachyTv.initPokedudeBag, `teachyBag3`), and his
+--     party in place of the player's (SavePlayerParty, then
+--     InitPokedudePartyAndOpponent writing his monsters into gPlayerParty:
+--     `partyBorrow3`), so the solo screen, its EXP and the evolutions after a
+--     win read his monsters as the cart's battle does.  Each goes back on a
+--     hand-back (giveBack3) and at the fight's end, in the stand's `done`
+--     (TeachyTvRestorePlayerPartyCallback, :1208: LoadPlayerParty first).
+--
+-- The party and the bag are the save itself, so each swap is also recorded
+-- in src/Borrow3.lua's ledger (`BORROW_PARTY3` / `BORROW_BAG3`) and released
+-- when it goes back.  A demonstration that never reaches either end -- its
+-- screen threw and was popped, an F5 hot reload mid-fight -- leaves the
+-- record behind, and the `save.write` link gives the swap back before the
+-- file is written (or refuses the write while the fight is really still on
+-- screen: Stand:fightLive3).  What that backstop does *not* put back is the
+-- cover: by the time a save is written the player is on the field with the
+-- START menu's own layers on the modal stack, and swapping the TEACHY TV's
+-- saved layers in over them (or reopening the bag menu under the save box)
+-- would put a dead TEACHY TV over the save screen.  A stale cover is
+-- forgotten instead; the TEACHY TV it lifted is closed, as if the player had
+-- left it.
 
 function Stand:detachPartner3(session, half)
   if type(session) ~= "table" or type(session.party) ~= "table" then return false end
@@ -1787,8 +1830,152 @@ function Stand:restoreFacility3()
   return true
 end
 
+-- The ledger names this file's swaps go under (src/Borrow3.lua), and the
+-- word a refused save says to the player for each.
+local BORROW_PARTY3, BORROW_BAG3 = "pokedude.party", "pokedude.bag"
+M.BORROW_PARTY3, M.BORROW_BAG3 = BORROW_PARTY3, BORROW_BAG3
+
+-- Is the fight holding this stand's borrows really still running?  The
+-- ledger's `alive` (src/Borrow3.lua), asked as a save is about to be written.
+-- Not once the stand has finished or been handed back (its ends give
+-- everything back themselves), not in a save other than its own, and
+-- otherwise only while the screen fighting it is on the game3 modal stack:
+-- `takingNow3` covers the one synchronous window between the borrows and the
+-- taker's push (divertPokedude), and `holdsFn3` -- the door's
+-- `handler.holds(stand)`, src/Client.lua -- names the screen solo is
+-- fighting this stand on.  A screen that threw and was popped, or one a
+-- reload left behind, is not on the stack: the borrow is stale.
+function Stand:fightLive3()
+  if self.finished or not self:sameSession() then return false end
+  if self.takingNow3 then return true end
+  local holds = self.holdsFn3
+  if type(holds) ~= "function" then return false end
+  local ok, screen = pcall(holds, self)
+  return ok and type(screen) == "table" and Gen3Ui.has(screen) == true
+end
+
+-- The ledger's `giveBack` for one swap: put that swap back, and forget the
+-- cover rather than restore it (see the section header -- the player is on
+-- the field by now, and the stack is the START menu's).
+function Stand:giveBackStale3(which)
+  self.teachyCover3 = nil
+  if which == "party" then return self:returnParty3() end
+  return self:returnTeachyBag3()
+end
+
+local function holdBorrow3(stand, session, name, which, label)
+  Borrow3.hold(session, name,
+    function() return stand:giveBackStale3(which) end,
+    function() return stand:fightLive3() end,
+    label)
+end
+
+-- The fight's own party in place of the session's (pret SavePlayerParty, then
+-- the demonstration's monsters written into gPlayerParty).  Once; false when
+-- there is no session or no party to put in.
+function Stand:borrowParty3(party)
+  if self.partyBorrow3 then return true end
+  local session = Gen3.session()
+  if type(session) ~= "table" or type(party) ~= "table" or #party == 0 then return false end
+  self.partyBorrow3 = { session = session, party = session.party }
+  session.party = party
+  holdBorrow3(self, session, BORROW_PARTY3, "party", "party")
+  return true
+end
+
+-- LoadPlayerParty: the player's own party back, once (into the save it was
+-- borrowed from).
+function Stand:returnParty3()
+  local held = self.partyBorrow3
+  if not held then return false end
+  self.partyBorrow3 = nil
+  held.session.party = held.party
+  Borrow3.release(held.session, BORROW_PARTY3)
+  return true
+end
+
+-- The menus the engine's startTeachyTvBattle hides for its battle
+-- (battle/pokedude.lua HIDDEN_MENUS / hide_menus): only a menu already loaded
+-- can be open, so they are read where the engine reads them -- package.loaded,
+-- through Gen3.loaded's gate, never a require.
+local TEACHY_MENUS3 = { "src.ui.game3.bag_menu", "src.ui.game3.start_menu" }
+
+-- The TEACHY TV off the screen while the fight runs, as the engine's own
+-- start takes it off (pret teachy_tv.c:1175 TeachyTvFree): its layers lifted
+-- off the modal stack whole -- the fight's screen is pushed onto an empty
+-- stack, so nothing under it draws or takes input -- and an open bag or START
+-- menu closed.  An engine_internals reach-around, the engine's own
+-- (Stack._layers swapped by battle/pokedude.lua start / finish_battle);
+-- docs/upstream/gen3-spawn-npc.md addendum D asks for the seam.
+function Stand:coverTeachy3()
+  if self.teachyCover3 then return true end
+  local cover = { menus = {} }
+  local Stack = g3("src.ui.game3.stack")
+  if type(Stack) == "table" and type(Stack._layers) == "table" then
+    cover.stack, cover.layers = Stack, Stack._layers
+    Stack._layers = {}
+  end
+  for _, name in ipairs(TEACHY_MENUS3) do
+    local menu = Gen3.loaded(name)
+    if menu and menu.open then
+      menu.open = false
+      cover.menus[#cover.menus + 1] = menu
+    end
+  end
+  self.teachyCover3 = cover
+  return true
+end
+
+-- ...and back (finish_battle: Stack._layers = saved.layers, show_menus).
+function Stand:uncoverTeachy3()
+  local cover = self.teachyCover3
+  if not cover then return false end
+  self.teachyCover3 = nil
+  if cover.stack then cover.stack._layers = cover.layers end
+  for _, menu in ipairs(cover.menus) do menu.open = true end
+  return true
+end
+
+-- The POKe DUDE's bag in place of the player's (the engine's start:
+-- TeachyTv.initPokedudeBag, pret item_menu.c:2162 InitPokedudeBag after
+-- BackUpPlayerBag).  Not over a swap somebody else made and has not undone.
+function Stand:borrowTeachyBag3(scriptId)
+  if self.teachyBag3 then return true end
+  local session = Gen3.session()
+  local TeachyTv = g3("src.core.game3.teachy_tv")
+  if not (type(session) == "table" and TeachyTv and type(TeachyTv.initPokedudeBag) == "function") then
+    return false
+  end
+  if session.teachyBagBackup ~= nil then return false end
+  if not pcall(TeachyTv.initPokedudeBag, session, scriptId) then
+    -- BackUpPlayerBag runs first: a swap that threw after it left the
+    -- player's bag in the backup and (some of) the POKe DUDE's in the bag.
+    -- There was no backup before the call, so whatever is there now is the
+    -- player's own: put it back, or the next save writes his.
+    if session.teachyBagBackup ~= nil then try3(TeachyTv.restorePlayerBag, session) end
+    return false
+  end
+  self.teachyBag3 = session
+  holdBorrow3(self, session, BORROW_BAG3, "bag", "bag")
+  return true
+end
+
+-- RestorePlayerBag, for the swap this stand made.
+function Stand:returnTeachyBag3()
+  local session = self.teachyBag3
+  if not session then return false end
+  self.teachyBag3 = nil
+  local TeachyTv = g3("src.core.game3.teachy_tv")
+  if TeachyTv then try3(TeachyTv.restorePlayerBag, session) end
+  Borrow3.release(session, BORROW_BAG3)
+  return true
+end
+
 -- Everything borrowed goes back: the stand-in is the cart's again.
 function Stand:giveBack3()
+  self:returnParty3()
+  self:returnTeachyBag3()
+  self:uncoverTeachy3()
   self:restorePartner3()
   self:restoreFacility3()
 end
@@ -1871,10 +2058,10 @@ function Stand:finish(outcome)
     return false
   end
   outcome = outcome or "draw"
+  local session = Gen3.session() or (type(self.game) == "table" and self.game.session) or nil
   local lost = lostResult(outcome)
   local won = outcome == "win"
   local engineResult = won and "win" or "lose"
-  local session = Gen3.session() or (type(self.game) == "table" and self.game.session) or nil
   local Natives = g3("src.core.game3.scripting.natives")
   if session and Natives and type(Natives.outcome_to_code) == "function" then
     local code = try3(Natives.outcome_to_code, lost and "lose" or (outcome == "win" and "win" or "draw"))
@@ -1920,11 +2107,9 @@ function Stand:finish(outcome)
     return true
   end
   if not won and self.kind == "trainer" then
-    -- A draw that left this player standing (see the section header): the
-    -- opcode is never answered -- "lose" would run the bytes after the
-    -- trainerbattle command as though the trainer had been dealt with, and
-    -- anything else marks them beaten.  The script is halted where it waits,
-    -- nobody is whited out, and the trainer is there to be fought again.
+    -- Unfinished: the clock, a disconnect, a forfeit, or a knockout the
+    -- referee already settled. Stop the script instead of running a
+    -- beaten-trainer branch.
     haltScript3()
     M.defer3(backToField, "the field after an unfinished battle")
     return true
@@ -2165,9 +2350,12 @@ end
 -- battle_controller_pokedude.c InitPokedudePartyAndOpponent), the POKe DUDE's
 -- monsters on the player's side (`playerParty`), the demonstration's number
 -- (`pokedudeScript`), and a `done` that answers the TEACHY TV the way the
--- engine's finish_battle does: the player's bag back (TeachyTv.restorePlayerBag,
--- a no-op unless the demonstration swapped it), then the outcome code.  Never
--- co-op's (`coopRefused3 = "pokedude"`).
+-- cart's battle ends (pret teachy_tv.c:1208 TeachyTvRestorePlayerPartyCallback,
+-- the engine's finish_battle): the player's party back (LoadPlayerParty, the
+-- swap divertPokedude made -- Stand:borrowParty3), the player's bag back
+-- (TeachyTv.restorePlayerBag, a no-op unless the demonstration swapped it), the
+-- TEACHY TV's layers and menus back (Stand:uncoverTeachy3), then the outcome
+-- code.  Never co-op's (`coopRefused3 = "pokedude"`).
 local function pokedudeCode3(Pokedude, word)
   local O = type(Pokedude) == "table" and type(Pokedude.OUTCOME) == "table" and Pokedude.OUTCOME
     or { WON = 1, LOST = 2, DREW = 3, RAN = 4, CAUGHT = 7 }
@@ -2190,12 +2378,20 @@ function M.pokedudeStand3(session, scriptId, opts, ctx)
   end
   local lead = foes[1]
   local cls = { kind3 = "tutorial", tutorial3 = "pokedude" }
+  local stand
   local function done(word)
-    local TeachyTv = g3("src.core.game3.teachy_tv")
-    if TeachyTv then try3(TeachyTv.restorePlayerBag, session) end
+    if stand then stand:returnParty3() end
+    -- The stand's own swap through its own return (which also clears its
+    -- ledger record, src/Borrow3.lua); RestorePlayerBag regardless when it
+    -- made none, as finish_battle calls it.
+    if not (stand and stand:returnTeachyBag3()) then
+      local TeachyTv = g3("src.core.game3.teachy_tv")
+      if TeachyTv then try3(TeachyTv.restorePlayerBag, session) end
+    end
+    if stand then stand:uncoverTeachy3() end
     if type(opts.onDone) == "function" then opts.onDone(pokedudeCode3(Pokedude, word)) end
   end
-  local stand = M.stand3({
+  stand = M.stand3({
     kind = "wild", party = foes, game = ctx.game, mapId = ctx.mapId,
     encounter = { species = tonumber(lead.species), speciesId = tonumber(lead.species),
                   level = lead.level, pokedude = true },
@@ -2380,7 +2576,10 @@ end
 -- hot reload peels this mod's own previous wrapper rather than stacking on it,
 -- the wrapper retires itself for a stale instance (alive() / Gen3.wrapLive) and
 -- answers what the engine would, and a demonstration handed back is the
--- wrapped function itself, called with the TEACHY TV's own arguments.
+-- wrapped function itself, called with the TEACHY TV's own arguments.  What
+-- the wrapped start does around its battle -- the music, the transition, the
+-- TEACHY TV off the stack, the bag and party swaps -- the divert does around
+-- the solo fight (divertPokedude), and gives back with the fight.
 --
 -- It takes a demonstration only when SOLO BATTLES is on (`handler.wants`);
 -- co-op has nothing to join in a cutscene.  The TEACHY TV's own
@@ -2392,7 +2591,9 @@ local POKEDUDE_KEY = "__rby_mmo_pokedude"
 local pokedude3 = {
   handle = nil,
   retired = false,
-  handler = nil,   -- { wants = fn("tutorial") -> bool, take = fn(stand) -> bool }
+  -- { wants = fn("tutorial") -> bool, take = fn(stand) -> bool, game = fn()?,
+  --   holds = fn(stand) -> the screen fighting it, or nil (Stand:fightLive3) }
+  handler = nil,
 }
 
 -- The engine's own demonstration start, whatever is installed over it.
@@ -2403,6 +2604,54 @@ function M.originalPokedude3()
   return rawget(Pokedude, POKEDUDE_KEY) or Pokedude.startTeachyTvBattle
 end
 
+-- The cart's own demonstration in place of the divert's (Stand:fightAlone's
+-- start, and a demonstration solo would not take): the wrapped function with
+-- the TEACHY TV's own arguments -- its music and transition, then its battle.
+-- `introPlayed`: the divert already played both (a borrow or the take failed
+-- once its transition was over), so the cart's start is asked for its battle
+-- alone -- a copy of the TEACHY TV's opts with the engine's own `headless`,
+-- which is exactly startTeachyTvBattle's start() with no PlayMapChosenOrBattleBGM
+-- and no BattleTransition_StartOnField (the same lift, bag swap, Battle.start
+-- and finish_battle; `onDone` and `transition` ride along in the copy).
+-- Without it the player heard the battle music start over and saw the
+-- transition play a second time.
+local function teachyFallback3(inner, session, scriptId, opts, introPlayed)
+  local args = opts
+  if introPlayed then
+    args = {}
+    if type(opts) == "table" then for k, v in pairs(opts) do args[k] = v end end
+    args.headless = true
+  end
+  local ok, err = pcall(inner, session, scriptId, args)
+  if not ok then
+    mod.log:warn("the TEACHY TV's own demonstration could not start (%s); close the TEACHY TV "
+      .. "and choose the program again -- report it with the program you chose", tostring(err))
+  end
+  return ok and err
+end
+
+-- What the engine's own start does before its battle (battle/pokedude.lua
+-- startTeachyTvBattle; pret teachy_tv.c:1172 TeachyTvPrepBattle): the battle
+-- music (PlayMapChosenOrBattleBGM -- a wild battle's, MUS_VS_WILD, as the
+-- engine plays it), then the transition over the TEACHY TV -- the cart's for
+-- the program, WHITE_BARS_FADE for the battle basics and SLICE for the rest
+-- (TeachyTv.battleTransition; the TEACHY TV hands it as `opts.transition`) --
+-- and, once it has played, the battle: here the TEACHY TV taken off the
+-- screen (Stand:coverTeachy3), the POKe DUDE's bag and party in
+-- (Stand:borrowTeachyBag3, Stand:borrowParty3), then the solo fight offered.
+-- The start answers "started" at once, as the engine's does; a fight solo
+-- will not take after the transition gets everything back (Stand:giveBack3)
+-- and is the cart's own demonstration, from its own start -- its battle
+-- alone, since the intro has played (teachyFallback3's `introPlayed`).
+--
+-- The borrows are not decided before the intro: the swap is the engine's
+-- after-the-transition step (start()), and the taker's screen can only go up
+-- once the transition is over, so neither answer exists earlier.
+--
+-- Before anything is borrowed, the ledger (src/Borrow3.lua) is settled: a
+-- demonstration that died mid-fight with no save since left the POKe DUDE's
+-- party and bag in the session, and borrowing over them would file *his*
+-- monsters as the player's own to give back.
 local function divertPokedude(inner, session, scriptId, opts)
   local handler = pokedude3.handler
   if not (handler and type(handler.take) == "function") then return false end
@@ -2418,11 +2667,47 @@ local function divertPokedude(inner, session, scriptId, opts)
     fightAlone = function() return inner(session, scriptId, opts) end,
   })
   if not stand then return false end
-  local ok, taken = pcall(handler.take, stand)
-  if ok and taken == true then return true end
-  stand:giveBack3()
-  if not ok then error(taken, 0) end
-  return false
+  stand.holdsFn3 = type(handler.holds) == "function" and handler.holds or nil
+  local function begin()
+    local live = Gen3.session()
+    if live then
+      local ok, restored = pcall(Borrow3.settle, live)
+      if ok and type(restored) == "number" and restored > 0 then
+        mod.log:info("gave back %d item(s) an unfinished battle had borrowed", restored)
+      end
+    end
+    stand:coverTeachy3()
+    -- Both borrows, or neither fight: a demonstration that kept the player's
+    -- bag or party would play the POKe DUDE's script against the wrong one.
+    if not stand:borrowTeachyBag3(scriptId) or not stand:borrowParty3(stand.playerParty) then
+      stand:giveBack3()
+      teachyFallback3(inner, session, scriptId, opts, true)
+      return
+    end
+    stand.takingNow3 = true
+    local ok, taken = pcall(handler.take, stand)
+    stand.takingNow3 = nil
+    if ok and taken == true then return end
+    stand:giveBack3()
+    if not ok then
+      mod.log:warn("the TEACHY TV divert failed (%s); this demonstration is shown on the "
+        .. "game's own battle screen -- turn SOLO BATTLES off in the mod manager (F10) if "
+        .. "it keeps happening", tostring(taken))
+    end
+    teachyFallback3(inner, session, scriptId, opts, true)
+  end
+  Gen3.audio.playSong("MUS_VS_WILD")
+  local BT = g3("src.core.game3.battle_transition")
+  local TeachyTv = g3("src.core.game3.teachy_tv")
+  local id = o.transition or (TeachyTv and try3(TeachyTv.battleTransition, scriptId))
+    or (BT and try3(function() return BT.ID.SLICE end)) or nil
+  if BT and type(BT.start) == "function" and id ~= nil then
+    local ok = pcall(BT.start, id, { overUi = true }, begin)
+    if ok then return true end
+  end
+  -- No transition to play (a build without one): the battle at once.
+  begin()
+  return true
 end
 
 function M.installPokedude3(handler)

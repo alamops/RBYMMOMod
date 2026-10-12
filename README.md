@@ -958,9 +958,10 @@ waits until it closes.
   player: an Emerald player dressed as ROXANNE shows up on FireRed as the
   Ruby/Sapphire girl. `NIRE` and `NIRE HOOD` stay on Gen 1 for now.
 - **Your party, on the region map.** Open FireRed's TOWN MAP or Emerald's
-  PokéNav HOENN MAP and your party members are listed over it, with where
-  each of them is standing. (A list rather than a figure on a city, as Red
-  draws it.)
+  PokéNav HOENN MAP to see your partners' characters and names on their towns
+  and routes. Markers follow the selected Sevii page and PokéNav zoom and
+  scrolling. Indoor maps use their named town section; partners in another
+  region or an unplaceable location are omitted from that map.
 - **Trades are Gen 3 trades.** Held items and mail travel, the dex is marked
   seen and caught, and a trade evolution plays the cart's own evolution scene
   — an Everstone refuses, a Metal Coat or a King's Rock is used up. DEOXYS
@@ -1099,31 +1100,30 @@ also needs that cart to have the National Dex. The trade screen says which of
 you isn't ready, in the cart's own words (`You can't trade with that game
 yet.`).
 
-**What stays different on Gen 3:**
+**Solo coverage and battle rules on Gen 3:**
 
-- `SOLO BATTLES` hands a few more fights back to the cart: doubles against
-  two trainers at once or beside Steven, the Safari Zone, roaming and
-  scripted legendaries, the Battle Frontier, Trainer Tower and Trainer Hill,
-  the first battle, and the old man's and the POKé DUDE's tutorial fights.
-  A lone double (one trainer, two of theirs out) is the mod's: you fight it
-  with two of yours, from one team, as on the cart.
+- `SOLO BATTLES` handles lone doubles on all three carts, Emerald's two-trainer
+  and Steven partner fights, the Safari Zone, roamers and scripted legendaries,
+  all seven Battle Frontier halls and the Battle Tents, Trainer Tower,
+  Trainer Hill, Secret Bases, first battles and tutorials (the old man,
+  WALLY and the POKé DUDE). Battle Tower partner multis and the Battle Pike's
+  two-trainer room also use the mod's battle system. Native link battles,
+  recorded link replays and e-Reader battles remain with the game.
 - Badges work the cart's way against the computer, in solo and in co-op
   against a trainer or a wild POKéMON: your badges boost your POKéMON's
   stats, and a traded POKéMON above your badges' level cap can disobey. A
   fight between players is a link battle, with no boosts and everyone
   obeying.
-- A trainer fight that ends in a draw with your team still standing leaves
-  the trainer unbeaten and its script stopped where it waited — no prize, no
-  TM, no badge; the cart has no answer for that ending. A draw that leaves
-  your team on nothing is a whiteout, as on the cart. Walk back into an
-  unbeaten trainer's line of sight and they challenge you again — that is the
-  cart's own sight check.
+- A trainer fight that times out, drops, or is forfeited while your team
+  can still battle leaves the trainer unbeaten: the script stops where it
+  waits, and no prize is paid. A draw that faints your whole team is still
+  a whiteout. Facility judgment draws keep their own rules.
 - For other mods: a wild encounter or a trainer this mod takes over from the
   cart, for a co-op or a `SOLO BATTLES` fight, never raises the engine's
   `battle.started` — the engine's battle never starts. A `SOLO BATTLES` fight
   does raise `battle.ended` when it is over, as the engine's own would.
-- A player on the neighbouring map isn't drawn across a seamless map edge —
-  you see them once you're both on the same map.
+- Players on connected neighbouring maps are visible across seamless edges,
+  with walking animation and nameplates positioned by the map connections.
 - LeafGreen shares FireRed's engine path end to end and is covered by the
   headless suites, but no live LeafGreen run has been made.
 - The game3 mod platform has no public way yet to spawn a walking object,
@@ -1848,9 +1848,13 @@ bash mods/rby_mmo/tests/drivers/run-solo-battle-e2e.sh --gen3          # SOLO BA
 - ⚔️ **`run-solo-battle-e2e.sh --gen3`** — wild and trainer fights on the local
   Gen 3 referee, through to the save: a catch and its nickname, a refused
   escape, a trainer's prize, a loss and its whiteout, Pay Day's coins picked
-  up, a draw that whites out and a draw with the team standing that leaves the
-  trainer's script halted, a fight opened under the overworld's rain, and a
-  real grass step taken by the divert
+  up, a draw that whites out and a timeout draw that leaves the trainer
+  unbeaten, a fight opened under the overworld's rain, and a
+  real grass step taken by the divert. `SOLO_LEGS=field` runs the Safari,
+  roamer, legendary, scripted wild, ghost, first-battle and tutorial checks,
+  including every POKé DUDE program and quitting with B. The runner mounts
+  the checkout containing the script in an isolated engine view when needed;
+  missing required family drivers fail the run.
 
 `GEN3_GAME=firered|leafgreen|emerald` picks the cart where a run takes one.
 Each run copies an already-imported cart into a throwaway save identity
@@ -1983,11 +1987,9 @@ bite you:
   have no public mod seam yet for most of what this mod does in the
   overworld, so it reaches into the engine in a few documented places (see
   [the Gen 3 part](#-firered-leafgreen-emerald--the-same-mod-on-the-gba)). An
-  engine update can break them before this mod catches up. Smaller Gen 3
-  edges: a player on the next map over isn't drawn across a seamless map
-  edge, cross-region trades wait for both carts' post-game, a trainer fight
-  drawn with your team still standing leaves the trainer unbeaten (and ready
-  to challenge you again), and nobody has run LeafGreen live yet.
+  engine update can break them before this mod catches up.
+  Cross-region trades wait for both carts' post-game, and nobody has run
+  LeafGreen live yet.
 
 ---
 

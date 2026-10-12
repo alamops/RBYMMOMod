@@ -149,6 +149,10 @@ local PARTY_SIZE = 6
 -- calls each cart.  The fallback when family.lua cannot answer.
 local CART = { emerald = 3, firered = 4, leafgreen = 5 }
 local CART_FAMILY = { [3] = "rse", [4] = "frlg", [5] = "frlg" }
+-- pokeemerald/src/link.c:324 InitLocalLinkPlayer's progressFlags nibbles
+-- (family.lua PROGRESS_NATIONAL / PROGRESS_LINK_NATIONALLY): the National
+-- Dex, and "may link with the other region".
+local PROGRESS_NATIONAL, PROGRESS_LINK_NATIONALLY = 0x01, 0x10
 
 -- pokefirered/include/constants/trade.h:24
 local CAN_TRADE_MON = 0
@@ -444,11 +448,24 @@ function M.localInfo(session, version)
       game = version,
     }
   end
-  local national = Family and try(Family.nationalDex, liveView(session), version) == true
+  -- The last resort (localLinkPlayer missing, or it threw) rebuilds the same
+  -- two nibbles from the helpers localLinkPlayer itself is made of
+  -- (family.lua Family.nationalDex and Family.canLinkNationally:
+  -- PROGRESS_NATIONAL 0x01, PROGRESS_LINK_NATIONALLY 0x10), so an unlocked
+  -- save still meets the other region.  When the unlock cannot be read at
+  -- all, the info says so (`linkUnknown`, and it rides the wire): versionGate
+  -- then does not refuse that side for a nibble nobody could compute -- the
+  -- trade-off is that a locked save on a build this broken trades across
+  -- regions early, rather than every unlocked one being turned away.
+  local view = liveView(session)
+  local national = Family and try(Family.nationalDex, view, version) == true
+  local link = Family and try(Family.canLinkNationally, view, version)
   local cart = CART[version] or CART.firered
   return {
     version = cart,
-    progressFlags = national and 1 or 0,
+    progressFlags = (national and PROGRESS_NATIONAL or 0)
+      + (link == true and PROGRESS_LINK_NATIONALLY or 0),
+    linkUnknown = type(link) ~= "boolean" or nil,
     family = CART_FAMILY[cart],
     game = version,
   }
@@ -474,6 +491,7 @@ function M.sanitizeInfo(raw)
   return {
     version = cart,
     progressFlags = whole(raw.progressFlags, 0, 255) or 0,
+    linkUnknown = raw.linkUnknown == true or nil,
     game = type(raw.game) == "string" and CART[raw.game] and raw.game or nil,
   }
 end
@@ -637,7 +655,8 @@ function TradeSession:partyMessage()
     type = "party",
     mons = mons,
     mail = M.packMail(self.session, indices),
-    gen3 = { version = me.version, progressFlags = me.progressFlags, game = me.game },
+    gen3 = { version = me.version, progressFlags = me.progressFlags, game = me.game,
+             linkUnknown = me.linkUnknown or nil },
   }
 end
 
@@ -678,18 +697,38 @@ end
 
 -- pokefirered/src/trade.c:2820 GetGameProgressForLinkTrade, asked of a
 -- partner from the other region only.  Nil when the pair may trade.
+-- The progress flags the gate reads for one side: as sent, except that a
+-- side whose cross-region unlock could not be read (localInfo's last resort,
+-- `linkUnknown`) is taken as unlocked -- see localInfo for the trade-off.
+local function gateFlags(info)
+  local flags = (tonumber(info.progressFlags) or 0) % 256
+  if info.linkUnknown and math.floor(flags / 16) % 16 == 0 then
+    flags = flags + PROGRESS_LINK_NATIONALLY
+  end
+  return flags
+end
+
 function TradeSession:versionGate()
   local info, me = self.theirInfo, self.me
   if not (info and me) then return nil end
   local theirs = familyForCart(info.version)
   if theirs == nil or theirs == me.family then return nil end
+  local mine, partner = gateFlags(me), gateFlags(info)
   local Family = family()
-  if not Family then return nil end
-  local code = try(Family.gameProgressForLinkTrade, me.family,
-    { progressFlags = me.progressFlags }, { version = info.version, progressFlags = info.progressFlags })
-  local T = type(Family.TRADE) == "table" and Family.TRADE or {}
+  local code = Family and try(Family.gameProgressForLinkTrade, me.family,
+    { progressFlags = mine }, { version = info.version, progressFlags = partner })
+  local T = Family and type(Family.TRADE) == "table" and Family.TRADE or {}
   if code ~= nil and code == T.PLAYER_NOT_READY then return NOT_READY_MINE end
   if code ~= nil and code == T.PARTNER_NOT_READY then return NOT_READY_THEIRS end
+  -- The LinkPlayer high nibble is the cart's cross-region unlock, not
+  -- its National Dex low nibble. Keep enforcing both saves' flags even
+  -- when an older engine omits the helper or it cannot answer.
+  if math.floor(mine / 16) % 16 == 0 then
+    return NOT_READY_MINE
+  end
+  if math.floor(partner / 16) % 16 == 0 then
+    return NOT_READY_THEIRS
+  end
   return nil
 end
 

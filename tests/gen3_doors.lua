@@ -23,7 +23,10 @@
 --   6. the BattleBridge.start wrap with each listener, and a refused partner
 --      handed back with the party it found;
 --   7. the TEACHY TV wrap: install, the hand-back, the outcome codes, a stale
---      instance, another mod's wrapper on top, restore;
+--      instance, another mod's wrapper on top, restore; 7b. the save-borrow
+--      ledger (src/Borrow3.lua) and its save.write link, and the TEACHY TV's
+--      party and bag through it (a demonstration whose screen dies mid-fight,
+--      the next one after it, a decline with no second intro, a half swap);
 --   8. the client's routing through the real headless loader: a kind co-op
 --      does not fight goes straight to solo with its stand-in (`opts.stand3`)
 --      and never to co-op, a plain one is offered to co-op first, and the
@@ -344,10 +347,48 @@ function FakePokedude.build(scriptId)
   return { builtMon(16, 15, { personality = 1 }) }, { builtMon(29, 11, { personality = 2 }) }
 end
 function FakePokedude.startTeachyTvBattle(session, scriptId, opts)
-  note("pokedudeStart", session, scriptId, opts)
+  -- With what the cart's start finds: the party, the TEACHY TV on the stack,
+  -- the bag menu.
+  local S = package.loaded["src.ui.game3.stack"]
+  local bagMenu = package.loaded["src.ui.game3.bag_menu"]
+  note("pokedudeStart", session, scriptId, opts, {
+    party = SESSION and SESSION.party, tv = S and S.has("teachy_tv"),
+    bagOpen = type(bagMenu) == "table" and bagMenu.open or nil,
+  })
   return true
 end
-local FakeTeachyTv = { restorePlayerBag = function() note("restoreBag") return false end }
+local FakeTeachyTv = {}
+function FakeTeachyTv.initPokedudeBag(session, scriptId)
+  note("initBag", scriptId)
+  session.teachyBagBackup = true
+  return 1
+end
+function FakeTeachyTv.restorePlayerBag(session)
+  note("restoreBag")
+  if type(session) == "table" then session.teachyBagBackup = nil end
+  return true
+end
+-- pret teachy_tv.c:1172: WHITE_BARS_FADE for the battle basics, SLICE for the
+-- rest (the engine's TeachyTv.battleTransition; ids as the engine numbers them).
+function FakeTeachyTv.battleTransition(scriptId) return tonumber(scriptId) == 0 and 9 or 8 end
+
+-- The engine's battle transition (battle_transition.lua): recorded, its
+-- `doneCb` run at once -- or held until the suite lets it finish.
+local FakeTransition = { ID = { SLICE = 8 }, hold = false, held = nil }
+function FakeTransition.start(id, opts, cb)
+  note("transition", id, opts)
+  if FakeTransition.hold then
+    FakeTransition.held = cb
+    return true
+  end
+  if cb then cb() end
+  return true
+end
+function FakeTransition.release()
+  local cb = FakeTransition.held
+  FakeTransition.held = nil
+  if cb then cb() end
+end
 
 local function installStubs()
   stub("src.core.game3.runtime", { getSession = function() return SESSION end, _mod = "ENGINE_MOD" })
@@ -359,6 +400,7 @@ local function installStubs()
   stub("src.core.game3.battle.profile", FakeProfile)
   stub("src.core.game3.battle.pokedude", FakePokedude)
   stub("src.core.game3.teachy_tv", FakeTeachyTv)
+  stub("src.core.game3.battle_transition", FakeTransition)
   stub("src.core.game3.trainer_tower", FakeTower)
   stub("src.core.game3.scripting.flags", FakeFlags)
   stub("src.core.game3.scripting.space", FakeSpace)
@@ -1041,12 +1083,36 @@ end
 
 do
   newGame()
+  local Gen3 = need("Gen3")
   local original = FakePokedude.startTeachyTvBattle
   local want, decision, taken = false, true, {}
+  -- What the taker finds when it is asked (the fight's screen would go onto
+  -- the stack from here): the stack, the bag menu, the session's party.
+  local atTake = {}
   local handler = {
     wants = function(kind) taken.asked = kind; return want end,
-    take = function(stand) taken[#taken + 1] = stand; return decision end,
+    take = function(stand)
+      taken[#taken + 1] = stand
+      atTake[#atTake + 1] = { depth = Stack.depth(), tv = Stack.has("teachy_tv"),
+                              bagOpen = package.loaded["src.ui.game3.bag_menu"].open,
+                              party = SESSION.party }
+      return decision
+    end,
   }
+  -- The TEACHY TV on the stack and the bag it was opened from, open.
+  local savedBagMenu = package.loaded["src.ui.game3.bag_menu"]
+  local BagMenu = { open = true }
+  package.loaded["src.ui.game3.bag_menu"] = BagMenu
+  local function teachyUp()
+    if not Stack.has("teachy_tv") then Stack.push("teachy_tv", {}, { hideBelow = true }) end
+    BagMenu.open = true
+  end
+  teachyUp()
+  local songs = {}
+  local realSong = Gen3.audio.playSong
+  Gen3.audio.playSong = function(name) songs[#songs + 1] = name; return true end
+  local playerParty = { builtMon(4, 20, {}) }
+  SESSION.party = playerParty
   eq(CoopField.installPokedude3(handler), true, "the TEACHY TV wrap installs")
   check(FakePokedude.startTeachyTvBattle ~= original, "the slot holds the wrapper")
   eq(rawget(FakePokedude, "__rby_mmo_pokedude"), original, "and the original is kept on the module")
@@ -1060,11 +1126,30 @@ do
   eq(recorded("pokedudeStart"), 1, "...the cart's own")
   eq(#taken, 0, "...nobody offered it")
   eq(taken.asked, "tutorial", "(the listener was asked about a tutorial)")
-  -- SOLO BATTLES on: a tutorial stand-in, taken
+  eq(#songs, 0, "solo off: no music of ours")
+  eq(recorded("transition"), 0, "solo off: no transition of ours")
+  -- SOLO BATTLES on: a tutorial stand-in, taken -- after the engine's own
+  -- start's music and transition (battle/pokedude.lua startTeachyTvBattle;
+  -- pret teachy_tv.c:1172 TeachyTvPrepBattle)
   want = true
+  FakeTransition.hold = true
   eq(FakePokedude.startTeachyTvBattle(SESSION, 3, tvOpts), true, "solo on: the start answers as started")
+  eq(table.concat(songs, ","), "MUS_VS_WILD", "solo on: the wild battle music (PlayMapChosenOrBattleBGM)")
+  local tr = lastOf("transition")
+  eq(tr and tr[1], 8, "solo on: the transition the cart picks for the program (SLICE)")
+  eq(tr and tr[2] and tr[2].overUi, true, "solo on: ...over the TEACHY TV")
+  eq(#taken, 0, "solo on: nothing offered until the transition has played")
+  eq(SESSION.party, playerParty, "solo on: ...the player's party still the session's")
+  check(Stack.has("teachy_tv"), "solo on: ...and the TEACHY TV still on the stack")
+  FakeTransition.hold = false
+  FakeTransition.release()
   eq(recorded("pokedudeStart"), 1, "...and the cart's own did not run")
   local stand = taken[1]
+  local at = atTake[1]
+  eq(at and at.depth, 0, "taken: the fight's screen goes onto an empty stack (TeachyTvFree)")
+  eq(at and at.tv, false, "taken: ...the TEACHY TV lifted off")
+  eq(at and at.bagOpen, false, "taken: ...the bag menu hidden")
+  eq(at and at.party, stand and stand.playerParty, "taken: his party is the session's (InitPokedudePartyAndOpponent)")
   eq(stand and stand.kind3, "tutorial", "POKe DUDE: a tutorial")
   eq(stand and stand.tutorial3, "pokedude", "POKe DUDE: ...the POKe DUDE's")
   eq(stand and stand.pokedudeScript, 3, "POKe DUDE: the demonstration's number")
@@ -1075,9 +1160,20 @@ do
   eq(stand and stand.encounter.pokedude, true, "POKe DUDE: the encounter says so")
   eq(stand and stand.opts.pdScriptNum, 3, "POKe DUDE: the opts Battle.start would have had")
   eq(stand and stand.teachyOpts, tvOpts, "POKe DUDE: the TEACHY TV's own opts ride along")
+  local onDoneSaw = nil
+  local realOnDone = tvOpts.onDone
+  tvOpts.onDone = function(code)
+    onDoneSaw = { party = SESSION.party, tv = Stack.has("teachy_tv"), bagOpen = BagMenu.open }
+    return realOnDone(code)
+  end
   stand.doneFn("caught")
+  tvOpts.onDone = realOnDone
   eq(codes[1], 7, "POKe DUDE: a catch answers B_OUTCOME_CAUGHT")
   eq(recorded("restoreBag"), 1, "POKe DUDE: ...after the player's bag is put back")
+  eq(onDoneSaw and onDoneSaw.party, playerParty, "POKe DUDE: ...and the player's party (LoadPlayerParty first)")
+  eq(onDoneSaw and onDoneSaw.tv, true, "POKe DUDE: ...and the TEACHY TV back on the stack")
+  eq(onDoneSaw and onDoneSaw.bagOpen, true, "POKe DUDE: ...and the bag menu")
+  eq(stand.partyBorrow3, nil, "POKe DUDE: nothing left borrowed")
   eq(CoopField.pokedudeCode3(FakePokedude, "draw"), 3, "a draw is DREW")
   eq(CoopField.pokedudeCode3(FakePokedude, "lose"), 2, "a loss is LOST")
   eq(CoopField.pokedudeCode3(FakePokedude, "run"), 4, "a run is RAN")
@@ -1089,13 +1185,35 @@ do
   eq(back and back[1], SESSION, "...for the same session")
   eq(back and back[2], 3, "...the same demonstration")
   eq(back and back[3], tvOpts, "...with the TEACHY TV's own opts")
+  eq(back and back[4] and back[4].party, playerParty, "...and the player's party in place")
   stand:fightAlone()
   eq(recorded("pokedudeStart"), 2, "once")
-  -- declined: the original runs
+  -- declined: the original runs, with everything given back first
+  teachyUp()
   decision = false
-  FakePokedude.startTeachyTvBattle(SESSION, 1, tvOpts)
+  FakePokedude.startTeachyTvBattle(SESSION, 0, { onDone = tvOpts.onDone })
+  local sawAtFallback = lastOf("pokedudeStart") and lastOf("pokedudeStart")[4]
   eq(recorded("pokedudeStart"), 3, "declined: the cart's own demonstration")
+  eq(lastOf("transition") and lastOf("transition")[1], 9,
+     "declined: the battle basics' transition (WHITE_BARS_FADE) played first")
+  eq(sawAtFallback and sawAtFallback.party, playerParty, "declined: ...with the player's party back")
+  eq(sawAtFallback and sawAtFallback.tv, true, "declined: ...the TEACHY TV back on the stack")
+  eq(sawAtFallback and sawAtFallback.bagOpen, true, "declined: ...and the bag menu")
+  -- the TEACHY TV's own transition, when it names one
   decision = true
+  FakePokedude.startTeachyTvBattle(SESSION, 1, { onDone = tvOpts.onDone, transition = 42 })
+  eq(lastOf("transition") and lastOf("transition")[1], 42, "the TEACHY TV's own transition is played")
+  local mid = taken[#taken]
+  eq(SESSION.party, mid.playerParty, "mid-fight: his party in")
+  local startsBefore = recorded("pokedudeStart")
+  mid:fightAlone()
+  local cart = lastOf("pokedudeStart")
+  eq(recorded("pokedudeStart"), startsBefore + 1, "mid-fight hand-back: the cart's demonstration starts")
+  eq(cart and cart[4] and cart[4].party, playerParty, "mid-fight hand-back: ...with the player's party back")
+  eq(cart and cart[4] and cart[4].tv, true, "mid-fight hand-back: ...the TEACHY TV back on the stack")
+  eq(cart and cart[4] and cart[4].bagOpen, true, "mid-fight hand-back: ...and the bag menu")
+  eq(SESSION.party, playerParty, "mid-fight hand-back: the player's party stays")
+  teachyUp()
   -- a battle already running: the engine's own refusal answers
   battleActive = true
   local before = #taken
@@ -1107,7 +1225,7 @@ do
   stubMod.find = function() return { exports = {} } end
   FakePokedude.startTeachyTvBattle(SESSION, 1, tvOpts)
   eq(#taken, before, "a wrapper left by an unloaded instance takes nothing")
-  eq(recorded("pokedudeStart"), 5, "...and the cart's demonstration runs")
+  eq(recorded("pokedudeStart"), 6, "...and the cart's demonstration runs")
   stubMod.find = find
   eq(CoopField.restorePokedude3(), true, "the wrap comes off")
   eq(FakePokedude.startTeachyTvBattle, original, "the engine's own function is back")
@@ -1131,6 +1249,201 @@ do
   FakePokedude.startTeachyTvBattle = original
   rawset(FakePokedude, "__rby_mmo_pokedude", nil)
   rawset(FakePokedude, "__rby_mmo_pokedude:live", nil)
+  Gen3.audio.playSong = realSong
+  package.loaded["src.ui.game3.bag_menu"] = savedBagMenu
+end
+
+-- ------------------------------------------------------------------
+-- 7b. what a fight borrows from the save (src/Borrow3.lua), and the TEACHY
+--     TV's borrows through it
+-- ------------------------------------------------------------------
+
+do
+  newGame()
+  local Gen3 = need("Gen3")
+  local Borrow3 = need("Borrow3")
+  local gave = {}
+  local function giver(name) return function() gave[#gave + 1] = name end end
+  -- hold / release
+  eq(Borrow3.hold(SESSION, "t.a", giver("a"), function() return true end, "party"), true,
+     "ledger: a borrow is held")
+  eq(Borrow3.held(SESSION, "t.a"), true, "ledger: ...and says so")
+  check(type(rawget(SESSION, Borrow3.KEY)) == "table", "ledger: kept on the session itself")
+  eq(Borrow3.release(SESSION, "t.a"), true, "ledger: the owner's own return releases it")
+  eq(Borrow3.held(SESSION, "t.a"), false, "ledger: ...forgotten")
+  eq(rawget(SESSION, Borrow3.KEY), nil, "ledger: an empty ledger leaves the session")
+  eq(#gave, 0, "ledger: a release gives nothing back (the owner already did)")
+  eq(Borrow3.release(SESSION, "t.a"), false, "ledger: releasing twice is a no")
+  -- settle: a dead borrow and one an earlier load made go back; a live one stays
+  local liveNow = true
+  Borrow3.hold(SESSION, "t.dead", giver("dead"), function() return false end)
+  Borrow3.hold(SESSION, "t.live", giver("live"), function() return liveNow end, "bag")
+  Borrow3.hold(SESSION, "t.throws", giver("throws"), function() error("boom") end)
+  -- An earlier load of the mod (F5): the same file, a module graph of its own.
+  local OldBorrow3 = newNeed(stubMod)("Borrow3")
+  OldBorrow3.hold(SESSION, "t.old", giver("old"), function() return true end)
+  local restored, live, labels = Borrow3.settle(SESSION)
+  eq(restored, 3, "settle: the dead, the throwing and the old-epoch borrows go back")
+  eq(listOf(gave), "dead,old,throws", "settle: ...each through its own giveBack")
+  eq(listOf(live), "t.live", "settle: the one whose fight is running stays")
+  eq(listOf(labels), "bag", "settle: ...named by its label")
+  -- the save.write link
+  local wrote = 0
+  local function write(game) wrote = wrote + 1; check(game == GAME, "save.write: the game is passed on"); return true end
+  local warnsBefore = #warns
+  eq(Borrow3.beforeSave(write, GAME), false, "save.write: a live borrow vetoes the write")
+  eq(wrote, 0, "save.write: ...nothing is written")
+  check(#warns > warnsBefore and warns[#warns]:find("your bag", 1, true) ~= nil,
+        "save.write: ...and the player is told what the battle holds")
+  liveNow = false
+  eq(Borrow3.beforeSave(write, GAME), true, "save.write: once that fight is over, the write goes on")
+  eq(wrote, 1, "save.write: ...once")
+  eq(gave[#gave], "live", "save.write: ...after the borrow is given back")
+  eq(rawget(SESSION, Borrow3.KEY), nil, "save.write: nothing left on the session")
+  -- no session (a title screen, Gen 1): straight through
+  local savedSession = SESSION
+  SESSION, stubMod.game = nil, nil
+  eq(Gen3.session(), nil, "no session: (none)")
+  eq(Borrow3.beforeSave(write, GAME), true, "no session: save.write passes straight through")
+  eq(wrote, 2, "no session: ...and writes")
+  SESSION, stubMod.game = savedSession, GAME
+  -- install: one save.write link, through the facade
+  local wrapped = {}
+  stubMod.hooks = { wrap = function(_, name, fn) wrapped[#wrapped + 1] = { name, fn } end }
+  eq(Borrow3.install(), true, "install: wraps through mod.hooks")
+  eq(wrapped[1] and wrapped[1][1], "save.write", "install: ...the save.write hook")
+  eq(wrapped[1] and wrapped[1][2], Borrow3.beforeSave, "install: ...with beforeSave")
+  stubMod.hooks = nil
+
+  -- Gen3.loaded: package.loaded only, behind Gen3.engine's gate
+  local savedBagMenu = package.loaded["src.ui.game3.bag_menu"]
+  local BagMenu = { open = true }
+  package.loaded["src.ui.game3.bag_menu"] = BagMenu
+  eq(Gen3.loaded("src.ui.game3.bag_menu"), BagMenu, "Gen3.loaded: a loaded game3 module")
+  eq(Gen3.loaded("src.ui.game3.never_loaded_rby"), nil, "Gen3.loaded: one nobody loaded is nil")
+  eq(package.loaded["src.ui.game3.never_loaded_rby"], nil, "Gen3.loaded: ...and is not loaded by asking")
+  eq(Gen3.loaded("src.core.Game"), nil, "Gen3.loaded: never a module outside the game3 families")
+
+  -- ------- the TEACHY TV through the ledger
+  local songs = {}
+  local realSong = Gen3.audio.playSong
+  Gen3.audio.playSong = function(name) songs[#songs + 1] = name; return true end
+  local Gen3Ui = need("Gen3Ui")
+  local decision = true
+  local screens = {}
+  local handler = {
+    wants = function() return true end,
+    -- The taker's screen goes on the (lifted) stack, as solo's does.
+    take = function(stand)
+      if not decision then return false end
+      local screen = { draw = function() end }
+      screens[stand] = screen
+      Gen3Ui.pushScreen(GAME, "RbyMmoTeachyFight", screen)
+      return true
+    end,
+    holds = function(stand) return screens[stand] end,
+  }
+  local function teachyUp()
+    if not Stack.has("teachy_tv") then Stack.push("teachy_tv", {}, { hideBelow = true }) end
+    BagMenu.open = true
+  end
+  local playerParty = { builtMon(4, 20, {}) }
+  SESSION.party = playerParty
+  teachyUp()
+  eq(CoopField.installPokedude3(handler), true, "TEACHY ledger: the wrap installs")
+  local codes = {}
+  local tvOpts = { onDone = function(code) codes[#codes + 1] = code end }
+  FakePokedude.startTeachyTvBattle(SESSION, 2, tvOpts)
+  local stand = next(screens)
+  check(stand ~= nil, "TEACHY ledger: the demonstration is taken")
+  eq(SESSION.party, stand and stand.playerParty, "TEACHY ledger: his party is the session's")
+  eq(Borrow3.held(SESSION, CoopField.BORROW_PARTY3), true, "TEACHY ledger: the party swap is recorded")
+  eq(Borrow3.held(SESSION, CoopField.BORROW_BAG3), true, "TEACHY ledger: ...and the bag swap")
+  eq(stand and stand:fightLive3(), true, "TEACHY ledger: the fight is live while its screen is up")
+  wrote = 0
+  eq(Borrow3.beforeSave(write, GAME), false, "TEACHY ledger: no save mid-demonstration")
+  eq(SESSION.party, stand and stand.playerParty, "TEACHY ledger: ...and his party stays in for the fight")
+  -- The fight's screen throws and is popped: no `done`, no hand-back.
+  Gen3Ui.pop(GAME, screens[stand])
+  eq(stand and stand:fightLive3(), false, "TEACHY ledger: a popped screen is no fight")
+  eq(SESSION.party, stand and stand.playerParty, "TEACHY ledger: ...the swap is still in the session")
+  local bagBacks = recorded("restoreBag")
+  eq(Borrow3.beforeSave(write, GAME), true, "TEACHY ledger: the next save goes on")
+  eq(wrote, 1, "TEACHY ledger: ...and is written")
+  eq(SESSION.party, playerParty, "TEACHY ledger: ...with the player's own party back first")
+  eq(recorded("restoreBag"), bagBacks + 1, "TEACHY ledger: ...and the player's bag (RestorePlayerBag)")
+  eq(SESSION.teachyBagBackup, nil, "TEACHY ledger: ...no backup left over")
+  eq(Borrow3.held(SESSION, CoopField.BORROW_PARTY3), false, "TEACHY ledger: nothing held")
+  eq(stand and stand.teachyCover3, nil, "TEACHY ledger: the stale cover is forgotten, not restored")
+  check(not Stack.has("teachy_tv"), "TEACHY ledger: ...no dead TEACHY TV put back over the field")
+  -- A late end for that stand gives nothing back twice.
+  stand.doneFn("win")
+  eq(SESSION.party, playerParty, "TEACHY ledger: a late done leaves the player's party")
+
+  -- A demonstration that died with no save since: the next one borrows from
+  -- the player's own party, not from the dead one's swap.
+  newGame()
+  SESSION.party = playerParty
+  screens = {}
+  teachyUp()
+  FakePokedude.startTeachyTvBattle(SESSION, 2, tvOpts)
+  local dead = next(screens)
+  Gen3Ui.pop(GAME, screens[dead])
+  screens = {}
+  teachyUp()
+  FakePokedude.startTeachyTvBattle(SESSION, 3, tvOpts)
+  local second = next(screens)
+  check(second ~= nil and second ~= dead, "TEACHY ledger: a second demonstration is taken")
+  eq(second and second.partyBorrow3 and second.partyBorrow3.party, playerParty,
+     "TEACHY ledger: ...borrowing the player's own party (the dead swap was settled first)")
+  second.doneFn("win")
+  eq(SESSION.party, playerParty, "TEACHY ledger: ...and its end gives the player's party back")
+  eq(rawget(SESSION, Borrow3.KEY), nil, "TEACHY ledger: ...with nothing left in the ledger")
+
+  -- Declined after the intro: the cart's battle alone, no second intro.
+  newGame()
+  SESSION.party = playerParty
+  teachyUp()
+  songs = {}
+  decision = false
+  FakePokedude.startTeachyTvBattle(SESSION, 1, tvOpts)
+  local fell = lastOf("pokedudeStart")
+  eq(recorded("pokedudeStart"), 1, "declined: the cart's demonstration starts")
+  eq(fell and fell[3] and fell[3].headless, true, "declined: ...asked for its battle alone (headless)")
+  eq(fell and fell[3] and fell[3].onDone, tvOpts.onDone, "declined: ...with the TEACHY TV's onDone")
+  eq(tvOpts.headless, nil, "declined: the TEACHY TV's own opts are not touched")
+  eq(#songs, 1, "declined: the battle music played once")
+  eq(recorded("transition"), 1, "declined: the transition played once")
+  eq(fell and fell[4] and fell[4].party, playerParty, "declined: ...with the player's party back")
+  eq(rawget(SESSION, Borrow3.KEY), nil, "declined: nothing left in the ledger")
+
+  -- A bag swap that throws after BackUpPlayerBag: the player's bag is put
+  -- back, and the cart's demonstration runs (once, headless).
+  newGame()
+  SESSION.party = playerParty
+  teachyUp()
+  decision = true
+  screens = {}
+  local realInit = FakeTeachyTv.initPokedudeBag
+  FakeTeachyTv.initPokedudeBag = function(session)
+    session.teachyBagBackup = true
+    error("half a swap")
+  end
+  FakePokedude.startTeachyTvBattle(SESSION, 1, tvOpts)
+  FakeTeachyTv.initPokedudeBag = realInit
+  eq(next(screens), nil, "half a bag swap: not offered")
+  eq(recorded("restoreBag"), 1, "half a bag swap: the player's bag is restored")
+  eq(SESSION.teachyBagBackup, nil, "half a bag swap: ...no backup left")
+  eq(recorded("pokedudeStart"), 1, "half a bag swap: the cart's demonstration runs")
+  eq(lastOf("pokedudeStart")[3].headless, true, "half a bag swap: ...its battle alone")
+  eq(SESSION.party, playerParty, "half a bag swap: the player's party stays")
+
+  eq(CoopField.restorePokedude3(), true, "TEACHY ledger: the wrap comes off")
+  FakePokedude.startTeachyTvBattle = rawget(FakePokedude, "__rby_mmo_pokedude") or FakePokedude.startTeachyTvBattle
+  rawset(FakePokedude, "__rby_mmo_pokedude", nil)
+  rawset(FakePokedude, "__rby_mmo_pokedude:live", nil)
+  Gen3.audio.playSong = realSong
+  package.loaded["src.ui.game3.bag_menu"] = savedBagMenu
 end
 
 -- ------------------------------------------------------------------

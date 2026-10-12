@@ -3174,11 +3174,11 @@ M.BATTLE_ACTIONS = {
   cancel = true,
 }
 
--- Gen 3's own action (contract C6 of docs/plans/gen3-solo-remaining-fights.md),
--- in a table of its own for M.BATTLE_EVENTS3's reason: the five above are every
+-- Gen 3's own actions (contract C6 of docs/plans/gen3-solo-remaining-fights.md),
+-- in a table of their own for M.BATTLE_EVENTS3's reason: the five above are every
 -- generation's, and a Red / Gold reader -- or a caller naming no generation --
 -- must go on refusing an action its cart has no menu for.  M.battleChoice reads
--- it for a generation 3 reader only.
+-- them for a generation 3 reader only.
 --
 --   safari  -- one Safari Zone command, `throw` saying which (M.SAFARI_THROWS3).
 --              The cart swaps the whole action menu for the safari controller's
@@ -3189,12 +3189,24 @@ M.BATTLE_ACTIONS = {
 --              RUN is the ordinary `run` above (HandleAction_SafariZoneRun is the
 --              escape that always works, which is a referee's rule, not a word).
 --
--- No PROTOCOL bump: no hub seats a Safari fight -- only solo's local referee
--- does -- so a hub never needs to hear one.  A Gen 3 hub that is sent one
--- anyway reads it here and its referee refuses it (BattleSim3 `ACTIONS`, every
--- mode a hub seats), the way it refuses any action its fight has no arm for.
+--   wallyThrow -- WALLY's turn-3 command in Emerald's catching tutorial
+--              (wave 4b's contract C-W): pokeemerald src/battle_controller_
+--              wally.c WallyHandleActions files B_ACTION_WALLY_THROW with no
+--              cursor move and no data (BtlController_EmitTwoReturnValues(...,
+--              B_ACTION_WALLY_THROW, 0)) -- the recall and "You throw a BALL
+--              now, right?" turn, which is neither a FIGHT, an ITEM nor a
+--              SWITCH.  It needs nothing, as `run` needs nothing; only a
+--              `tutorial = "wally"` referee takes it, from WALLY's seat alone
+--              -- side a's first (BattleSim3 `_normaliseChoice`).
+--
+-- No PROTOCOL bump: no hub seats a Safari fight or a tutorial -- only solo's
+-- local referee does -- so a hub never needs to hear either.  A Gen 3 hub that
+-- is sent one anyway reads it here and its referee refuses it (BattleSim3
+-- `_normaliseChoice`, every mode a hub seats), the way it refuses any action
+-- its fight has no arm for.
 M.BATTLE_ACTIONS3 = {
   safari = "throw",
+  wallyThrow = true,
 }
 
 -- The five things a Safari turn can throw, each one pret action handler
@@ -3238,8 +3250,9 @@ M.POKEBLOCK3_MAX = 40
 -- exactly as it did before Gen 3 existed, ignoring them whatever they hold.
 -- Likewise only 1 reads Gen 1's `mimic` (wave 4), ignored everywhere else,
 -- and since wave 5 a Gen 2 hub reads `pass` too (Gold's BATON PASS).  Only 3
--- reads an action from M.BATTLE_ACTIONS3 (`safari`, contract C6): any other
--- reader refuses it whole, as it refuses every action it has no row for.
+-- reads an action from M.BATTLE_ACTIONS3 (`safari`, contract C6; `wallyThrow`,
+-- contract C-W): any other reader refuses it whole, as it refuses every action
+-- it has no row for.
 function M.battleChoice(raw, generation)
   if type(raw) ~= "table" then return nil end
   local needs = M.BATTLE_ACTIONS[raw.action]
@@ -3418,9 +3431,17 @@ M.BATTLE_EVENTS = {
 --                 (2 / 1 / 0), then `win` (side) or `draw`.  Neither kind has
 --                 a PROTOCOL bump: only solo's local referee seats a Frontier
 --                 hall, so no hub ever emits one.
+--   wallyThrow -- WALLY's recall-and-throw turn ran, in its turn order (wave
+--                 4b's contract C-W; pokeemerald src/battle_util.c
+--                 HandleAction_WallyBallThrow): `slot` / `side` name WALLY's
+--                 field slot (side a's first seat, the only one the referee
+--                 lets throw, so no seat id rides).  No `msg` follows --
+--                 the recall and "You throw a BALL now, right?" are the
+--                 screen's.  No PROTOCOL bump: only solo's local referee
+--                 seats Emerald's catching tutorial.
 M.BATTLE_EVENTS3 = {
   ability = true, weather = true, held = true, form = true, sub = true, ball = true,
-  obey = true, lesson = true, palace = true, arena = true,
+  obey = true, lesson = true, palace = true, arena = true, wallyThrow = true,
 }
 
 -- Gold's one kind of its own (contract K3 of docs/plans/gen12-referee-fidelity.md),
@@ -3502,7 +3523,7 @@ end
 --
 -- `generation` (optional) is the reader's own.  1 or 2 reads an event as it
 -- did before Gen 3 had a stream: the older vocabulary only (none of Gen 3's
--- eight kinds), none of its six fields (target, spread, stat, stage, delta,
+-- kinds), none of its six fields (target, spread, stat, stage, delta,
 -- holding), and `moves` rows in the older dialect whatever `num` they carry.
 -- The one addition since is Gold's own `held` (M.BATTLE_EVENTS2, contract
 -- K3), which a generation 2 reader alone accepts -- a Gen 1 reader's

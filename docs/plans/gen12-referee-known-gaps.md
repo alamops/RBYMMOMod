@@ -36,6 +36,7 @@ The rule source for fixing any of them is unchanged:
 | 9 | Gold battle types | 2 | data |
 | 10 | Smaller differences | 1, 2 | various |
 | 11 | The random-number generator | 1, 2 | by design |
+| 12 | The battle menu's cursor opens on FIGHT every turn | 1, 2 | presentation |
 
 ### 1. A move's animation comes before its "used" line
 
@@ -125,6 +126,15 @@ Special battle types aren't modelled: the shiny GYARADOS, trap, CELEBI and SUICU
 ### 11. The random-number generator
 
 The referees use their own LCG (Numerical Recipes constants, high bits), not the carts' `Random` (rDIV plus an add-with-carry). Every draw point and every byte→outcome mapping follows pret; the byte values themselves can't, because the seed is the referee's. This is by design: the referee's seed is what makes a fight replayable and the Lua and Node twins provably identical.
+
+### 12. The battle menu's cursor opens on FIGHT every turn
+
+Both carts keep the battle menu's cursor from one turn to the next and put it back on FIGHT when the player's own monster is sent out (Gold also when a battle starts and ends):
+
+- **Red:** pokered keeps it in `wBattleAndStartSavedMenuItem` and zeroes it in `SendOutMon` (`engine/battle/core.asm:1723`, the clear at `:1735`).
+- **Gold:** pokecrystal keeps it in `wBattleMenuCursorPosition` (read and written back by `LoadBattleMenu` / `CommonBattleMenu`, `engine/battle/menu.asm`) and zeroes it in `SendOutPlayerMon` (`engine/battle/core.asm:4040`), `BattleIntro` (`:8053`) and `CleanUpBattleRAM` (`:8309`).
+
+Our Red and Gold screens open on FIGHT every turn: `MediatedBattle` resets `commandIndex` when a turn opens for every generation but 3, and `CoopBattle:freshTurnCursors` does the same. Gen 3 already keeps the carts' cursors (the action cursor, and the move cursor per battler); closing this is the same rule with Red's and Gold's reset points, on both screens. No referee or wire change.
 
 ## Engine-port divergences
 

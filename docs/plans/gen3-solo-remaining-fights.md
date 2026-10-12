@@ -120,17 +120,38 @@ File ownership is strict within a wave; later waves inherit.
 | 4 | K-TUT | new `src/Solo3/Tutorial.lua`, new `tests/gen3_solo_tutorial.lua` | old man, Wally and Pokédude replays: the cart's scripted inputs on the cart's timing |
 | 4 | UM4 | the UM files | the tutorial screens (autoplay, back pics, overlays, Wally's recall); the Palace screen (no move menu); the Arena judgment window |
 | 4 | K-FAC2 | `src/Solo3/Facility.lua`, `src/SoloBrain.lua`, the UC files | Palace and Arena taken over (move-group pick, targeting, the judge, no switching); Tower multis with an NPC partner and the Pike double |
+| 4b | DCUR / R4 / SCR / TUT | `src/CoopBattle.lua`; the referee twins; the UM files; `Tutorial.lua`, `CoopField.lua`, `SoloBattle.lua` | wave-4 remainders: per-seat cursors on the double screen; WALLY's own throw turn; holding B quits the POKé DUDE; voice-overs between a command and its sub-menu; the TEACHY TV divert; screen details (research Part 5.4) |
 | 5 | E | `tests/drivers/solo_battle_e2e.lua`, `tests/drivers/mmo_util.lua`, the Gen 3 runners | an e2e leg per family on FireRed and Emerald |
 | 5 | D | docs | known gaps §2 closed; README, mod.card, CHANGELOG; the sheet contract; reach-arounds and engine divergences in `docs/upstream/gen3-spawn-npc.md` |
 
 ## Progress
 
+- Waves 4 and 4b are implemented (Palace / Arena, multis, tutorials, WALLY's
+  throw, POKé DUDE quit/voice-overs and the TEACHY TV divert); contracts in
+  research Part 5. Their headless suites pass.
+- Wave 5's missing field-family driver is now implemented as
+  `tests/drivers/solo3_e2e_field.lua`. It enters through the engine battle
+  bridge and TEACHY TV functions with story prerequisites seeded, and checks
+  save outcomes, one continuation, catches, Safari spending, roamer state,
+  restored tutorial parties/bags and return to the field. Frontier and
+  facility drivers remain separate modules. Missing modules now fail rather
+  than skip, and the runner mounts the invoking checkout without changing
+  the shared engine's installed mod.
 - Wave 3 landed: `af3745f` (Palace / Arena referee), `29da93b` (Safari kind), `c0313e4` (core follow-ups, optional family resolver), `9578433` (Safari screen, general looks). Barrier green (55).
 - Wave 2 landed: `1ad1a88` (Safari / tutorial referee), `3d84b26` (Legend), `7984b9b` (Facility), `9155379` (Doubles / First), `4d2c346` (looks, lone double). Barrier green (54).
 - Wave 1 landed: `eb2b198` (referee), `3ccf2ad` (wire), `4aee25a` (doors), `db67b7a` (solo core, brain), `59fbe2a` (screens). Barrier green (50 suites / test files, three fixtures reproduced).
 
 ## Verification
 
-- **Headless:** every Lua suite and Node test green.
-- **Parity:** the parity fixtures regenerated and reproduced by both twins; a BattleSim3 Lua↔JS fuzzer at 0 mismatches.
-- **e2e:** the full matrix green (Gen 1, Gen 2, Gen 3), with the new Gen 3 legs passing.
+- **Headless:** the invoking checkout's main mod suite passes 6,435 checks;
+  the fight-family suites and client/door integration also pass (see the
+  individual suite output). These are headless results, not live evidence.
+- **Parity:** historical wave barriers reproduced both twins' parity
+  fixtures; the complete parity/fuzzer matrix was not rerun for this test
+  harness correction.
+- **Live:** `SOLO_LEGS=field GEN3_GAME='firered emerald' bash
+  tests/drivers/run-solo-battle-e2e.sh --gen3` verifies the new field-family
+  legs using existing ROM caches and disposable save identities. The finalized
+  runner exited successfully on 2026-10-11: FireRed 202 checks, Emerald 115
+  checks, both `GAPS:0`. Logs are retained by the runner. This is a
+  scoped Gen 3 run; it does not claim a new full Gen 1/2/3 or LeafGreen matrix.

@@ -461,9 +461,11 @@ end
 --                   shared team's other seat; never another trainer's, whose
 --                   indices are into another party)
 --
--- and, for the Battle Palace (wave 3), `moveMask` (M.maskOf3: the moves a
--- nature group allows, the rest scored from 0) and `moveOnly` (the move
--- alone -- no switch, no item -- for the player's own monster's pick).
+-- and, for the Battle Palace, `moveMask` (M.maskOf3: the moves a nature
+-- group allows, the rest scored from 0) and `moveOnly` (the move alone -- no
+-- switch, no item -- for the player's own monster's pick).  A brain built
+-- with the cart's Palace tables (M.new3 `palace`) draws the group itself and
+-- sets the mask (M:_palace3).
 --
 -- A brain built with an `owner` declines a seat of another entry (M:answers).
 --
@@ -786,7 +788,14 @@ end
 --     player's side with the opponents' flags, no items and no disobedience
 --     -- every position rule the cart writes in battler ids read through
 --     M.battlerId3, so the scripts aim at side b from side a the way they
---     aim at the player from side b.
+--     aim at the player from side b;
+--   * **the Battle Palace and the Battle Arena** (Emerald's halls and
+--     tents): the nature's move group drawn from the cart's likelihoods, the
+--     AI scoring inside it, the out-of-group fallback with its 50% failure and
+--     the nature's target in a double (M:_palace3) -- for a trainer and, with
+--     a `moveOnly` view, for the player's own monster; no switching and
+--     party-order send-outs in the Arena, where a judged monster is down for
+--     good (M:_shouldSwitch3, M:_replacement3, M:_benchable3).
 --
 -- The damage every script asks about is the referee's own pure formula
 -- (BattleSim3/Damage.calc) over the referee's own battlers -- stages, screens,
@@ -1063,6 +1072,26 @@ end
 --             always says it itself
 --   aiBits    a bit layout (for a suite); family "frlg" | "rse" (override;
 --             else read off the layout, M.aiFamily3)
+--   palace    the Battle Palace (Emerald, the Verdanturf tent too): the cart's
+--             own tables, read from the player's cart by the caller
+--             (src/Solo3/Facility.lua palaceTables3) and never carried here --
+--             { likelihood = { [nature + 1] = { 4 bytes } }   pret
+--                 gBattlePalaceNatureToMoveGroupLikelihood (the ATTACK and
+--                 DEFENSE thresholds of the high-HP half, then the low-HP
+--                 half's),
+--               moveTarget = { [nature + 1] = 0..2 } }   pret
+--                 gBattlePalaceNatureToMoveTarget (STRONGER, WEAKER, RANDOM:
+--                 a double's target) --
+--             and every move this brain picks is the nature's
+--             (M:_palace3, ChooseMoveAndTargetInBattlePalace): the trainer's
+--             AI_TrySwitchOrUseItem still runs first, as the opponent's
+--             controller runs it; a `moveOnly` view (the player's own monster,
+--             whose FIGHT skips the move menu) asks the move alone
+--   arena     true: the Battle Arena (Emerald, the Fallarbor tent too) --
+--             never switches, sends out in party order (pret
+--             battle_ai_switch_items.c:452 / :648).  A referee view whose
+--             referee plays `rules.arena` says so itself; this is for a
+--             bare-sheet view
 --
 -- Returns nil plus a reason with neither a trainer record nor `aiFlags`: a
 -- wild seat is the referee's own (its `wildPick` / `ai` options), never a
@@ -1116,6 +1145,8 @@ function M.new3(opts)
     noDisobey = opts.noDisobey == true,
     owner = (type(opts.owner) == "string" and opts.owner ~= "") and opts.owner or nil,
     side3 = side,
+    palace3 = M.palaceTables3(opts.palace),
+    arena3 = opts.arena == true or nil,
   }, M)
   return self
 end
@@ -1250,6 +1281,10 @@ function M:_ctx3(view)
     -- BattleAI_SetupAIData's defaultScoreMoves (M.maskOf3): nil scores every
     -- move from 100.
     mask = M.maskOf3(view.moveMask),
+    -- The Battle Arena (BATTLE_TYPE_ARENA): the referee's own rules when the
+    -- view carries it, else the brain's word -- no switch, party order.
+    arena = (self.arena3 or (sim and type(sim.rules) == "table" and sim.rules.arena == true))
+      and true or nil,
   }
   if view.double then self:_double3(ctx, view) end
   return ctx
@@ -1350,6 +1385,10 @@ end
 -- the engine's ai_switch.lua `excluded`).
 function M:_benchable3(ctx, index, mon)
   if mon == ctx.b.mon or int3(mon.hp, 0) <= 0 then return false end
+  -- A Battle Arena loser "fainted" by the judge keeps its HP and is down for
+  -- good all the same (pret Cmd_checkteamslost skips arenaLost*Mons,
+  -- battle_script_commands.c:3557; the referee's `judged`).
+  if mon.judged then return false end
   if ctx.partner and mon == ctx.partner.mon then return false end
   if ctx.claimed and ctx.claimed[index] then return false end
   return true
@@ -1588,6 +1627,27 @@ function M:_legal3(ctx)
   for i = 1, #moves do
     if not bad[i] then out[#out + 1] = i end
   end
+  -- CheckMoveLimitations(MOVE_LIMITATIONS_ALL): what BattleAI_SetupAIData
+  -- zeroes (battle_ai_script_commands.c:333) -- read again by a masked pick.
+  ctx.limited = bad
+  return out
+end
+
+-- The slots a pick is made over.  Without a mask, the usable ones: every one
+-- of them starts at 100 and an unusable one at 0, and no script sequence on
+-- either cart takes a usable move below what an unusable one can reach, so
+-- the two readings never part.  With a mask (the Battle Palace's nature
+-- group) a usable move can start at 0 too, and the cart's pick is then over
+-- every slot holding a move (ChooseMoveOrAction_Singles / _Doubles walk all
+-- four, MOVE_NONE aside): an unusable one scored up from 0 can win, and the
+-- referee fails it at selection (BattleSim3/Palace.lua).
+function M:_pool3(ctx, legal)
+  if not ctx.mask then return legal end
+  local out = {}
+  for i, mv in ipairs(type(ctx.b.moves) == "table" and ctx.b.moves or {}) do
+    if type(mv) ~= "table" or int3(mv.num, 0) == 0 then break end
+    out[#out + 1] = i
+  end
   return out
 end
 
@@ -1630,8 +1690,13 @@ function M:_decideGen3(view)
     local item = self:_shouldUseItem3(ctx)
     if item then return item end
   end
-  if ctx.double then return self:_chooseDouble3(ctx, legal) end
-  return self:_chooseMove3(ctx, legal)
+  -- The Battle Palace: the move is the nature's (OpponentHandleChooseMove /
+  -- PlayerHandleChooseMove's PALACE arms, both ChooseMoveAndTargetInBattle-
+  -- Palace).
+  if self.palace3 then return self:_palace3(ctx, legal) end
+  local pool = self:_pool3(ctx, legal)
+  if ctx.double then return self:_chooseDouble3(ctx, pool) end
+  return self:_chooseMove3(ctx, pool)
 end
 
 -- ------- ShouldSwitch (battle_ai_switch_items.c:302, engine ai_switch.lua)
@@ -1765,6 +1830,9 @@ function M:_findMonWithFlags3(ctx, bench, last, flag, modulo)
 end
 
 function M:_shouldSwitch3(ctx)
+  -- The Battle Arena: ShouldSwitch is FALSE (battle_ai_switch_items.c:452);
+  -- the referee would refuse the switch anyway (battle_main.c:4243).
+  if ctx.arena then return nil end
   local b, t, S = ctx.b, ctx.t, ctx.S
   local sim = ctx.sim
   -- Trapped: Mean Look / Spider Web / Block, a partial trap, Ingrain (the
@@ -1894,6 +1962,10 @@ function M:_replacement3(ctx)
     if self:_benchable3(ctx, index, mon) then candidates[#candidates + 1] = mon end
   end
   if #candidates == 0 then return nil end
+  -- The Battle Arena: gBattlerPartyIndexes + 1, no scoring
+  -- (battle_ai_switch_items.c:648).  Nothing ever switches there, so the
+  -- next index is the first standing, unjudged member in party order.
+  if ctx.arena then return candidates[1] end
   if ctx.double then
     local foe = self:_switchFoe3(ctx)
     if foe then t = foe.b end
@@ -2108,7 +2180,8 @@ local function powerClasses(self, ctx, legal, est, G)
   return out
 end
 
--- The best-scored usable slot, ties drawn at random, and its score.
+-- The best-scored slot of the pick's pool (M:_pool3), ties drawn at random,
+-- and its score.
 function M:_bestOf3(scores, legal)
   local best, pool = nil, {}
   for _, i in ipairs(legal) do
@@ -2119,17 +2192,21 @@ function M:_bestOf3(scores, legal)
   return pool[self.rng(1, #pool)], best
 end
 
+-- `legal` is the pick's pool (M:_pool3): the usable slots, or with a mask
+-- every slot holding a move.
 function M:_chooseMove3(ctx, legal)
   local rng = self.rng
-  -- No scripts at all: the controller picks a usable slot at random -- one
-  -- the mask scores 100 when there is a mask, every one tying at 0 when it
-  -- leaves none.
+  -- No scripts at all: every slot keeps the score it started at
+  -- (BattleAI_SetupAIData: 100 for a usable slot the mask allows, 0 for the
+  -- rest), so the controller's pick is one of the 100s at random, or one of
+  -- the whole pool when the mask leaves none.
   if ctx.aiFlags == 0 then
     local pool = legal
     if ctx.mask then
+      local limited = ctx.limited or {}
       pool = {}
       for _, i in ipairs(legal) do
-        if ctx.mask[i] then pool[#pool + 1] = i end
+        if ctx.mask[i] and not limited[i] then pool[#pool + 1] = i end
       end
       if #pool == 0 then pool = legal end
     end
@@ -2253,10 +2330,257 @@ function M:_aimed3(ctx, i, slot)
   return out
 end
 
--- Every script's verdict on every usable slot against ctx.t, in the order
--- the cart's loop runs them (AI flag bit by bit, each over the whole
--- moveset), plus the simulated damage roll each pass draws first.
-function M:_scoreMoves3(ctx, legal)
+-- ------- the Battle Palace (pokeemerald battle_gfx_sfx_util.c:109
+-- ChooseMoveAndTargetInBattlePalace, run by both controllers' PALACE arms:
+-- battle_controller_player.c:2631 PlayerHandleChooseMove,
+-- battle_controller_opponent.c:1553 OpponentHandleChooseMove)
+--
+-- Neither trainer picks a move.  The nature draws a move group from the
+-- cart's likelihoods -- the low-HP half of the table once the battler's
+-- Palace bit is set (the referee's `palaceLow`) -- and the AI scores the
+-- moves of that group from 100 and the rest from 0; a group with no move
+-- left in it falls to a random usable move that then fails half the time
+-- ("unable", which the referee runs as "appears incapable of using its
+-- power!").  The pick is the client's; the referee fails a pick its
+-- selection check refuses (BattleSim3/Palace.lua).
+
+-- include/constants/battle_palace.h PALACE_MOVE_GROUP_* / PALACE_TARGET_*.
+M.PALACE_GROUP = { ATTACK = 0, DEFENSE = 1, SUPPORT = 2 }
+M.PALACE_TARGET = { STRONGER = 0, WEAKER = 1, RANDOM = 2 }
+M.NATURES3 = 25
+-- include/constants/pokemon.h MOVE_TARGET_* bits the group and the aim read.
+local MOVE_TARGET_DEPENDS, MOVE_TARGET_USER_OR_SELECTED = 1, 2
+local MOVE_TARGET_RANDOM, MOVE_TARGET_BOTH, MOVE_TARGET_USER = 4, 8, 16
+local MOVE_TARGET_FOES_AND_ALLY, MOVE_TARGET_OPPONENTS_FIELD = 32, 64
+-- A random draw that must land on a qualifying slot (the cart loops on
+-- Random() until it does): bounded, then the first qualifying slot in order,
+-- so a generator that never lands cannot hang the fight.
+local PALACE_DRAWS = 64
+
+-- The cart's two Palace tables, checked: `raw.likelihood` 25 rows of four
+-- bytes, `raw.moveTarget` 25 values 0..2 (copied).  nil when either is not
+-- the shape the cart's are.
+function M.palaceTables3(raw)
+  if type(raw) ~= "table" or type(raw.likelihood) ~= "table" or type(raw.moveTarget) ~= "table" then
+    return nil
+  end
+  local likelihood, moveTarget = {}, {}
+  for n = 1, M.NATURES3 do
+    local row = raw.likelihood[n]
+    if type(row) ~= "table" then return nil end
+    local out = {}
+    for k = 1, 4 do
+      local v = tonumber(row[k])
+      if not v or v ~= math.floor(v) or v < 0 or v > 255 then return nil end
+      out[k] = v
+    end
+    likelihood[n] = out
+    local t = tonumber(raw.moveTarget[n])
+    if not t or t ~= math.floor(t) or t < 0 or t > 2 then return nil end
+    moveTarget[n] = t
+  end
+  return { likelihood = likelihood, moveTarget = moveTarget }
+end
+
+-- GetBattlePalaceMoveGroup (battle_gfx_sfx_util.c:296): by the move's
+-- target byte and power.  CURSE's row is USER, so it is DEFENSE for every
+-- type (the aim alone asks about a Ghost).
+function M.palaceGroup3(mv)
+  local G = M.PALACE_GROUP
+  if type(mv) ~= "table" then return G.SUPPORT end
+  local target, power = int3(mv.target, 0), int3(mv.power, 0)
+  if target == MOVE_TARGET_SELECTED or target == MOVE_TARGET_USER_OR_SELECTED
+      or target == MOVE_TARGET_RANDOM or target == MOVE_TARGET_BOTH
+      or target == MOVE_TARGET_FOES_AND_ALLY then
+    return (power == 0) and G.SUPPORT or G.ATTACK
+  end
+  if target == MOVE_TARGET_DEPENDS or target == MOVE_TARGET_OPPONENTS_FIELD then return G.SUPPORT end
+  if target == MOVE_TARGET_USER then return G.DEFENSE end
+  return G.ATTACK
+end
+
+-- The battler's nature (GetNatureFromPersonality): the sheet's, else the
+-- personality's.
+local function natureOf3(b)
+  local mon = type(b) == "table" and type(b.mon) == "table" and b.mon or {}
+  local n = int3(mon.nature, nil)
+  if n == nil or n < 0 or n >= M.NATURES3 then n = int3(mon.personality, 0) % M.NATURES3 end
+  return n
+end
+
+-- gBattleStruct->palaceFlags' bit for this battler: the referee's own
+-- reading (Battle:palaceLow, by field slot), else the battler's.
+function M:_palaceLow3(ctx)
+  local sim, b = ctx.sim, ctx.b
+  if sim and type(sim.palaceLow) == "function" and b.slot ~= nil then
+    local ok, low = pcall(sim.palaceLow, sim, b.slot)
+    if ok then return low == true end
+  end
+  return b.palaceLow == true
+end
+
+-- ChooseMoveAndTargetInBattlePalace, for the battler in ctx.  `legal` is the
+-- usable slots (M:_legal3; never empty here -- with none the referee runs
+-- Struggle and the controller is never asked, battle_main.c:4184).  Returns
+-- the choice: `{ action = "fight", move, target? }`, or `{ action =
+-- "fight", unable = true }` for the controller's own failure.  What it drew
+-- is kept on `lastPalace3` (a suite reads it).
+function M:_palace3(ctx, legal)
+  local b, rng = ctx.b, self.rng
+  local moves = type(b.moves) == "table" and b.moves or {}
+  local G = M.PALACE_GROUP
+  -- An Encore comes first: the controller is never asked (battle_main.c:4192
+  -- files the encored move); the referee keeps it whatever is filed.
+  if int3(b.encoreTurns, 0) > 0 and b.encoreNum then
+    for i, mv in ipairs(moves) do
+      if int3(mv.num, 0) == int3(b.encoreNum, 0) then return { action = "fight", move = i - 1 } end
+    end
+  end
+  local percent = rng(0, 99)
+  local nature = natureOf3(b)
+  local lik = self.palace3.likelihood[nature + 1] or {}
+  local low = self:_palaceLow3(ctx)
+  -- The first pair of likelihoods for a battler above half HP (or asleep),
+  -- the second once its bit is set: ATTACK under the first threshold,
+  -- DEFENSE under the second, else SUPPORT.
+  local first = low and 2 or 0
+  local i = first
+  while i < first + 2 do
+    if int3(lik[i + 1], 0) > percent then break end
+    i = i + 1
+  end
+  local group = (i == first + 2) and G.SUPPORT or (i - first)
+  -- selectedMoves: the group's moves with PP left, up to the first empty
+  -- slot (the usable check is the AI's, and the referee's at selection).
+  local mask, any = {}, false
+  for slot = 1, 4 do
+    local mv = moves[slot]
+    if type(mv) ~= "table" or int3(mv.num, 0) == 0 then break end
+    if M.palaceGroup3(mv) == group and int3(mv.pp, 0) ~= 0 then mask[slot], any = true, true end
+  end
+  local drew = { percent = percent, nature = nature, low = low, group = group, mask = mask }
+  self.lastPalace3 = drew
+  local pick
+  if any then
+    -- BattleAI_SetupAIData(selectedMoves) + BattleAI_ChooseMoveOrAction:
+    -- the scripts this fight runs (a double's own walk included), the mask
+    -- scoring the group from 100; the target the AI chose is the Palace's
+    -- to set again below.
+    ctx.mask = mask
+    local pool = self:_pool3(ctx, legal)
+    local choice = ctx.double and self:_chooseDouble3(ctx, pool) or self:_chooseMove3(ctx, pool)
+    pick = int3(choice and choice.move, 0) + 1
+  else
+    -- No move of the group left: a random usable move, weighted toward the
+    -- one group with two or more usable moves when there is exactly one
+    -- such group -- whose SUPPORT test reads the DEFENSE count against 2 <<
+    -- 8 (battle_gfx_sfx_util.c:193, fixed only under BUGFIX), so it never
+    -- counts -- then the coin that fails it (:255).
+    drew.fallback = true
+    local limited = ctx.limited or {}
+    local function usable(s)
+      local mv = moves[s]
+      return type(mv) == "table" and int3(mv.num, 0) ~= 0 and not limited[s]
+    end
+    local count = { [G.ATTACK] = 0, [G.DEFENSE] = 0, [G.SUPPORT] = 0 }
+    for s = 1, 4 do
+      if usable(s) then
+        local g = M.palaceGroup3(moves[s])
+        count[g] = count[g] + 1
+      end
+    end
+    local multiple = 0
+    if count[G.ATTACK] >= 2 then multiple = multiple + 1 end
+    if count[G.DEFENSE] >= 2 then multiple = multiple + 1 end
+    local want = nil
+    if multiple == 1 then want = (count[G.DEFENSE] >= 2) and G.DEFENSE or G.ATTACK end
+    local function fits(s) return usable(s) and (want == nil or M.palaceGroup3(moves[s]) == want) end
+    for _ = 1, PALACE_DRAWS do
+      local s = rng(0, 3) + 1
+      if fits(s) then pick = s; break end
+    end
+    if not pick then
+      for s = 1, 4 do
+        if fits(s) then pick = s; break end
+      end
+    end
+    drew.pick = pick
+    if not pick or rng(0, 99) >= 50 then
+      drew.unable = true
+      return { action = "fight", unable = true }
+    end
+  end
+  drew.pick = pick
+  return self:_palaceAim3(ctx, pick)
+end
+
+-- The chosen move's target, as ChooseMoveAndTargetInBattlePalace sets it: a
+-- move aimed at the user (CURSE but a Ghost's) at itself, a SELECTED move
+-- (a Ghost's CURSE too) at GetBattlePalaceTarget, anything else at the
+-- other side's left position -- the referee reads its own target for every
+-- kind but SELECTED, and in a single the only foe is the one a SELECTED
+-- move meets, so only a double's SELECTED move is named.
+function M:_palaceAim3(ctx, i)
+  local out = { action = "fight", move = i - 1 }
+  local row = ctx.b.moves and ctx.b.moves[i]
+  if not ctx.double or type(row) ~= "table" then return out end
+  local target
+  if int3(row.num, 0) == MOVE_CURSE then
+    target = hasType(ctx.b, ctx.S.Types.ID.GHOST) and MOVE_TARGET_SELECTED or MOVE_TARGET_USER
+  else
+    target = int3(row.target, 0)
+  end
+  if target == MOVE_TARGET_SELECTED then out.target = self:_palaceTarget3(ctx) end
+  return out
+end
+
+-- GetBattlePalaceTarget (battle_gfx_sfx_util.c:320), a double: the other
+-- side's two positions by HP -- equal HP a random one; else the nature's
+-- preference (the cart's gBattlePalaceNatureToMoveTarget): the stronger,
+-- the weaker, or a random one.  An empty or fallen position (its HP 0 on the
+-- cart, so a WEAKER nature picks it) is redirected when the move runs to
+-- its partner (HandleAction_UseMove's absent-target arm), which is the one
+-- named here; nil when neither stands.
+function M:_palaceTarget3(ctx)
+  local base = M.slotBase3(ctx.foeSideId)
+  local o1, o2 = base, base + 1
+  local standing = {}
+  for _, foe in ipairs(ctx.foes or {}) do standing[foe.slot] = foe.b end
+  local h1 = standing[o1] and hpOf(standing[o1]) or 0
+  local h2 = standing[o2] and hpOf(standing[o2]) or 0
+  local pick
+  if h1 == h2 then
+    pick = base + self.rng(0, 1)
+  else
+    local pref = self.palace3.moveTarget[natureOf3(ctx.b) + 1]
+    if pref == M.PALACE_TARGET.STRONGER then
+      pick = (h1 > h2) and o1 or o2
+    elseif pref == M.PALACE_TARGET.WEAKER then
+      pick = (h1 < h2) and o1 or o2
+    else
+      pick = base + self.rng(0, 1)
+    end
+  end
+  if not standing[pick] then
+    local other = (pick == o1) and o2 or o1
+    pick = standing[other] and other or nil
+  end
+  return pick
+end
+
+-- Every script's verdict on every slot of the pick's pool (M:_pool3: the
+-- usable slots, or with a mask every slot holding a move) against ctx.t, in
+-- the order the cart's loop runs them (AI flag bit by bit, each over the
+-- whole moveset), plus the simulated damage roll each pass draws first.
+--
+-- As BattleAI_SetupAIData and BattleAI_DoAIProcessing seed and walk them
+-- (pokeemerald battle_ai_script_commands.c:312 / :572): a slot starts at 100
+-- when the mask allows it and it is usable, else at 0; a slot with no PP is
+-- never run through a script (`moveConsidered` 0) and stays at 0; and a
+-- score never goes under 0 (Cmd_score flattens it, :703 -- flattened here
+-- after each script, the step a script's verdict is summed in here; from
+-- 100 no script sequence on either cart comes near it).
+function M:_scoreMoves3(ctx, pool)
   local S, b, t = ctx.S, ctx.b, ctx.t
   local E = S.Effects.E
   local G = groupsOf(E)
@@ -2264,15 +2588,22 @@ function M:_scoreMoves3(ctx, legal)
   local flags = ctx.aiFlags
   local moves = b.moves
 
-  local scores, est = {}, {}
-  local mask = ctx.mask
-  for _, i in ipairs(legal) do
-    scores[i] = (mask == nil or mask[i]) and 100 or 0
+  -- `legal`: the slots the scripts run over (a move with PP).
+  local scores, est, legal = {}, {}, {}
+  local mask, limited = ctx.mask, ctx.limited or {}
+  for _, i in ipairs(pool) do
+    scores[i] = ((mask == nil or mask[i]) and not limited[i]) and 100 or 0
     -- AI_THINKING_STRUCT->simulatedRNG[i] = 100 - (Random() % 16)
     est[i] = self:_damage3(ctx, b, t, moves[i], 100 - rng(0, 15))
+    if int3(moves[i].pp, 0) > 0 then legal[#legal + 1] = i end
   end
-  local power = powerClasses(self, ctx, legal, est, G)
+  local power = powerClasses(self, ctx, pool, est, G)
   local rand = function() return rng(0, 255) end
+  local function flatten()
+    for _, i in ipairs(legal) do
+      if scores[i] < 0 then scores[i] = 0 end
+    end
+  end
 
   -- Emerald, scoring against its own partner: every script up to
   -- PREFER_BATON_PASS opens `if_target_is_ally AI_Ret`, and the last three
@@ -2285,6 +2616,7 @@ function M:_scoreMoves3(ctx, legal)
         for _, i in ipairs(legal) do
           scores[i] = scores[i] + self:_tryOnAlly3(ctx, moves[i], power[i], rand)
         end
+        flatten()
       end
     end
     return scores
@@ -2292,6 +2624,7 @@ function M:_scoreMoves3(ctx, legal)
 
   if self:_flag3("CHECK_BAD_MOVE", flags) then
     for _, i in ipairs(legal) do scores[i] = scores[i] + self:_checkBad3(ctx, moves[i], G) end
+    flatten()
   end
   -- AI_TryToFaint.  `if_can_faint` (the engine's ai_cmds.lua, pret
   -- Cmd_if_can_faint) skips any move of power under 2 -- the one-hit KO and
@@ -2316,9 +2649,11 @@ function M:_scoreMoves3(ctx, legal)
         scores[i] = scores[i] + 2
       end
     end
+    flatten()
   end
   if self:_flag3("CHECK_VIABILITY", flags) then
     for _, i in ipairs(legal) do scores[i] = scores[i] + self:_viability3(ctx, moves[i], G, est[i]) end
+    flatten()
   end
   if self:_flag3("SETUP_FIRST_TURN", flags) and ctx.turnCount == 0 then
     for _, i in ipairs(legal) do
@@ -2359,6 +2694,7 @@ function M:_scoreMoves3(ctx, legal)
           scores[i] = scores[i] + 3
         end
       end
+      flatten()
     end
   end
   -- AI_DoubleBattle (bit 7, between PREFER_BATON_PASS and HP_AWARE), against
@@ -2367,6 +2703,7 @@ function M:_scoreMoves3(ctx, legal)
     for _, i in ipairs(legal) do
       scores[i] = scores[i] + self:_doubleBattle3(ctx, moves[i], power[i])
     end
+    flatten()
   end
   if self:_flag3("HP_AWARE", flags) then
     local mine, theirs = pct(b), pct(t)
@@ -2376,6 +2713,7 @@ function M:_scoreMoves3(ctx, legal)
       if list[eff] and rand() >= 50 then scores[i] = scores[i] - 2 end
       if theirs <= 30 and G.targetLow[eff] and rand() >= 50 then scores[i] = scores[i] - 2 end
     end
+    flatten()
   end
   -- Emerald's AI_TrySunnyDayStart: open the fight with the sun.
   if self:_flag3("TRY_SUNNY_DAY_START", flags) and int3(b.isFirstTurn, 0) > 0 then

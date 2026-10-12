@@ -15416,6 +15416,492 @@
           {"amount":4,"battle":"tr1","seq":48,"t":"turn"}
         ]
       }
+    },
+    {
+      "name": "w4b_wally_cw_throw_first",
+      "create": {"choiceTimeout":0,"id":"cw1","mode":"wild","movePool":"$pool","reconnectGrace":60,"seed":4401,"sides":{"a":[{"bag":[{"count":1,"id":4,"name":"POKe BALL"}],"family":"rse","mons":[{"ability":0,"friendship":70,"gender":"M","generation":3,"heldItem":0,"holdEffect":0,"holdEffectParam":0,"level":7,"maxHp":24,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":20,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":20,"priority":0,"target":8,"type":0}],"nature":0,"species":"ZIGZAGOON","speciesNum":1,"stats":{"atk":40,"def":40,"spa":40,"spd":40,"spe":50},"types":[0],"weight":100}],"name":"WALLY","playerId":"p1"}],"b":[{"mons":[{"ability":0,"catchRate":235,"friendship":70,"gender":"M","generation":3,"heldItem":0,"holdEffect":0,"holdEffectParam":0,"level":5,"maxHp":20,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":20,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":20,"priority":0,"target":8,"type":0}],"nature":0,"species":"RALTS","speciesNum":1,"stats":{"atk":40,"def":40,"spa":40,"spd":40,"spe":30},"types":[0],"weight":100}],"name":"Wild","playerId":"wild"}]},"tutorial":"wally","typeTable":"$chart","wildPick":"cart"},
+      "steps": [{"op":"drain"},{"choice":{"action":"fight","move":0},"op":"submit","player":"p1"},{"op":"auto","player":"wild"},{"op":"drain"},{"choice":{"action":"fight","move":0},"op":"submit","player":"p1"},{"op":"auto","player":"wild"},{"op":"drain"},{"choice":{"action":"wallyThrow"},"op":"submit","player":"p1"},{"op":"auto","player":"wild"},{"op":"drain"},{"choice":{"action":"item","item":4},"op":"submit","player":"p1"},{"op":"auto","player":"wild"},{"op":"drain"}],
+      "expect": {
+        "batches": [5,12,12,4,7],
+        "results": [true,true,true,true,true,true,true,true],
+        "outcome": {"battle":"cw1","by":"a","catcher":"p1","caughtSpecies":"RALTS","given":false,"how":"catch","losers":["wild"],"outcome":"win","reason":"catch","winners":["p1"]},
+        "snapshot": {"deadline":null,"field":[{"hp":24,"party":[24],"slot":0},{"hp":7,"party":[7],"slot":3}],"now":0,"phase":"over","rngState":894411163,"seq":40,"turn":4,"weather":null},
+        "events": [
+          {"battle":"cw1","hp":24,"level":7,"maxHp":24,"mon":0,"seq":1,"side":"a","slot":0,"t":"send","text":"ZIGZAGOON"},
+          {"battle":"cw1","hp":20,"level":5,"maxHp":20,"mon":0,"seq":2,"side":"b","slot":3,"t":"send","text":"RALTS"},
+          {"battle":"cw1","seq":3,"side":"a","slot":0,"t":"team","team":"o"},
+          {"battle":"cw1","seq":4,"side":"b","slot":3,"t":"team","team":"o"},
+          {"amount":1,"battle":"cw1","seq":5,"t":"turn"},
+          {"battle":"cw1","seq":6,"side":"a","slot":0,"t":"chose","text":"WALLY"},
+          {"battle":"cw1","seq":7,"side":"b","slot":3,"t":"chose","text":"Wild"},
+          {"battle":"cw1","seq":8,"t":"msg","text":"ZIGZAGOON used BASH!"},
+          {"battle":"cw1","mon":0,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":19,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":20,"priority":0,"target":8,"type":0}],"seq":9,"side":"a","slot":0,"t":"moves"},
+          {"battle":"cw1","seq":10,"side":"a","slot":0,"t":"anim","target":3,"text":"BASH"},
+          {"amount":8,"battle":"cw1","hp":12,"seq":11,"side":"b","slot":3,"t":"damage"},
+          {"battle":"cw1","seq":12,"t":"msg","text":"RALTS used GROWLY!"},
+          {"battle":"cw1","mon":0,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":20,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":19,"priority":0,"target":8,"type":0}],"seq":13,"side":"b","slot":3,"t":"moves"},
+          {"battle":"cw1","seq":14,"side":"b","slot":3,"t":"anim","target":0,"text":"GROWLY"},
+          {"battle":"cw1","delta":-1,"seq":15,"side":"a","slot":0,"stage":-1,"stat":"atk","t":"stat","text":"ZIGZAGOON's ATTACK fell!"},
+          {"battle":"cw1","seq":16,"t":"msg","text":"ZIGZAGOON's ATTACK fell!"},
+          {"amount":2,"battle":"cw1","seq":17,"t":"turn"},
+          {"battle":"cw1","seq":18,"side":"a","slot":0,"t":"chose","text":"WALLY"},
+          {"battle":"cw1","seq":19,"side":"b","slot":3,"t":"chose","text":"Wild"},
+          {"battle":"cw1","seq":20,"t":"msg","text":"ZIGZAGOON used BASH!"},
+          {"battle":"cw1","mon":0,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":18,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":20,"priority":0,"target":8,"type":0}],"seq":21,"side":"a","slot":0,"t":"moves"},
+          {"battle":"cw1","seq":22,"side":"a","slot":0,"t":"anim","target":3,"text":"BASH"},
+          {"amount":5,"battle":"cw1","hp":7,"seq":23,"side":"b","slot":3,"t":"damage"},
+          {"battle":"cw1","seq":24,"t":"msg","text":"RALTS used GROWLY!"},
+          {"battle":"cw1","mon":0,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":20,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":18,"priority":0,"target":8,"type":0}],"seq":25,"side":"b","slot":3,"t":"moves"},
+          {"battle":"cw1","seq":26,"side":"b","slot":3,"t":"anim","target":0,"text":"GROWLY"},
+          {"battle":"cw1","delta":-1,"seq":27,"side":"a","slot":0,"stage":-2,"stat":"atk","t":"stat","text":"ZIGZAGOON's ATTACK fell!"},
+          {"battle":"cw1","seq":28,"t":"msg","text":"ZIGZAGOON's ATTACK fell!"},
+          {"amount":3,"battle":"cw1","seq":29,"t":"turn"},
+          {"battle":"cw1","seq":30,"side":"a","slot":0,"t":"chose","text":"WALLY"},
+          {"battle":"cw1","seq":31,"side":"b","slot":3,"t":"chose","text":"Wild"},
+          {"battle":"cw1","seq":32,"side":"a","slot":0,"t":"wallyThrow"},
+          {"amount":4,"battle":"cw1","seq":33,"t":"turn"},
+          {"battle":"cw1","seq":34,"side":"a","slot":0,"t":"chose","text":"WALLY"},
+          {"battle":"cw1","seq":35,"side":"b","slot":3,"t":"chose","text":"Wild"},
+          {"battle":"cw1","seq":36,"side":"a","slot":0,"t":"item","text":"4"},
+          {"battle":"cw1","seq":37,"t":"msg","text":"WALLY used POKe BALL!"},
+          {"amount":4,"battle":"cw1","seq":38,"side":"a","slot":0,"t":"ball","target":3,"text":"4"},
+          {"battle":"cw1","seq":39,"t":"msg","text":"Gotcha! RALTS was caught!"},
+          {"battle":"cw1","seq":40,"t":"over","text":"catch"}
+        ]
+      }
+    },
+    {
+      "name": "w4b_wally_cw_foe_first",
+      "create": {"choiceTimeout":0,"id":"cw2","mode":"wild","movePool":"$pool","reconnectGrace":60,"seed":4402,"sides":{"a":[{"bag":[{"count":1,"id":4,"name":"POKe BALL"}],"family":"rse","mons":[{"ability":0,"friendship":70,"gender":"M","generation":3,"heldItem":0,"holdEffect":0,"holdEffectParam":0,"level":7,"maxHp":24,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":20,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":20,"priority":0,"target":8,"type":0}],"nature":0,"species":"ZIGZAGOON","speciesNum":1,"stats":{"atk":40,"def":40,"spa":40,"spd":40,"spe":30},"types":[0],"weight":100}],"name":"WALLY","playerId":"p1"}],"b":[{"mons":[{"ability":0,"catchRate":235,"friendship":70,"gender":"M","generation":3,"heldItem":0,"holdEffect":0,"holdEffectParam":0,"level":5,"maxHp":20,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":20,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":20,"priority":0,"target":8,"type":0}],"nature":0,"species":"RALTS","speciesNum":1,"stats":{"atk":40,"def":40,"spa":40,"spd":40,"spe":60},"types":[0],"weight":100}],"name":"Wild","playerId":"wild"}]},"tutorial":"wally","typeTable":"$chart"},
+      "steps": [{"op":"drain"},{"choice":{"action":"wallyThrow"},"op":"submit","player":"p1"},{"choice":{"action":"fight","move":1},"op":"submit","player":"wild"},{"op":"drain"},{"choice":{"action":"item","item":4},"op":"submit","player":"p1"},{"choice":{"action":"fight","move":1},"op":"submit","player":"wild"},{"op":"drain"}],
+      "expect": {
+        "batches": [5,9,7],
+        "results": [true,true,true,true],
+        "outcome": {"battle":"cw2","by":"a","catcher":"p1","caughtSpecies":"RALTS","given":false,"how":"catch","losers":["wild"],"outcome":"win","reason":"catch","winners":["p1"]},
+        "snapshot": {"deadline":null,"field":[{"hp":24,"party":[24],"slot":0},{"hp":20,"party":[20],"slot":3}],"now":0,"phase":"over","rngState":4046175977,"seq":21,"turn":2,"weather":null},
+        "events": [
+          {"battle":"cw2","hp":24,"level":7,"maxHp":24,"mon":0,"seq":1,"side":"a","slot":0,"t":"send","text":"ZIGZAGOON"},
+          {"battle":"cw2","hp":20,"level":5,"maxHp":20,"mon":0,"seq":2,"side":"b","slot":3,"t":"send","text":"RALTS"},
+          {"battle":"cw2","seq":3,"side":"a","slot":0,"t":"team","team":"o"},
+          {"battle":"cw2","seq":4,"side":"b","slot":3,"t":"team","team":"o"},
+          {"amount":1,"battle":"cw2","seq":5,"t":"turn"},
+          {"battle":"cw2","seq":6,"side":"a","slot":0,"t":"chose","text":"WALLY"},
+          {"battle":"cw2","seq":7,"side":"b","slot":3,"t":"chose","text":"Wild"},
+          {"battle":"cw2","seq":8,"t":"msg","text":"RALTS used GROWLY!"},
+          {"battle":"cw2","mon":0,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":20,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":19,"priority":0,"target":8,"type":0}],"seq":9,"side":"b","slot":3,"t":"moves"},
+          {"battle":"cw2","seq":10,"side":"b","slot":3,"t":"anim","target":0,"text":"GROWLY"},
+          {"battle":"cw2","delta":-1,"seq":11,"side":"a","slot":0,"stage":-1,"stat":"atk","t":"stat","text":"ZIGZAGOON's ATTACK fell!"},
+          {"battle":"cw2","seq":12,"t":"msg","text":"ZIGZAGOON's ATTACK fell!"},
+          {"battle":"cw2","seq":13,"side":"a","slot":0,"t":"wallyThrow"},
+          {"amount":2,"battle":"cw2","seq":14,"t":"turn"},
+          {"battle":"cw2","seq":15,"side":"a","slot":0,"t":"chose","text":"WALLY"},
+          {"battle":"cw2","seq":16,"side":"b","slot":3,"t":"chose","text":"Wild"},
+          {"battle":"cw2","seq":17,"side":"a","slot":0,"t":"item","text":"4"},
+          {"battle":"cw2","seq":18,"t":"msg","text":"WALLY used POKe BALL!"},
+          {"amount":4,"battle":"cw2","seq":19,"side":"a","slot":0,"t":"ball","target":3,"text":"4"},
+          {"battle":"cw2","seq":20,"t":"msg","text":"Gotcha! RALTS was caught!"},
+          {"battle":"cw2","seq":21,"t":"over","text":"catch"}
+        ]
+      }
+    },
+    {
+      "name": "w4b_wally_cw_tie_throw_first",
+      "create": {"choiceTimeout":0,"id":"cw3","mode":"wild","movePool":"$pool","reconnectGrace":60,"seed":1,"sides":{"a":[{"bag":[{"count":1,"id":4,"name":"POKe BALL"}],"family":"rse","mons":[{"ability":0,"friendship":70,"gender":"M","generation":3,"heldItem":0,"holdEffect":0,"holdEffectParam":0,"level":7,"maxHp":24,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":20,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":20,"priority":0,"target":8,"type":0}],"nature":0,"species":"ZIGZAGOON","speciesNum":1,"stats":{"atk":40,"def":40,"spa":40,"spd":40,"spe":40},"types":[0],"weight":100}],"name":"WALLY","playerId":"p1"}],"b":[{"mons":[{"ability":0,"catchRate":235,"friendship":70,"gender":"M","generation":3,"heldItem":0,"holdEffect":0,"holdEffectParam":0,"level":5,"maxHp":20,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":20,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":20,"priority":0,"target":8,"type":0}],"nature":0,"species":"RALTS","speciesNum":1,"stats":{"atk":40,"def":40,"spa":40,"spd":40,"spe":40},"types":[0],"weight":100}],"name":"Wild","playerId":"wild"}]},"tutorial":"wally","typeTable":"$chart"},
+      "steps": [{"op":"drain"},{"choice":{"action":"wallyThrow"},"op":"submit","player":"p1"},{"choice":{"action":"fight","move":0},"op":"submit","player":"wild"},{"op":"drain"}],
+      "expect": {
+        "batches": [5,4],
+        "results": [true,true],
+        "outcome": null,
+        "snapshot": {"deadline":null,"field":[{"hp":24,"party":[24],"slot":0},{"hp":20,"party":[20],"slot":3}],"now":0,"phase":"choice","rngState":2165703038,"seq":9,"turn":2,"weather":null},
+        "events": [
+          {"battle":"cw3","hp":24,"level":7,"maxHp":24,"mon":0,"seq":1,"side":"a","slot":0,"t":"send","text":"ZIGZAGOON"},
+          {"battle":"cw3","hp":20,"level":5,"maxHp":20,"mon":0,"seq":2,"side":"b","slot":3,"t":"send","text":"RALTS"},
+          {"battle":"cw3","seq":3,"side":"a","slot":0,"t":"team","team":"o"},
+          {"battle":"cw3","seq":4,"side":"b","slot":3,"t":"team","team":"o"},
+          {"amount":1,"battle":"cw3","seq":5,"t":"turn"},
+          {"battle":"cw3","seq":6,"side":"a","slot":0,"t":"chose","text":"WALLY"},
+          {"battle":"cw3","seq":7,"side":"b","slot":3,"t":"chose","text":"Wild"},
+          {"battle":"cw3","seq":8,"side":"a","slot":0,"t":"wallyThrow"},
+          {"amount":2,"battle":"cw3","seq":9,"t":"turn"}
+        ]
+      }
+    },
+    {
+      "name": "w4b_wally_cw_tie_foe_first",
+      "create": {"choiceTimeout":0,"id":"cw4","mode":"wild","movePool":"$pool","reconnectGrace":60,"seed":3,"sides":{"a":[{"bag":[{"count":1,"id":4,"name":"POKe BALL"}],"family":"rse","mons":[{"ability":0,"friendship":70,"gender":"M","generation":3,"heldItem":0,"holdEffect":0,"holdEffectParam":0,"level":7,"maxHp":24,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":20,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":20,"priority":0,"target":8,"type":0}],"nature":0,"species":"ZIGZAGOON","speciesNum":1,"stats":{"atk":40,"def":40,"spa":40,"spd":40,"spe":40},"types":[0],"weight":100}],"name":"WALLY","playerId":"p1"}],"b":[{"mons":[{"ability":0,"catchRate":235,"friendship":70,"gender":"M","generation":3,"heldItem":0,"holdEffect":0,"holdEffectParam":0,"level":5,"maxHp":20,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":20,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":20,"priority":0,"target":8,"type":0}],"nature":0,"species":"RALTS","speciesNum":1,"stats":{"atk":40,"def":40,"spa":40,"spd":40,"spe":40},"types":[0],"weight":100}],"name":"Wild","playerId":"wild"}]},"tutorial":"wally","typeTable":"$chart"},
+      "steps": [{"op":"drain"},{"choice":{"action":"wallyThrow"},"op":"submit","player":"p1"},{"choice":{"action":"fight","move":0},"op":"submit","player":"wild"},{"op":"drain"}],
+      "expect": {
+        "batches": [5,8],
+        "results": [true,true],
+        "outcome": null,
+        "snapshot": {"deadline":null,"field":[{"hp":16,"party":[16],"slot":0},{"hp":20,"party":[20],"slot":3}],"now":0,"phase":"choice","rngState":1647017498,"seq":13,"turn":2,"weather":null},
+        "events": [
+          {"battle":"cw4","hp":24,"level":7,"maxHp":24,"mon":0,"seq":1,"side":"a","slot":0,"t":"send","text":"ZIGZAGOON"},
+          {"battle":"cw4","hp":20,"level":5,"maxHp":20,"mon":0,"seq":2,"side":"b","slot":3,"t":"send","text":"RALTS"},
+          {"battle":"cw4","seq":3,"side":"a","slot":0,"t":"team","team":"o"},
+          {"battle":"cw4","seq":4,"side":"b","slot":3,"t":"team","team":"o"},
+          {"amount":1,"battle":"cw4","seq":5,"t":"turn"},
+          {"battle":"cw4","seq":6,"side":"a","slot":0,"t":"chose","text":"WALLY"},
+          {"battle":"cw4","seq":7,"side":"b","slot":3,"t":"chose","text":"Wild"},
+          {"battle":"cw4","seq":8,"t":"msg","text":"RALTS used BASH!"},
+          {"battle":"cw4","mon":0,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":19,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":20,"priority":0,"target":8,"type":0}],"seq":9,"side":"b","slot":3,"t":"moves"},
+          {"battle":"cw4","seq":10,"side":"b","slot":3,"t":"anim","target":0,"text":"BASH"},
+          {"amount":8,"battle":"cw4","hp":16,"seq":11,"side":"a","slot":0,"t":"damage"},
+          {"battle":"cw4","seq":12,"side":"a","slot":0,"t":"wallyThrow"},
+          {"amount":2,"battle":"cw4","seq":13,"t":"turn"}
+        ]
+      }
+    },
+    {
+      "name": "w4b_wally_cw_priority_foe",
+      "create": {"choiceTimeout":0,"id":"cw5","mode":"wild","movePool":"$pool","reconnectGrace":60,"seed":4405,"sides":{"a":[{"bag":[{"count":1,"id":4,"name":"POKe BALL"}],"family":"rse","mons":[{"ability":0,"friendship":70,"gender":"M","generation":3,"heldItem":0,"holdEffect":0,"holdEffectParam":0,"level":7,"maxHp":24,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":20,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":20,"priority":0,"target":8,"type":0}],"nature":0,"species":"ZIGZAGOON","speciesNum":1,"stats":{"atk":40,"def":40,"spa":40,"spd":40,"spe":60},"types":[0],"weight":100}],"name":"WALLY","playerId":"p1"}],"b":[{"mons":[{"ability":0,"catchRate":235,"friendship":70,"gender":"M","generation":3,"heldItem":0,"holdEffect":0,"holdEffectParam":0,"level":5,"maxHp":20,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"QUICKY","maxPp":20,"num":420,"power":20,"pp":20,"priority":1,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"LAGGY","maxPp":20,"num":421,"power":20,"pp":20,"priority":-6,"target":0,"type":0}],"nature":0,"species":"RALTS","speciesNum":1,"stats":{"atk":40,"def":40,"spa":40,"spd":40,"spe":20},"types":[0],"weight":100}],"name":"Wild","playerId":"wild"}]},"tutorial":"wally","typeTable":"$chart"},
+      "steps": [{"op":"drain"},{"choice":{"action":"wallyThrow"},"op":"submit","player":"p1"},{"choice":{"action":"fight","move":0},"op":"submit","player":"wild"},{"op":"drain"}],
+      "expect": {
+        "batches": [5,8],
+        "results": [true,true],
+        "outcome": null,
+        "snapshot": {"deadline":null,"field":[{"hp":21,"party":[21],"slot":0},{"hp":20,"party":[20],"slot":3}],"now":0,"phase":"choice","rngState":3559035183,"seq":13,"turn":2,"weather":null},
+        "events": [
+          {"battle":"cw5","hp":24,"level":7,"maxHp":24,"mon":0,"seq":1,"side":"a","slot":0,"t":"send","text":"ZIGZAGOON"},
+          {"battle":"cw5","hp":20,"level":5,"maxHp":20,"mon":0,"seq":2,"side":"b","slot":3,"t":"send","text":"RALTS"},
+          {"battle":"cw5","seq":3,"side":"a","slot":0,"t":"team","team":"o"},
+          {"battle":"cw5","seq":4,"side":"b","slot":3,"t":"team","team":"o"},
+          {"amount":1,"battle":"cw5","seq":5,"t":"turn"},
+          {"battle":"cw5","seq":6,"side":"a","slot":0,"t":"chose","text":"WALLY"},
+          {"battle":"cw5","seq":7,"side":"b","slot":3,"t":"chose","text":"Wild"},
+          {"battle":"cw5","seq":8,"t":"msg","text":"RALTS used QUICKY!"},
+          {"battle":"cw5","mon":0,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"QUICKY","maxPp":20,"num":420,"power":20,"pp":19,"priority":1,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"LAGGY","maxPp":20,"num":421,"power":20,"pp":20,"priority":-6,"target":0,"type":0}],"seq":9,"side":"b","slot":3,"t":"moves"},
+          {"battle":"cw5","seq":10,"side":"b","slot":3,"t":"anim","target":0,"text":"QUICKY"},
+          {"amount":3,"battle":"cw5","hp":21,"seq":11,"side":"a","slot":0,"t":"damage"},
+          {"battle":"cw5","seq":12,"side":"a","slot":0,"t":"wallyThrow"},
+          {"amount":2,"battle":"cw5","seq":13,"t":"turn"}
+        ]
+      }
+    },
+    {
+      "name": "w4b_wally_cw_negative_priority_foe",
+      "create": {"choiceTimeout":0,"id":"cw6","mode":"wild","movePool":"$pool","reconnectGrace":60,"seed":4406,"sides":{"a":[{"bag":[{"count":1,"id":4,"name":"POKe BALL"}],"family":"rse","mons":[{"ability":0,"friendship":70,"gender":"M","generation":3,"heldItem":0,"holdEffect":0,"holdEffectParam":0,"level":7,"maxHp":24,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":20,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":20,"priority":0,"target":8,"type":0}],"nature":0,"species":"ZIGZAGOON","speciesNum":1,"stats":{"atk":40,"def":40,"spa":40,"spd":40,"spe":20},"types":[0],"weight":100}],"name":"WALLY","playerId":"p1"}],"b":[{"mons":[{"ability":0,"catchRate":235,"friendship":70,"gender":"M","generation":3,"heldItem":0,"holdEffect":0,"holdEffectParam":0,"level":5,"maxHp":20,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"QUICKY","maxPp":20,"num":420,"power":20,"pp":20,"priority":1,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"LAGGY","maxPp":20,"num":421,"power":20,"pp":20,"priority":-6,"target":0,"type":0}],"nature":0,"species":"RALTS","speciesNum":1,"stats":{"atk":40,"def":40,"spa":40,"spd":40,"spe":60},"types":[0],"weight":100}],"name":"Wild","playerId":"wild"}]},"tutorial":"wally","typeTable":"$chart"},
+      "steps": [{"op":"drain"},{"choice":{"action":"wallyThrow"},"op":"submit","player":"p1"},{"choice":{"action":"fight","move":1},"op":"submit","player":"wild"},{"op":"drain"}],
+      "expect": {
+        "batches": [5,4],
+        "results": [true,true],
+        "outcome": null,
+        "snapshot": {"deadline":null,"field":[{"hp":24,"party":[24],"slot":0},{"hp":20,"party":[20],"slot":3}],"now":0,"phase":"choice","rngState":4406,"seq":9,"turn":2,"weather":null},
+        "events": [
+          {"battle":"cw6","hp":24,"level":7,"maxHp":24,"mon":0,"seq":1,"side":"a","slot":0,"t":"send","text":"ZIGZAGOON"},
+          {"battle":"cw6","hp":20,"level":5,"maxHp":20,"mon":0,"seq":2,"side":"b","slot":3,"t":"send","text":"RALTS"},
+          {"battle":"cw6","seq":3,"side":"a","slot":0,"t":"team","team":"o"},
+          {"battle":"cw6","seq":4,"side":"b","slot":3,"t":"team","team":"o"},
+          {"amount":1,"battle":"cw6","seq":5,"t":"turn"},
+          {"battle":"cw6","seq":6,"side":"a","slot":0,"t":"chose","text":"WALLY"},
+          {"battle":"cw6","seq":7,"side":"b","slot":3,"t":"chose","text":"Wild"},
+          {"battle":"cw6","seq":8,"side":"a","slot":0,"t":"wallyThrow"},
+          {"amount":2,"battle":"cw6","seq":9,"t":"turn"}
+        ]
+      }
+    },
+    {
+      "name": "w4b_wally_cw_quick_claw_foe",
+      "create": {"choiceTimeout":0,"id":"cw7","mode":"wild","movePool":"$pool","reconnectGrace":60,"seed":4407,"sides":{"a":[{"bag":[{"count":1,"id":4,"name":"POKe BALL"}],"family":"rse","mons":[{"ability":0,"friendship":70,"gender":"M","generation":3,"heldItem":0,"holdEffect":0,"holdEffectParam":0,"level":7,"maxHp":24,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":20,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":20,"priority":0,"target":8,"type":0}],"nature":0,"species":"ZIGZAGOON","speciesNum":1,"stats":{"atk":40,"def":40,"spa":40,"spd":40,"spe":60},"types":[0],"weight":100}],"name":"WALLY","playerId":"p1"}],"b":[{"mons":[{"ability":0,"catchRate":235,"friendship":70,"gender":"M","generation":3,"heldItem":41,"holdEffect":26,"holdEffectParam":100,"level":5,"maxHp":20,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":20,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":20,"priority":0,"target":8,"type":0}],"nature":0,"species":"RALTS","speciesNum":1,"stats":{"atk":40,"def":40,"spa":40,"spd":40,"spe":20},"types":[0],"weight":100}],"name":"Wild","playerId":"wild"}]},"tutorial":"wally","typeTable":"$chart"},
+      "steps": [{"op":"drain"},{"choice":{"action":"wallyThrow"},"op":"submit","player":"p1"},{"choice":{"action":"fight","move":0},"op":"submit","player":"wild"},{"op":"drain"}],
+      "expect": {
+        "batches": [5,8],
+        "results": [true,true],
+        "outcome": null,
+        "snapshot": {"deadline":null,"field":[{"hp":16,"party":[16],"slot":0},{"hp":20,"party":[20],"slot":3}],"now":0,"phase":"choice","rngState":1412571628,"seq":13,"turn":2,"weather":null},
+        "events": [
+          {"battle":"cw7","hp":24,"level":7,"maxHp":24,"mon":0,"seq":1,"side":"a","slot":0,"t":"send","text":"ZIGZAGOON"},
+          {"battle":"cw7","hp":20,"level":5,"maxHp":20,"mon":0,"seq":2,"side":"b","slot":3,"t":"send","text":"RALTS"},
+          {"battle":"cw7","seq":3,"side":"a","slot":0,"t":"team","team":"o"},
+          {"battle":"cw7","seq":4,"side":"b","slot":3,"t":"team","team":"o"},
+          {"amount":1,"battle":"cw7","seq":5,"t":"turn"},
+          {"battle":"cw7","seq":6,"side":"a","slot":0,"t":"chose","text":"WALLY"},
+          {"battle":"cw7","seq":7,"side":"b","slot":3,"t":"chose","text":"Wild"},
+          {"battle":"cw7","seq":8,"t":"msg","text":"RALTS used BASH!"},
+          {"battle":"cw7","mon":0,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":19,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":20,"priority":0,"target":8,"type":0}],"seq":9,"side":"b","slot":3,"t":"moves"},
+          {"battle":"cw7","seq":10,"side":"b","slot":3,"t":"anim","target":0,"text":"BASH"},
+          {"amount":8,"battle":"cw7","hp":16,"seq":11,"side":"a","slot":0,"t":"damage"},
+          {"battle":"cw7","seq":12,"side":"a","slot":0,"t":"wallyThrow"},
+          {"amount":2,"battle":"cw7","seq":13,"t":"turn"}
+        ]
+      }
+    },
+    {
+      "name": "w4b_wally_cw_thrower_down",
+      "create": {"choiceTimeout":0,"id":"cw8","mode":"wild","movePool":"$pool","reconnectGrace":60,"seed":4408,"sides":{"a":[{"bag":[{"count":1,"id":4,"name":"POKe BALL"}],"family":"rse","mons":[{"ability":0,"friendship":70,"gender":"M","generation":3,"heldItem":0,"holdEffect":0,"holdEffectParam":0,"hp":1,"level":7,"maxHp":24,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":20,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":20,"priority":0,"target":8,"type":0}],"nature":0,"species":"ZIGZAGOON","speciesNum":1,"stats":{"atk":40,"def":40,"spa":40,"spd":40,"spe":20},"types":[0],"weight":100}],"name":"WALLY","playerId":"p1"}],"b":[{"mons":[{"ability":0,"catchRate":235,"friendship":70,"gender":"M","generation":3,"heldItem":0,"holdEffect":0,"holdEffectParam":0,"level":5,"maxHp":20,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":20,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":20,"priority":0,"target":8,"type":0}],"nature":0,"species":"RALTS","speciesNum":1,"stats":{"atk":40,"def":40,"spa":40,"spd":40,"spe":60},"types":[0],"weight":100}],"name":"Wild","playerId":"wild"}]},"tutorial":"wally","typeTable":"$chart"},
+      "steps": [{"op":"drain"},{"choice":{"action":"wallyThrow"},"op":"submit","player":"p1"},{"choice":{"action":"fight","move":0},"op":"submit","player":"wild"},{"op":"drain"}],
+      "expect": {
+        "batches": [5,9],
+        "results": [true,true],
+        "outcome": {"battle":"cw8","by":"b","how":"ko","losers":["p1"],"outcome":"win","reason":"ko","winners":["wild"]},
+        "snapshot": {"deadline":null,"field":[{"hp":0,"party":[0],"slot":0},{"hp":20,"party":[20],"slot":3}],"now":0,"phase":"over","rngState":432777002,"seq":14,"turn":1,"weather":null},
+        "events": [
+          {"battle":"cw8","hp":1,"level":7,"maxHp":24,"mon":0,"seq":1,"side":"a","slot":0,"t":"send","text":"ZIGZAGOON"},
+          {"battle":"cw8","hp":20,"level":5,"maxHp":20,"mon":0,"seq":2,"side":"b","slot":3,"t":"send","text":"RALTS"},
+          {"battle":"cw8","seq":3,"side":"a","slot":0,"t":"team","team":"o"},
+          {"battle":"cw8","seq":4,"side":"b","slot":3,"t":"team","team":"o"},
+          {"amount":1,"battle":"cw8","seq":5,"t":"turn"},
+          {"battle":"cw8","seq":6,"side":"a","slot":0,"t":"chose","text":"WALLY"},
+          {"battle":"cw8","seq":7,"side":"b","slot":3,"t":"chose","text":"Wild"},
+          {"battle":"cw8","seq":8,"t":"msg","text":"RALTS used BASH!"},
+          {"battle":"cw8","mon":0,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":19,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":20,"priority":0,"target":8,"type":0}],"seq":9,"side":"b","slot":3,"t":"moves"},
+          {"battle":"cw8","seq":10,"side":"b","slot":3,"t":"anim","target":0,"text":"BASH"},
+          {"amount":1,"battle":"cw8","hp":0,"seq":11,"side":"a","slot":0,"t":"damage"},
+          {"battle":"cw8","seq":12,"side":"a","slot":0,"t":"faint","text":"ZIGZAGOON"},
+          {"battle":"cw8","seq":13,"side":"a","slot":0,"t":"team","team":"x"},
+          {"battle":"cw8","seq":14,"t":"over","text":"ko"}
+        ]
+      }
+    },
+    {
+      "name": "w4b_wally_cw_second_slot_partner",
+      "create": {"choiceTimeout":0,"id":"cw9","mode":"coop_wild","movePool":"$pool","reconnectGrace":60,"seed":4409,"sides":{"a":[{"bag":[{"count":1,"id":4,"name":"POKe BALL"}],"family":"rse","mons":[{"ability":0,"friendship":70,"gender":"M","generation":3,"heldItem":0,"holdEffect":0,"holdEffectParam":0,"level":7,"maxHp":24,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":20,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":20,"priority":0,"target":8,"type":0}],"nature":0,"species":"ZIGZAGOON","speciesNum":1,"stats":{"atk":40,"def":40,"spa":40,"spd":40,"spe":90},"types":[0],"weight":100}],"name":"WALLY","playerId":"p1"},{"mons":[{"ability":0,"friendship":70,"gender":"M","generation":3,"heldItem":0,"holdEffect":0,"holdEffectParam":0,"level":7,"maxHp":24,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":20,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":20,"priority":0,"target":8,"type":0}],"nature":0,"species":"PARTNER","speciesNum":1,"stats":{"atk":40,"def":40,"spa":40,"spd":40,"spe":70},"types":[0],"weight":100}],"name":"MAY","playerId":"p2"}],"b":[{"mons":[{"ability":0,"catchRate":235,"friendship":70,"gender":"M","generation":3,"heldItem":0,"holdEffect":0,"holdEffectParam":0,"level":5,"maxHp":20,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":20,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":20,"priority":0,"target":8,"type":0}],"nature":0,"species":"RALTS","speciesNum":1,"stats":{"atk":40,"def":40,"spa":40,"spd":40,"spe":50},"types":[0],"weight":100}],"name":"Wild","playerId":"wild"}]},"tutorial":"wally","typeTable":"$chart"},
+      "steps": [{"op":"drain"},{"choice":{"action":"wallyThrow"},"op":"submit","player":"p1"},{"choice":{"action":"fight","move":0},"op":"submit","player":"p2"},{"choice":{"action":"fight","move":0},"op":"submit","player":"wild"},{"op":"drain"}],
+      "expect": {
+        "batches": [7,9],
+        "results": [true,true,true],
+        "outcome": null,
+        "snapshot": {"deadline":null,"field":[{"hp":17,"party":[17],"slot":0},{"hp":24,"party":[24],"slot":1},{"hp":20,"party":[20],"slot":3}],"now":0,"phase":"choice","rngState":822346707,"seq":16,"turn":2,"weather":null},
+        "events": [
+          {"battle":"cw9","hp":24,"level":7,"maxHp":24,"mon":0,"seq":1,"side":"a","slot":0,"t":"send","text":"ZIGZAGOON"},
+          {"battle":"cw9","hp":24,"level":7,"maxHp":24,"mon":0,"seq":2,"side":"a","slot":1,"t":"send","text":"PARTNER"},
+          {"battle":"cw9","hp":20,"level":5,"maxHp":20,"mon":0,"seq":3,"side":"b","slot":3,"t":"send","text":"RALTS"},
+          {"battle":"cw9","seq":4,"side":"a","slot":0,"t":"team","team":"o"},
+          {"battle":"cw9","seq":5,"side":"a","slot":1,"t":"team","team":"o"},
+          {"battle":"cw9","seq":6,"side":"b","slot":3,"t":"team","team":"o"},
+          {"amount":1,"battle":"cw9","seq":7,"t":"turn"},
+          {"battle":"cw9","seq":8,"side":"a","slot":0,"t":"chose","text":"WALLY"},
+          {"battle":"cw9","seq":9,"side":"a","slot":1,"t":"chose","text":"MAY"},
+          {"battle":"cw9","seq":10,"side":"b","slot":3,"t":"chose","text":"Wild"},
+          {"battle":"cw9","seq":11,"side":"a","slot":0,"t":"wallyThrow"},
+          {"battle":"cw9","seq":12,"t":"msg","text":"RALTS used BASH!"},
+          {"battle":"cw9","mon":0,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":19,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":20,"priority":0,"target":8,"type":0}],"seq":13,"side":"b","slot":3,"t":"moves"},
+          {"battle":"cw9","seq":14,"side":"b","slot":3,"t":"anim","target":0,"text":"BASH"},
+          {"amount":7,"battle":"cw9","hp":17,"seq":15,"side":"a","slot":0,"t":"damage"},
+          {"amount":2,"battle":"cw9","seq":16,"t":"turn"}
+        ]
+      }
+    },
+    {
+      "name": "w4b_wally_cw_refused_plain_wild",
+      "create": {"choiceTimeout":0,"id":"cr1","mode":"wild","movePool":"$pool","reconnectGrace":60,"seed":4411,"sides":{"a":[{"bag":[{"count":1,"id":4,"name":"POKe BALL"}],"family":"rse","mons":[{"ability":0,"friendship":70,"gender":"M","generation":3,"heldItem":0,"holdEffect":0,"holdEffectParam":0,"level":7,"maxHp":24,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":20,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":20,"priority":0,"target":8,"type":0}],"nature":0,"species":"ZIGZAGOON","speciesNum":1,"stats":{"atk":40,"def":40,"spa":40,"spd":40,"spe":50},"types":[0],"weight":100}],"name":"WALLY","playerId":"p1"}],"b":[{"mons":[{"ability":0,"catchRate":235,"friendship":70,"gender":"M","generation":3,"heldItem":0,"holdEffect":0,"holdEffectParam":0,"level":5,"maxHp":20,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":20,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":20,"priority":0,"target":8,"type":0}],"nature":0,"species":"RALTS","speciesNum":1,"stats":{"atk":40,"def":40,"spa":40,"spd":40,"spe":30},"types":[0],"weight":100}],"name":"Wild","playerId":"wild"}]},"typeTable":"$chart"},
+      "steps": [{"op":"drain"},{"choice":{"action":"wallyThrow"},"op":"submit","player":"p1"},{"choice":{"action":"wallyThrow"},"op":"submit","player":"wild"},{"choice":{"action":"fight","move":0},"op":"submit","player":"p1"},{"choice":{"action":"fight","move":0},"op":"submit","player":"wild"},{"op":"drain"}],
+      "expect": {
+        "batches": [5,11],
+        "results": [false,false,true,true],
+        "outcome": null,
+        "snapshot": {"deadline":null,"field":[{"hp":16,"party":[16],"slot":0},{"hp":13,"party":[13],"slot":3}],"now":0,"phase":"choice","rngState":3326203945,"seq":16,"turn":2,"weather":null},
+        "events": [
+          {"battle":"cr1","hp":24,"level":7,"maxHp":24,"mon":0,"seq":1,"side":"a","slot":0,"t":"send","text":"ZIGZAGOON"},
+          {"battle":"cr1","hp":20,"level":5,"maxHp":20,"mon":0,"seq":2,"side":"b","slot":3,"t":"send","text":"RALTS"},
+          {"battle":"cr1","seq":3,"side":"a","slot":0,"t":"team","team":"o"},
+          {"battle":"cr1","seq":4,"side":"b","slot":3,"t":"team","team":"o"},
+          {"amount":1,"battle":"cr1","seq":5,"t":"turn"},
+          {"battle":"cr1","seq":6,"side":"a","slot":0,"t":"chose","text":"WALLY"},
+          {"battle":"cr1","seq":7,"side":"b","slot":3,"t":"chose","text":"Wild"},
+          {"battle":"cr1","seq":8,"t":"msg","text":"ZIGZAGOON used BASH!"},
+          {"battle":"cr1","mon":0,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":19,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":20,"priority":0,"target":8,"type":0}],"seq":9,"side":"a","slot":0,"t":"moves"},
+          {"battle":"cr1","seq":10,"side":"a","slot":0,"t":"anim","target":3,"text":"BASH"},
+          {"amount":7,"battle":"cr1","hp":13,"seq":11,"side":"b","slot":3,"t":"damage"},
+          {"battle":"cr1","seq":12,"t":"msg","text":"RALTS used BASH!"},
+          {"battle":"cr1","mon":0,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":19,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":20,"priority":0,"target":8,"type":0}],"seq":13,"side":"b","slot":3,"t":"moves"},
+          {"battle":"cr1","seq":14,"side":"b","slot":3,"t":"anim","target":0,"text":"BASH"},
+          {"amount":8,"battle":"cr1","hp":16,"seq":15,"side":"a","slot":0,"t":"damage"},
+          {"amount":2,"battle":"cr1","seq":16,"t":"turn"}
+        ]
+      }
+    },
+    {
+      "name": "w4b_wally_cw_refused_old_man",
+      "create": {"choiceTimeout":0,"id":"cr2","mode":"wild","movePool":"$pool","reconnectGrace":60,"seed":4412,"sides":{"a":[{"bag":[{"count":1,"id":4,"name":"POKe BALL"}],"family":"rse","mons":[{"ability":0,"friendship":70,"gender":"M","generation":3,"heldItem":0,"holdEffect":0,"holdEffectParam":0,"level":7,"maxHp":24,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":20,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":20,"priority":0,"target":8,"type":0}],"nature":0,"species":"ZIGZAGOON","speciesNum":1,"stats":{"atk":40,"def":40,"spa":40,"spd":40,"spe":50},"types":[0],"weight":100}],"name":"WALLY","playerId":"p1"}],"b":[{"mons":[{"ability":0,"catchRate":235,"friendship":70,"gender":"M","generation":3,"heldItem":0,"holdEffect":0,"holdEffectParam":0,"level":5,"maxHp":20,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":20,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":20,"priority":0,"target":8,"type":0}],"nature":0,"species":"RALTS","speciesNum":1,"stats":{"atk":40,"def":40,"spa":40,"spd":40,"spe":30},"types":[0],"weight":100}],"name":"Wild","playerId":"wild"}]},"tutorial":"oldMan","typeTable":"$chart"},
+      "steps": [{"op":"drain"},{"choice":{"action":"wallyThrow"},"op":"submit","player":"p1"},{"choice":{"action":"wallyThrow"},"op":"submit","player":"wild"},{"choice":{"action":"fight","move":0},"op":"submit","player":"p1"},{"choice":{"action":"fight","move":0},"op":"submit","player":"wild"},{"op":"drain"}],
+      "expect": {
+        "batches": [5,11],
+        "results": [false,false,true,true],
+        "outcome": null,
+        "snapshot": {"deadline":null,"field":[{"hp":15,"party":[15],"slot":0},{"hp":12,"party":[12],"slot":3}],"now":0,"phase":"choice","rngState":4226562608,"seq":16,"turn":2,"weather":null},
+        "events": [
+          {"battle":"cr2","hp":24,"level":7,"maxHp":24,"mon":0,"seq":1,"side":"a","slot":0,"t":"send","text":"ZIGZAGOON"},
+          {"battle":"cr2","hp":20,"level":5,"maxHp":20,"mon":0,"seq":2,"side":"b","slot":3,"t":"send","text":"RALTS"},
+          {"battle":"cr2","seq":3,"side":"a","slot":0,"t":"team","team":"o"},
+          {"battle":"cr2","seq":4,"side":"b","slot":3,"t":"team","team":"o"},
+          {"amount":1,"battle":"cr2","seq":5,"t":"turn"},
+          {"battle":"cr2","seq":6,"side":"a","slot":0,"t":"chose","text":"WALLY"},
+          {"battle":"cr2","seq":7,"side":"b","slot":3,"t":"chose","text":"Wild"},
+          {"battle":"cr2","seq":8,"t":"msg","text":"ZIGZAGOON used BASH!"},
+          {"battle":"cr2","mon":0,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":19,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":20,"priority":0,"target":8,"type":0}],"seq":9,"side":"a","slot":0,"t":"moves"},
+          {"battle":"cr2","seq":10,"side":"a","slot":0,"t":"anim","target":3,"text":"BASH"},
+          {"amount":8,"battle":"cr2","hp":12,"seq":11,"side":"b","slot":3,"t":"damage"},
+          {"battle":"cr2","seq":12,"t":"msg","text":"RALTS used BASH!"},
+          {"battle":"cr2","mon":0,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":19,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":20,"priority":0,"target":8,"type":0}],"seq":13,"side":"b","slot":3,"t":"moves"},
+          {"battle":"cr2","seq":14,"side":"b","slot":3,"t":"anim","target":0,"text":"BASH"},
+          {"amount":9,"battle":"cr2","hp":15,"seq":15,"side":"a","slot":0,"t":"damage"},
+          {"amount":2,"battle":"cr2","seq":16,"t":"turn"}
+        ]
+      }
+    },
+    {
+      "name": "w4b_wally_cw_refused_pokedude",
+      "create": {"choiceTimeout":0,"id":"cr3","mode":"wild","movePool":"$pool","reconnectGrace":60,"seed":4413,"sides":{"a":[{"bag":[{"count":1,"id":4,"name":"POKe BALL"}],"family":"rse","mons":[{"ability":0,"friendship":70,"gender":"M","generation":3,"heldItem":0,"holdEffect":0,"holdEffectParam":0,"level":7,"maxHp":24,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":20,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":20,"priority":0,"target":8,"type":0}],"nature":0,"species":"ZIGZAGOON","speciesNum":1,"stats":{"atk":40,"def":40,"spa":40,"spd":40,"spe":50},"types":[0],"weight":100}],"name":"WALLY","playerId":"p1"}],"b":[{"mons":[{"ability":0,"catchRate":235,"friendship":70,"gender":"M","generation":3,"heldItem":0,"holdEffect":0,"holdEffectParam":0,"level":5,"maxHp":20,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":20,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":20,"priority":0,"target":8,"type":0}],"nature":0,"species":"RALTS","speciesNum":1,"stats":{"atk":40,"def":40,"spa":40,"spd":40,"spe":30},"types":[0],"weight":100}],"name":"Wild","playerId":"wild"}]},"tutorial":"pokedude","typeTable":"$chart"},
+      "steps": [{"op":"drain"},{"choice":{"action":"wallyThrow"},"op":"submit","player":"p1"},{"choice":{"action":"wallyThrow"},"op":"submit","player":"wild"},{"choice":{"action":"fight","move":0},"op":"submit","player":"p1"},{"choice":{"action":"fight","move":0},"op":"submit","player":"wild"},{"op":"drain"}],
+      "expect": {
+        "batches": [5,11],
+        "results": [false,false,true,true],
+        "outcome": null,
+        "snapshot": {"deadline":null,"field":[{"hp":17,"party":[17],"slot":0},{"hp":12,"party":[12],"slot":3}],"now":0,"phase":"choice","rngState":90579393,"seq":16,"turn":2,"weather":null},
+        "events": [
+          {"battle":"cr3","hp":24,"level":7,"maxHp":24,"mon":0,"seq":1,"side":"a","slot":0,"t":"send","text":"ZIGZAGOON"},
+          {"battle":"cr3","hp":20,"level":5,"maxHp":20,"mon":0,"seq":2,"side":"b","slot":3,"t":"send","text":"RALTS"},
+          {"battle":"cr3","seq":3,"side":"a","slot":0,"t":"team","team":"o"},
+          {"battle":"cr3","seq":4,"side":"b","slot":3,"t":"team","team":"o"},
+          {"amount":1,"battle":"cr3","seq":5,"t":"turn"},
+          {"battle":"cr3","seq":6,"side":"a","slot":0,"t":"chose","text":"WALLY"},
+          {"battle":"cr3","seq":7,"side":"b","slot":3,"t":"chose","text":"Wild"},
+          {"battle":"cr3","seq":8,"t":"msg","text":"ZIGZAGOON used BASH!"},
+          {"battle":"cr3","mon":0,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":19,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":20,"priority":0,"target":8,"type":0}],"seq":9,"side":"a","slot":0,"t":"moves"},
+          {"battle":"cr3","seq":10,"side":"a","slot":0,"t":"anim","target":3,"text":"BASH"},
+          {"amount":8,"battle":"cr3","hp":12,"seq":11,"side":"b","slot":3,"t":"damage"},
+          {"battle":"cr3","seq":12,"t":"msg","text":"RALTS used BASH!"},
+          {"battle":"cr3","mon":0,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":19,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":20,"priority":0,"target":8,"type":0}],"seq":13,"side":"b","slot":3,"t":"moves"},
+          {"battle":"cr3","seq":14,"side":"b","slot":3,"t":"anim","target":0,"text":"BASH"},
+          {"amount":7,"battle":"cr3","hp":17,"seq":15,"side":"a","slot":0,"t":"damage"},
+          {"amount":2,"battle":"cr3","seq":16,"t":"turn"}
+        ]
+      }
+    },
+    {
+      "name": "w4b_wally_cw_refused_1v1",
+      "create": {"choiceTimeout":0,"id":"cr5","mode":"1v1","movePool":"$pool","reconnectGrace":60,"seed":4415,"sides":{"a":[{"bag":[{"count":1,"id":4,"name":"POKe BALL"}],"family":"rse","mons":[{"ability":0,"friendship":70,"gender":"M","generation":3,"heldItem":0,"holdEffect":0,"holdEffectParam":0,"level":7,"maxHp":24,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":20,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":20,"priority":0,"target":8,"type":0}],"nature":0,"species":"ZIGZAGOON","speciesNum":1,"stats":{"atk":40,"def":40,"spa":40,"spd":40,"spe":50},"types":[0],"weight":100}],"name":"WALLY","playerId":"p1"}],"b":[{"mons":[{"ability":0,"catchRate":235,"friendship":70,"gender":"M","generation":3,"heldItem":0,"holdEffect":0,"holdEffectParam":0,"level":5,"maxHp":20,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":20,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":20,"priority":0,"target":8,"type":0}],"nature":0,"species":"RALTS","speciesNum":1,"stats":{"atk":40,"def":40,"spa":40,"spd":40,"spe":30},"types":[0],"weight":100}],"name":"Wild","playerId":"wild"}]},"tutorial":"wally","typeTable":"$chart"},
+      "steps": [{"op":"drain"},{"choice":{"action":"wallyThrow"},"op":"submit","player":"p1"},{"choice":{"action":"wallyThrow"},"op":"submit","player":"wild"},{"choice":{"action":"fight","move":0},"op":"submit","player":"p1"},{"choice":{"action":"fight","move":0},"op":"submit","player":"wild"},{"op":"drain"}],
+      "expect": {
+        "batches": [5,11],
+        "results": [false,false,true,true],
+        "outcome": null,
+        "snapshot": {"deadline":null,"field":[{"hp":16,"party":[16],"slot":0},{"hp":12,"party":[12],"slot":3}],"now":0,"phase":"choice","rngState":3286876941,"seq":16,"turn":2,"weather":null},
+        "events": [
+          {"battle":"cr5","hp":24,"level":7,"maxHp":24,"mon":0,"seq":1,"side":"a","slot":0,"t":"send","text":"ZIGZAGOON"},
+          {"battle":"cr5","hp":20,"level":5,"maxHp":20,"mon":0,"seq":2,"side":"b","slot":3,"t":"send","text":"RALTS"},
+          {"battle":"cr5","seq":3,"side":"a","slot":0,"t":"team","team":"o"},
+          {"battle":"cr5","seq":4,"side":"b","slot":3,"t":"team","team":"o"},
+          {"amount":1,"battle":"cr5","seq":5,"t":"turn"},
+          {"battle":"cr5","seq":6,"side":"a","slot":0,"t":"chose","text":"WALLY"},
+          {"battle":"cr5","seq":7,"side":"b","slot":3,"t":"chose","text":"Wild"},
+          {"battle":"cr5","seq":8,"t":"msg","text":"ZIGZAGOON used BASH!"},
+          {"battle":"cr5","mon":0,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":19,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":20,"priority":0,"target":8,"type":0}],"seq":9,"side":"a","slot":0,"t":"moves"},
+          {"battle":"cr5","seq":10,"side":"a","slot":0,"t":"anim","target":3,"text":"BASH"},
+          {"amount":8,"battle":"cr5","hp":12,"seq":11,"side":"b","slot":3,"t":"damage"},
+          {"battle":"cr5","seq":12,"t":"msg","text":"RALTS used BASH!"},
+          {"battle":"cr5","mon":0,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":19,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":20,"priority":0,"target":8,"type":0}],"seq":13,"side":"b","slot":3,"t":"moves"},
+          {"battle":"cr5","seq":14,"side":"b","slot":3,"t":"anim","target":0,"text":"BASH"},
+          {"amount":8,"battle":"cr5","hp":16,"seq":15,"side":"a","slot":0,"t":"damage"},
+          {"amount":2,"battle":"cr5","seq":16,"t":"turn"}
+        ]
+      }
+    },
+    {
+      "name": "w4b_wally_cw_refused_side_b",
+      "create": {"choiceTimeout":0,"id":"cr4","mode":"wild","movePool":"$pool","reconnectGrace":60,"seed":4414,"sides":{"a":[{"bag":[{"count":1,"id":4,"name":"POKe BALL"}],"family":"rse","mons":[{"ability":0,"friendship":70,"gender":"M","generation":3,"heldItem":0,"holdEffect":0,"holdEffectParam":0,"level":7,"maxHp":24,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":20,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":20,"priority":0,"target":8,"type":0}],"nature":0,"species":"ZIGZAGOON","speciesNum":1,"stats":{"atk":40,"def":40,"spa":40,"spd":40,"spe":50},"types":[0],"weight":100}],"name":"WALLY","playerId":"p1"}],"b":[{"mons":[{"ability":0,"catchRate":235,"friendship":70,"gender":"M","generation":3,"heldItem":0,"holdEffect":0,"holdEffectParam":0,"level":5,"maxHp":20,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":20,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":20,"priority":0,"target":8,"type":0}],"nature":0,"species":"RALTS","speciesNum":1,"stats":{"atk":40,"def":40,"spa":40,"spd":40,"spe":30},"types":[0],"weight":100}],"name":"Wild","playerId":"wild"}]},"tutorial":"wally","typeTable":"$chart"},
+      "steps": [{"op":"drain"},{"choice":{"action":"wallyThrow"},"op":"submit","player":"wild"},{"choice":{"action":"fight","move":0},"op":"submit","player":"wild"},{"choice":{"action":"wallyThrow"},"op":"submit","player":"p1"},{"op":"drain"}],
+      "expect": {
+        "batches": [5,4],
+        "results": [false,true,true],
+        "outcome": null,
+        "snapshot": {"deadline":null,"field":[{"hp":24,"party":[24],"slot":0},{"hp":20,"party":[20],"slot":3}],"now":0,"phase":"choice","rngState":4414,"seq":9,"turn":2,"weather":null},
+        "events": [
+          {"battle":"cr4","hp":24,"level":7,"maxHp":24,"mon":0,"seq":1,"side":"a","slot":0,"t":"send","text":"ZIGZAGOON"},
+          {"battle":"cr4","hp":20,"level":5,"maxHp":20,"mon":0,"seq":2,"side":"b","slot":3,"t":"send","text":"RALTS"},
+          {"battle":"cr4","seq":3,"side":"a","slot":0,"t":"team","team":"o"},
+          {"battle":"cr4","seq":4,"side":"b","slot":3,"t":"team","team":"o"},
+          {"amount":1,"battle":"cr4","seq":5,"t":"turn"},
+          {"battle":"cr4","seq":6,"side":"b","slot":3,"t":"chose","text":"Wild"},
+          {"battle":"cr4","seq":7,"side":"a","slot":0,"t":"chose","text":"WALLY"},
+          {"battle":"cr4","seq":8,"side":"a","slot":0,"t":"wallyThrow"},
+          {"amount":2,"battle":"cr4","seq":9,"t":"turn"}
+        ]
+      }
+    },
+    {
+      "name": "w4b_wally_cw_refused_partner",
+      "create": {"choiceTimeout":0,"id":"cr8","mode":"coop_wild","movePool":"$pool","reconnectGrace":60,"seed":4418,"sides":{"a":[{"bag":[{"count":1,"id":4,"name":"POKe BALL"}],"family":"rse","mons":[{"ability":0,"friendship":70,"gender":"M","generation":3,"heldItem":0,"holdEffect":0,"holdEffectParam":0,"level":7,"maxHp":24,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":20,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":20,"priority":0,"target":8,"type":0}],"nature":0,"species":"ZIGZAGOON","speciesNum":1,"stats":{"atk":40,"def":40,"spa":40,"spd":40,"spe":90},"types":[0],"weight":100}],"name":"WALLY","playerId":"p1"},{"mons":[{"ability":0,"friendship":70,"gender":"M","generation":3,"heldItem":0,"holdEffect":0,"holdEffectParam":0,"level":7,"maxHp":24,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":20,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":20,"priority":0,"target":8,"type":0}],"nature":0,"species":"PARTNER","speciesNum":1,"stats":{"atk":40,"def":40,"spa":40,"spd":40,"spe":70},"types":[0],"weight":100}],"name":"MAY","playerId":"p2"}],"b":[{"mons":[{"ability":0,"catchRate":235,"friendship":70,"gender":"M","generation":3,"heldItem":0,"holdEffect":0,"holdEffectParam":0,"level":5,"maxHp":20,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":20,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":20,"priority":0,"target":8,"type":0}],"nature":0,"species":"RALTS","speciesNum":1,"stats":{"atk":40,"def":40,"spa":40,"spd":40,"spe":50},"types":[0],"weight":100}],"name":"Wild","playerId":"wild"}]},"tutorial":"wally","typeTable":"$chart"},
+      "steps": [{"op":"drain"},{"choice":{"action":"wallyThrow"},"op":"submit","player":"p2"},{"choice":{"action":"wallyThrow"},"op":"submit","player":"p1"},{"choice":{"action":"fight","move":0},"op":"submit","player":"p2"},{"choice":{"action":"fight","move":0},"op":"submit","player":"wild"},{"op":"drain"}],
+      "expect": {
+        "batches": [7,9],
+        "results": [false,true,true,true],
+        "outcome": null,
+        "snapshot": {"deadline":null,"field":[{"hp":17,"party":[17],"slot":0},{"hp":24,"party":[24],"slot":1},{"hp":20,"party":[20],"slot":3}],"now":0,"phase":"choice","rngState":33506756,"seq":16,"turn":2,"weather":null},
+        "events": [
+          {"battle":"cr8","hp":24,"level":7,"maxHp":24,"mon":0,"seq":1,"side":"a","slot":0,"t":"send","text":"ZIGZAGOON"},
+          {"battle":"cr8","hp":24,"level":7,"maxHp":24,"mon":0,"seq":2,"side":"a","slot":1,"t":"send","text":"PARTNER"},
+          {"battle":"cr8","hp":20,"level":5,"maxHp":20,"mon":0,"seq":3,"side":"b","slot":3,"t":"send","text":"RALTS"},
+          {"battle":"cr8","seq":4,"side":"a","slot":0,"t":"team","team":"o"},
+          {"battle":"cr8","seq":5,"side":"a","slot":1,"t":"team","team":"o"},
+          {"battle":"cr8","seq":6,"side":"b","slot":3,"t":"team","team":"o"},
+          {"amount":1,"battle":"cr8","seq":7,"t":"turn"},
+          {"battle":"cr8","seq":8,"side":"a","slot":0,"t":"chose","text":"WALLY"},
+          {"battle":"cr8","seq":9,"side":"a","slot":1,"t":"chose","text":"MAY"},
+          {"battle":"cr8","seq":10,"side":"b","slot":3,"t":"chose","text":"Wild"},
+          {"battle":"cr8","seq":11,"side":"a","slot":0,"t":"wallyThrow"},
+          {"battle":"cr8","seq":12,"t":"msg","text":"RALTS used BASH!"},
+          {"battle":"cr8","mon":0,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":19,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":20,"priority":0,"target":8,"type":0}],"seq":13,"side":"b","slot":3,"t":"moves"},
+          {"battle":"cr8","seq":14,"side":"b","slot":3,"t":"anim","target":0,"text":"BASH"},
+          {"amount":7,"battle":"cr8","hp":17,"seq":15,"side":"a","slot":0,"t":"damage"},
+          {"amount":2,"battle":"cr8","seq":16,"t":"turn"}
+        ]
+      }
+    },
+    {
+      "name": "w4b_wally_cw_refused_no_battler",
+      "create": {"choiceTimeout":0,"id":"cr6","mode":"wild","movePool":"$pool","reconnectGrace":60,"seed":4416,"sides":{"a":[{"bag":[{"count":1,"id":4,"name":"POKe BALL"}],"name":"WALLY","noBattler":true,"playerId":"p1"}],"b":[{"mons":[{"ability":0,"catchRate":235,"friendship":70,"gender":"M","generation":3,"heldItem":0,"holdEffect":0,"holdEffectParam":0,"level":5,"maxHp":20,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":20,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":20,"priority":0,"target":8,"type":0}],"nature":0,"species":"RALTS","speciesNum":1,"stats":{"atk":40,"def":40,"spa":40,"spd":40,"spe":30},"types":[0],"weight":100}],"name":"Wild","playerId":"wild"}]},"tutorial":"wally","typeTable":"$chart"},
+      "steps": [{"op":"drain"},{"choice":{"action":"wallyThrow"},"op":"submit","player":"p1"},{"choice":{"action":"item","item":4},"op":"submit","player":"p1"},{"op":"auto","player":"wild"},{"op":"drain"}],
+      "expect": {
+        "batches": [3,7],
+        "results": [false,true,true],
+        "outcome": {"battle":"cr6","by":"a","catcher":"p1","caughtSpecies":"RALTS","given":false,"how":"catch","losers":["wild"],"outcome":"win","reason":"catch","winners":["p1"]},
+        "snapshot": {"deadline":null,"field":[{"hp":0,"party":[],"slot":0},{"hp":20,"party":[20],"slot":3}],"now":0,"phase":"over","rngState":4416,"seq":10,"turn":1,"weather":null},
+        "events": [
+          {"battle":"cr6","hp":20,"level":5,"maxHp":20,"mon":0,"seq":1,"side":"b","slot":3,"t":"send","text":"RALTS"},
+          {"battle":"cr6","seq":2,"side":"b","slot":3,"t":"team","team":"o"},
+          {"amount":1,"battle":"cr6","seq":3,"t":"turn"},
+          {"battle":"cr6","seq":4,"side":"a","slot":0,"t":"chose","text":"WALLY"},
+          {"battle":"cr6","seq":5,"side":"b","slot":3,"t":"chose","text":"Wild"},
+          {"battle":"cr6","seq":6,"side":"a","slot":0,"t":"item","text":"4"},
+          {"battle":"cr6","seq":7,"t":"msg","text":"WALLY used POKe BALL!"},
+          {"amount":4,"battle":"cr6","seq":8,"side":"a","slot":0,"t":"ball","target":3,"text":"4"},
+          {"battle":"cr6","seq":9,"t":"msg","text":"Gotcha! RALTS was caught!"},
+          {"battle":"cr6","seq":10,"t":"over","text":"catch"}
+        ]
+      }
+    },
+    {
+      "name": "w4b_wally_cw_refused_replacing",
+      "create": {"choiceTimeout":0,"id":"cr7","mode":"wild","movePool":"$pool","reconnectGrace":60,"seed":4417,"sides":{"a":[{"bag":[{"count":1,"id":4,"name":"POKe BALL"}],"family":"rse","mons":[{"ability":0,"friendship":70,"gender":"M","generation":3,"heldItem":0,"holdEffect":0,"holdEffectParam":0,"hp":1,"level":7,"maxHp":24,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":20,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":20,"priority":0,"target":8,"type":0}],"nature":0,"species":"ZIGZAGOON","speciesNum":1,"stats":{"atk":40,"def":40,"spa":40,"spd":40,"spe":20},"types":[0],"weight":100},{"ability":0,"friendship":70,"gender":"M","generation":3,"heldItem":0,"holdEffect":0,"holdEffectParam":0,"level":7,"maxHp":24,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":20,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":20,"priority":0,"target":8,"type":0}],"nature":0,"species":"SECOND","speciesNum":1,"stats":{"atk":40,"def":40,"spa":40,"spd":40,"spe":20},"types":[0],"weight":100}],"name":"WALLY","playerId":"p1"}],"b":[{"mons":[{"ability":0,"catchRate":235,"friendship":70,"gender":"M","generation":3,"heldItem":0,"holdEffect":0,"holdEffectParam":0,"level":5,"maxHp":20,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":20,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":20,"priority":0,"target":8,"type":0}],"nature":0,"species":"RALTS","speciesNum":1,"stats":{"atk":40,"def":40,"spa":40,"spd":40,"spe":60},"types":[0],"weight":100}],"name":"Wild","playerId":"wild"}]},"tutorial":"wally","typeTable":"$chart"},
+      "steps": [{"op":"drain"},{"choice":{"action":"fight","move":0},"op":"submit","player":"wild"},{"choice":{"action":"fight","move":0},"op":"submit","player":"p1"},{"op":"drain"},{"choice":{"action":"wallyThrow"},"op":"submit","player":"p1"},{"choice":{"action":"switch","slot":1},"op":"submit","player":"p1"},{"op":"drain"}],
+      "expect": {
+        "batches": [5,9,4],
+        "results": [true,true,false,true],
+        "outcome": null,
+        "snapshot": {"deadline":null,"field":[{"hp":24,"party":[0,24],"slot":0},{"hp":20,"party":[20],"slot":3}],"now":0,"phase":"choice","rngState":3938904347,"seq":18,"turn":2,"weather":null},
+        "events": [
+          {"battle":"cr7","hp":1,"level":7,"maxHp":24,"mon":0,"seq":1,"side":"a","slot":0,"t":"send","text":"ZIGZAGOON"},
+          {"battle":"cr7","hp":20,"level":5,"maxHp":20,"mon":0,"seq":2,"side":"b","slot":3,"t":"send","text":"RALTS"},
+          {"battle":"cr7","seq":3,"side":"a","slot":0,"t":"team","team":"oo"},
+          {"battle":"cr7","seq":4,"side":"b","slot":3,"t":"team","team":"o"},
+          {"amount":1,"battle":"cr7","seq":5,"t":"turn"},
+          {"battle":"cr7","seq":6,"side":"b","slot":3,"t":"chose","text":"Wild"},
+          {"battle":"cr7","seq":7,"side":"a","slot":0,"t":"chose","text":"WALLY"},
+          {"battle":"cr7","seq":8,"t":"msg","text":"RALTS used BASH!"},
+          {"battle":"cr7","mon":0,"moves":[{"accuracy":100,"chance":0,"effect":0,"flags":51,"id":"BASH","maxPp":20,"num":401,"power":50,"pp":19,"priority":0,"target":0,"type":0},{"accuracy":100,"chance":0,"effect":18,"flags":22,"id":"GROWLY","maxPp":20,"num":408,"power":0,"pp":20,"priority":0,"target":8,"type":0}],"seq":9,"side":"b","slot":3,"t":"moves"},
+          {"battle":"cr7","seq":10,"side":"b","slot":3,"t":"anim","target":0,"text":"BASH"},
+          {"amount":1,"battle":"cr7","hp":0,"seq":11,"side":"a","slot":0,"t":"damage"},
+          {"amount":1,"battle":"cr7","seq":12,"side":"a","slot":0,"t":"faint","text":"ZIGZAGOON"},
+          {"battle":"cr7","seq":13,"side":"a","slot":0,"t":"team","team":"xo"},
+          {"amount":1,"battle":"cr7","seq":14,"slot":0,"t":"turn"},
+          {"battle":"cr7","seq":15,"side":"a","slot":0,"t":"chose","text":"WALLY"},
+          {"battle":"cr7","level":7,"mon":1,"seq":16,"side":"a","slot":0,"t":"switch","text":"SECOND"},
+          {"battle":"cr7","hp":24,"level":7,"maxHp":24,"mon":1,"seq":17,"side":"a","slot":0,"t":"send","text":"SECOND"},
+          {"amount":2,"battle":"cr7","seq":18,"t":"turn"}
+        ]
+      }
     }
   ]
 }

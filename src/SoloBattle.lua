@@ -147,6 +147,7 @@ local Config = need("Config")
 local Wire = need("Wire")
 local Gen = need("Gen")
 local Coop = need("Coop")
+local CoopField = need("CoopField")
 local EvolveFx = need("EvolveFx")
 local MediatedBattle = need("MediatedBattle")
 local SoloBrain = need("SoloBrain")
@@ -340,9 +341,13 @@ local function activeOf(fighter)
   return nil
 end
 
+-- A monster that can still fight for its side.  A Battle Arena loser the
+-- judge "fainted" keeps its HP and is down all the same (pret
+-- battle_script_commands.c:3534 Cmd_checkteamslost skips arenaLost*Mons;
+-- the referee's `judged`, BattleSim3/Arena.lua).
 local function hasLiving(fighter)
   for _, mon in ipairs((fighter and fighter.mons) or {}) do
-    if (tonumber(mon.hp) or 0) > 0 then return true end
+    if (tonumber(mon.hp) or 0) > 0 and not mon.judged then return true end
   end
   return false
 end
@@ -913,11 +918,16 @@ function M:_transport(pending)
         -- Parked RUN is handled, not refused -- `_choose` returns true
         -- so `sendChoice` still closes the menu for the pump.
         transport.refusal = nil
+        solo.kindRefused3 = nil
         local taken = solo:_choose(payload) and true or false
-        -- A lone double's screen keeps the refused seat's menu up with the
-        -- line the cart prints for that refusal (CoopBattle `refuseOwn`),
-        -- worded here, beside the referee that knows why (M.refusalText3).
-        if not taken and solo.gen3 and solo.gen3.double then
+        -- A Gen 3 screen keeps the refused menu up with the line the cart
+        -- prints for that refusal -- the lone double's per seat (CoopBattle
+        -- `refuseOwn`), the single screen's where pret prints it
+        -- (MediatedBattle `sendChoice`) -- worded here, beside the referee
+        -- that knows why (M.refusalText3).  A choice the fight's kind turned
+        -- down itself is the kind's to word (its parked line), never this;
+        -- Red and Gold read no refusal line.
+        if not taken and solo.gen3 and (solo.gen3.double or not solo.kindRefused3) then
           local ok, line = pcall(solo._refusal3, solo, payload)
           transport.refusal = ok and line or nil
         end
@@ -1000,7 +1010,10 @@ function M:_choose(payload)
     -- Safari throw, a facility's forfeit, a RUN the kind refuses in its own
     -- words.  Handled there, nothing below runs.
     local okK, handled, taken = self:_hook3(self.gen3, "choose", payload, seat)
-    if okK and handled == true then return taken and true or false end
+    if okK and handled == true then
+      self.kindRefused3 = not taken or nil
+      return taken and true or false
+    end
   end
   if payload.action == "run" then
     if self.kind == "trainer" then
@@ -2273,7 +2286,10 @@ end
 -- the party was not in the fight, or was rented), `lossless` (an ending with
 -- nobody standing on side a costs nothing: no whiteout, no lost lines),
 -- `noPickup`, `noDexSeen` (the foe's send-out marks no dex "seen": FRLG
--- legendaries, a veiled ghost, the Frontier).
+-- legendaries, a veiled ghost, the Frontier), `noFieldReturn` (the fight does
+-- not end on the field, so the map's resume scripts are not run: the TEACHY
+-- TV's demonstrations, which go back to the TEACHY TV -- pret teachy_tv.c:1208
+-- TeachyTvRestorePlayerPartyCallback, CB2_ReturnToTeachyTV).
 --
 -- A family module is found by its name the first time a fight asks for one
 -- (M.KIND_FILES3), so nothing at boot has to list them: it returns a table
@@ -2867,15 +2883,31 @@ function M.gen3Terrain(game)
   return terrain, underwater and true or false
 end
 
--- Is anything in this party still able to fight?
-function M.gen3Standing(party)
-  for _, mon in ipairs(type(party) == "table" and party or {}) do
+-- Is anything in this party still able to fight?  A Battle Arena loser the
+-- judge "fainted" is not, whatever HP it kept (pret Cmd_checkteamslost skips
+-- arenaLost*Mons): marked `judged` on the monster itself (a referee sheet),
+-- or named in `judged` -- a set of 0-based party positions, the referee's
+-- judged sheets' `slot`s (M.judgedSlots3) -- for a save party, which never
+-- carries the mark.
+function M.gen3Standing(party, judged)
+  judged = type(judged) == "table" and judged or {}
+  for i, mon in ipairs(type(party) == "table" and party or {}) do
     if type(mon) == "table" and not mon.isEgg and int3(mon.species, 0) ~= 412
-        and int3(mon.hp, 0) > 0 then
+        and int3(mon.hp, 0) > 0 and not mon.judged and not judged[i - 1] then
       return true
     end
   end
   return false
+end
+
+-- The party positions (0-based, the sheets' `slot`) of a referee fighter's
+-- judged monsters (BattleSim3/Arena.lua), or an empty set.
+function M.judgedSlots3(fighter)
+  local out = {}
+  for _, sheet in ipairs(type(fighter) == "table" and type(fighter.mons) == "table" and fighter.mons or {}) do
+    if type(sheet) == "table" and sheet.judged then out[int3(sheet.slot, 0)] = true end
+  end
+  return out
 end
 
 -- Level per session-party monster by identity (see M:_levelSnapshot for why).
@@ -2929,11 +2961,12 @@ end
 --       B_OUTCOME_WON into gBattleOutcome, pokeemerald
 --       battle_script_commands.c:3564 / :3577, pokefirered :3401 / :3413),
 --       which a post-battle script and a roamer's writeback read; else the
---       verdict; a trainer's draw is "lose" to `done` (the
---       trainerbattle opcode reads anything else as a win: the flag, the
---       beaten script, the badge) and DREW to the save.  A kind's own `word`
---       hook answers the draws the opcode is not waiting on (a facility's
---       "draw", a pair's "lose") -- see M:_ended3.
+--       verdict. A knockout draw whose sheets and the save disagree is
+--       promoted to a win in M:_settle3 before this mapping. Every other
+--       trainer draw maps to "lose" for `done` and DREW for the save, and
+--       an ordinary trainer's is halted so the beaten script does not run;
+--       special kinds supply their own `word` hook (a facility's "draw",
+--       a pair's "lose").
 --
 -- info: { verdict ("win" | "loss" | "draw", ours), reason, how, by,
 --         whiteout, ranSide, kind ("wild" | "trainer"), teleportBySide }.
@@ -3010,12 +3043,17 @@ end
 -- ------------------------------------------------------------------
 --
 -- Both answer true when the fight is now this file's -- the screen is up, the
--- referee is running, and `opts.done(result)` will be called once after it
+-- referee is running, and `opts.done(result)` is called at most once after it
 -- ends (or after the engine's own battle, if a failing referee has to hand it
--- back), except for a trainer drawn with the player still standing, whose
--- waiting script is halted instead (M:_ended3) -- and false, silently, when
--- it declined, in which case
--- nothing at all has happened and the caller starts the engine's own battle.
+-- back). It is never called for an unfinished trainer draw the player is
+-- still standing after -- a timeout, a disconnect, a forfeit: the trainer
+-- script waiting on it is halted instead (M.haltScript3; no flag, no prize,
+-- B_OUTCOME_DREW on the save, none of the bytes after the trainerbattle
+-- command). Only a knockout draw whose sheets and the save disagree
+-- (M:_settle3) completes as a win; a kind's own `word` (a facility's draw, a
+-- pair's or Steven's) answers its caller itself. They answer false,
+-- silently, when they declined, in which case nothing at all has happened
+-- and the caller starts the engine's own battle.
 --
 -- opts (both):
 --   done       function(result): "win" | "lose" | "draw" | "run" | "mon_fled"
@@ -4106,7 +4144,7 @@ function M:_cantEscapeText3(seat)
 end
 
 -- ------------------------------------------------------------------
--- a lone double's refused command, in the cart's words
+-- a refused command, in the cart's words (the lone double's and the single's)
 -- ------------------------------------------------------------------
 
 -- The party member a choice's `slot` names (the referee's own partyIndexOf:
@@ -4212,7 +4250,12 @@ function M.refusalText3(sim, seatId, choice)
   end
 
   if choice.action == "switch" and not fighter.mustReplace then
-    if try3(sim.isTrapped, sim, b) then
+    -- pret battle_main.c:4241: wrapped, escape-prevented, rooted -- or the
+    -- Battle Arena, where nobody switches -- all open the party menu as
+    -- PARTY_ACTION_CANT_SWITCH, and its line is the one (party_menu.c
+    -- gText_PkmnCantSwitchOut).
+    local arena = type(sim.rules) == "table" and sim.rules.arena == true
+    if arena or try3(sim.isTrapped, sim, b) then
       return Gen3.battleText("gText_PkmnCantSwitchOut", { stringVars = { name } })
         or ("%s can't be switched\nout!"):format(name)
     end
@@ -4230,7 +4273,8 @@ function M.refusalText3(sim, seatId, choice)
   return nil
 end
 
--- That, for a choice the double's screen sent: the seat its `seat` names.
+-- That, for a choice a Gen 3 screen sent: the seat its `seat` names (a lone
+-- double's), the player's on a single screen.
 function M:_refusal3(payload)
   local seat = self:_seat3(payload)
   if not seat then return nil end
@@ -4275,6 +4319,38 @@ end
 -- own after-words -- the defeated line, the trainer's defeat speech and the
 -- prize (paid now, as the engine pays it inside its battle), or the
 -- whiteout's lines (whose money is taken with the warp, in half two).
+--
+-- A knockout draw whose sheets and the save disagree. Every slot a sheet
+-- covers is read from the sheet: reconcile has not copied HP home yet, and
+-- the save still holds what the fight started with. A sheet that still
+-- stands, or a save monster no sheet covers that still stands, disagrees.
+-- `half` (Steven's fight): the save party's player positions end there --
+-- past it are his three (doStevenBattle appends them behind the player's,
+-- and a fight with no stand-in leaves them in place, Doubles.partnerMons),
+-- never the player's, and the fight is lost with the player's alone (pret
+-- Cmd_checkteamslost's INGAME_PARTNER branch).
+local function knockoutDisagreement3(sim, session, half)
+  local player = sim and sim.byId and sim.byId[PLAYER_SEAT]
+  local covered = {}
+  local sheetAlive = false
+  for _, sheet in ipairs(type(player) == "table" and player.mons or {}) do
+    if type(sheet) == "table" then
+      covered[int3(sheet.slot, 0)] = true
+      if (tonumber(sheet.hp) or 0) > 0 and not sheet.judged then sheetAlive = true end
+    end
+  end
+  if sheetAlive then return true end
+  local party = type(session) == "table" and session.party or nil
+  for i, mon in ipairs(type(party) == "table" and party or {}) do
+    if half and i > half then break end
+    if not covered[i - 1] and type(mon) == "table" and not mon.isEgg
+        and int3(mon.species, 0) ~= 412 and int3(mon.hp, 0) > 0 and not mon.judged then
+      return true
+    end
+  end
+  return false
+end
+
 function M:_settle3(outcome)
   local g3, sim, fight = self.gen3, self.sim, self.fight
   local verdict = MediatedBattle.resultFor(outcome, FOE_SEAT)
@@ -4289,6 +4365,22 @@ function M:_settle3(outcome)
       .. "battle screen and the result still counts", tostring(err))
   end
   if not g3 then return end
+  -- A knockout draw is a win only when the referee's sheets and the save
+  -- disagree. Covered slots are the sheets' (reconcile has not run, so the
+  -- save still holds the HP the fight started with). A sheet that still
+  -- stands, or a save monster the sheets do not cover that still stands,
+  -- is the disagreement. A timeout, a disconnect and a forfeit stay draws
+  -- and halt. Facilities keep their own judgment.
+  -- Steven's three are never the player's: only the save's player half
+  -- (Doubles' `playerHalf`) is read.
+  local how = CoopField.knockoutHow3(outcome.how, outcome.reason)
+  local half = g3.name == "partner" and type(g3.dbl) == "table"
+    and tonumber(g3.dbl.playerHalf) or nil
+  g3.standingDraw = verdict == "draw" and g3.kind == "trainer"
+    and (g3.name == "trainer" or g3.name == "pair" or g3.name == "partner"
+      or g3.name == "firstBattle") and not g3.facility3
+    and how ~= nil and knockoutDisagreement3(sim, Gen3.session(), half) or false
+  if g3.standingDraw then verdict = CoopField.trainerDrawResult3(verdict, how, true) end
   g3.verdict = verdict
   -- The referee's whole verdict (its `how` / `by`, contract C5), for the
   -- word M:_ended3 hands the engine.
@@ -4330,7 +4422,8 @@ function M:_settle3(outcome)
   local okK, handled = self:_hook3(g3, "settle", outcome)
   if okK and handled == true then return end
   local okW, errW = pcall(function()
-    if self.kind == "trainer" and verdict == "win" and (reason == "ko" or outcome.how == "judge") then
+    if self.kind == "trainer" and verdict == "win"
+        and (reason == "ko" or outcome.how == "judge" or g3.standingDraw) then
       self:_trainerWon3()
     elseif lost then
       -- pret BattleScript_LocalBattleLost's early-rival arm (the engine's
@@ -4555,7 +4648,8 @@ function M:_ended3(result, toLearn)
   end
   local o = type(g3.outcome) == "table" and g3.outcome or {}
   local verdict = g3.verdict or result
-  local whiteout = same and g3.whiteout and not M.gen3Standing(session.party)
+  local whiteout = same and g3.whiteout
+    and not M.gen3Standing(session.party, M.judgedSlots3(sim.byId and sim.byId[PLAYER_SEAT]))
   -- A flight with no `how` is decided by who ran; one with no `run` event was
   -- a POKé DOLL / FLUFFY TAIL thrown by our side (the only side with a bag in
   -- a wild fight).
@@ -4566,23 +4660,12 @@ function M:_ended3(result, toLearn)
     whiteout = whiteout, ranSide = ranSide, kind = g3.kind,
     teleportBySide = M.teleportBySide3(bp, g3.family),
   })
-  local won = verdict == "win" and (reason == "ko" or o.how == "judge")
+  local won = verdict == "win" and (reason == "ko" or o.how == "judge" or g3.standingDraw)
 
-  -- The ending as the reports and the caller will be told it.  `halt`: a
-  -- trainer fight this player ends neither winning nor whited out nor
-  -- healed nor scripted out (a draw with their team still standing -- the
-  -- one ending the cart has no word for) is never handed to the
-  -- trainerbattle opcode.  Its `done` has no third answer: anything but a
-  -- loss sets the trainer flag and runs the beaten script, and a loss sets
-  -- no flag but lets the VM run on into the bytes after the command
-  -- (ops_a.lua: nothing halts it; on the cart a loss's whiteout ends the
-  -- script) -- a gym leader's TM, handed over with no badge.  So the script
-  -- waiting on the trainer is halted instead, as the whiteout would have
-  -- halted it, and nobody is whited out: the trainer stays unbeaten and the
-  -- save says B_OUTCOME_DREW.  src/CoopField.lua's Stand:finish holds co-op
-  -- to the same rule.  A scripted loss's caller is waiting for its "lose"
-  -- (Steven, the Frontier), and a kind that names its own word answers its
-  -- own caller (a facility's "draw", a pair's "lose").
+  -- A knockout whose sheets and the save disagreed was promoted at
+  -- settlement, so that continuation sets the flag and pays the prize.
+  -- Every other unfinished trainer result halts rather than running a
+  -- beaten script without its victory flag. Kinds may supply their own word.
   local ending = {
     result = doneWord, word = saveWord,
     halt = same and g3.kind == "trainer" and doneWord == "lose" and not whiteout
@@ -4666,8 +4749,9 @@ function M:_ended3(result, toLearn)
       end
       if halt then M.haltScript3() end
       -- The map's resume scripts (pokefirered battle_setup.c:432), after the
-      -- last prompt the fight left up has closed.
-      local Space = Gen3.engine("src.core.game3.scripting.space")
+      -- last prompt the fight left up has closed -- for a fight that ends on
+      -- the field (`noFieldReturn`).
+      local Space = not g3.noFieldReturn and Gen3.engine("src.core.game3.scripting.space") or nil
       if Space then pcall(Space.returnToField) end
     end
     if halt then return end
@@ -4857,8 +4941,13 @@ function M:_finishEffects3(session, g3, ending)
     pcall(Pokemon.partySpreadPokerus, session.party, session)
   end
 
+  -- FireRed / LeafGreen's quest log keeps no scene of the old man's
+  -- tutorial or the POKe DUDE's demonstrations (pret quest_log_battle.c:14
+  -- TrySetQuestLogBattleEvent: LINK | OLD_MAN_TUTORIAL | POKEDUDE; the engine
+  -- skips them at its own call site, battle/init.lua:417).
   local FieldModules = Gen3.engine("src.core.game3.field_modules")
-  if family ~= "rse" and FieldModules and try3(FieldModules.enabled, "questLog", session) == true then
+  if family ~= "rse" and not (st.oldManTutorial or st.pokedude) and FieldModules
+     and try3(FieldModules.enabled, "questLog", session) == true then
     local Recorder = Gen3.engine("src.core.game3.quest_log_recorder")
     if Recorder then pcall(Recorder.battle, session, st) end
   end
@@ -5042,6 +5131,42 @@ end
 -- ending, and -- unless the save changed underneath (a load drops the fight
 -- and everything waiting on it) -- start the engine's own battle against the
 -- same opponent, with the caller's `done` on it.
+-- A fight its kind ends on the spot, between two frames of the referee: the
+-- POKe DUDE's demonstration with B held (pret pokefirered battle_main.c:1455
+-- BattleMainCB2: gSpecialVar_Result = gBattleOutcome = B_OUTCOME_DREW, the
+-- fade, CB2_QuitPokedudeBattle straight back to gMain.savedCallback).  No
+-- further turn: the referee is dropped where it stands.  Nothing comes home
+-- and nothing is reported -- no reconcile, no Pickup, no evolutions, no quest
+-- log, TV or battle.ended (what the screen already paid stays paid); the
+-- cart's outcome code is written where its gBattleOutcome is
+-- (session.battleOutcome, from `saveWord`, else `word`, through
+-- Natives.outcome_to_code; `saveWord` false writes none -- the POKe DUDE's
+-- bag and party menus leave it alone), the screen comes off without its own
+-- ending, and the caller's `done(word)` runs.  The kind gives back what it
+-- borrowed before it asks.  -> true when there was a fight to end.
+function M:quit3(word, saveWord)
+  local g3, fight, game = self.gen3, self.fight, self.game
+  if not (self.generation == 3 and g3 and fight) then return false end
+  self:_clear3()
+  fight.onDone = nil
+  if Gen3Ui.has(fight) then pcall(Gen3Ui.pop, game, fight) end
+  local session = Gen3.session()
+  if saveWord ~= false and session ~= nil and session == g3.session then
+    local Natives = Gen3.engine("src.core.game3.scripting.natives")
+    local code = Natives and try3(Natives.outcome_to_code, saveWord or word)
+    if code ~= nil then session.battleOutcome = code end
+  end
+  local done = g3.done
+  if type(done) == "function" then
+    local ok, err = pcall(done, word)
+    if not ok then
+      self:warn("done3", "what was waiting on this battle could not carry on (%s); "
+        .. "talk to the trainer again, or reload from your last save", tostring(err))
+    end
+  end
+  return true
+end
+
 function M:_reset3()
   local game, fight, g3 = self.game, self.fight, self.gen3
   self:_clear3()

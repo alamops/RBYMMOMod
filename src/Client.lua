@@ -29,6 +29,9 @@ local CoopBattle = need("CoopBattle")
 -- cancels, and the BattleBridge.start wrap trainers are taken at (see the Gen
 -- 3 section of src/CoopField.lua, and the wiring in M.install below).
 local CoopField = need("CoopField")
+-- What a Gen 3 fight borrows from the save, and the `save.write` link that
+-- keeps a borrow out of the file (installed in M.install, Gen 3 only).
+local Borrow3 = need("Borrow3")
 -- The mod's own battle system for a player with nobody to play with. The one
 -- module in here that *substitutes* for a piece of the game instead of adding
 -- to it, and so the one gated on an option row rather than on a connection --
@@ -2855,6 +2858,15 @@ local startHandler3 = {
 local pokedudeHandler3 = {
   wants = function() return solo:isOn() end,
   game = function() return ctx.game end,
+  -- The screen solo is fighting this stand on, while it is (CoopField's
+  -- Stand:fightLive3 asks whether that screen is still on the modal stack):
+  -- what tells src/Borrow3.lua's save guard a borrowed party is really in a
+  -- fight, rather than left behind by one whose screen died.
+  holds = function(stand)
+    local g = solo.gen3
+    if type(g) == "table" and g.stand == stand and solo.fight ~= nil then return solo.fight end
+    return nil
+  end,
   take = function(stand)
     local enc = {}
     for k, v in pairs(stand.encounter or {}) do enc[k] = v end
@@ -3298,6 +3310,23 @@ function M.install()
       mod.log:warn("the solo battle families could not be read at start-up (%s); those "
         .. "fights are fought the ordinary way -- reinstall the mod folder so every file "
         .. "under src/Solo3/ is present", tostring(err))
+    end
+  end
+
+  -- Gen 3: the save backstop for what a fight borrowed from the save (the
+  -- TEACHY TV's party and bag, the tutorials' bags -- src/Borrow3.lua).  A
+  -- `save.write` link that gives back a borrow whose fight is gone before the
+  -- file is written, and refuses the write while one is really still running.
+  -- Once, at load: a hot reload is a new load, whose link replaces this one
+  -- and whose ledger epoch makes every record of this load stale.  Gen 3 only:
+  -- Red and Gold borrow nothing from the save, and their saves stay off the
+  -- hooked path.
+  if Gen3.active() then
+    local ok, err = pcall(Borrow3.install)
+    if not ok then
+      mod.log:warn("the save guard for battles could not be installed (%s); do not save "
+        .. "during a TEACHY TV demonstration or a tutorial battle -- reinstall the mod "
+        .. "folder so src/Borrow3.lua is present", tostring(err))
     end
   end
 
