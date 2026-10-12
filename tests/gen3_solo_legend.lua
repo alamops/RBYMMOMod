@@ -771,8 +771,8 @@ ROM[153] = { effect = E.EXPLOSION, power = 250, type = 0, accuracy = 100, pp = 5
 P3._moveNames[153] = "EXPLOSION"
 
 -- The engine's own Roamer module, over the stand-in RNG and POKeMON module
--- it requires.  Emerald's arm reads its config off the battle profile and
--- its location sets off the dataset cache: both handed in here.
+-- it requires.  Both carts' arms read their config off the battle profile
+-- and their location sets off the dataset cache: both handed in here.
 local Roamer = require("src.core.game3.roamer")
 check(type(Roamer.onBattleEnd) == "function", "the engine's Roamer module loads headless")
 local EM_ROAMER = { level = 40, locations = "synthetic", moveOdds = 16, encounterOdds = 4 }
@@ -780,6 +780,14 @@ Roamer._locations[EM_ROAMER] = {
   { "EM_ROUTE_110", "EM_ROUTE_111", "EM_ROUTE_112" },
   { "EM_ROUTE_118", "EM_ROUTE_119", "EM_ROUTE_120" },
   { "EM_ROUTE_121", "EM_ROUTE_122", "EM_ROUTE_123" },
+}
+-- battle/profile.lua's FireRed / LeafGreen roamer, its sets invented.
+local FR_ROAMER = { level = 50, locations = "synthetic-frlg", moveOdds = 16, encounterOdds = 4,
+                    truncateIvs = true }
+Roamer._locations[FR_ROAMER] = {
+  { "FR_ROUTE_1", "FR_ROUTE_2", "FR_ROUTE_21_NORTH" },
+  { "FR_ROUTE_3", "FR_ROUTE_4", "FR_ROUTE_5" },
+  { "FR_ROUTE_6", "FR_ROUTE_7", "FR_ROUTE_8" },
 }
 local onBattleEndCalls = {}
 do
@@ -875,6 +883,7 @@ local function frRoamer(extra)
   }
   for k, v in pairs(extra or {}) do r[k] = v end
   SESSION.roamer = r
+  PROFILE.roamer = FR_ROAMER
   local foe = {
     species = r.species, speciesId = r.species, level = r.level, hp = r.hp, maxHp = r.maxHp,
     status = r.status, statusNum = r.statusNum, pid = r.pid, ivs = r.ivs, moves = r.moves,
@@ -1120,8 +1129,9 @@ do
   end)
   eq(result, "run", "roamer asleep: done('run')")
   eq(saved.active, true, "roamer asleep: RAN (4) keeps it")
+  -- (the engine keeps only that byte -- Roamer.normalize drops FireRed's
+  -- statusNum -- and the save converters read a numeric status in its place)
   eq(saved.status, 2, "roamer asleep: the sleep counter is banked in the status byte (STATUS1_SLEEP = 2)")
-  eq(saved.statusNum, 2, "roamer asleep: ...FireRed's statusNum too (the save converters read it)")
   local word, turns = CoopField.status3(saved.status, saved.statusNum)
   eq(word, "SLP", "roamer asleep: the next stand reads it asleep")
   eq(turns, 2, "roamer asleep: ...with the cart's two turns, not a fresh roll")

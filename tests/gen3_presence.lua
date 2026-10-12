@@ -473,8 +473,14 @@ local function cart(version)
   eq(eo.stepFrames, Avatars.GEN3_WALK_FRAMES, label .. ": at walking pace")
   eq(avatars:isWalking("p1"), true, label .. ": isWalking while it does")
   eq(Objects._tracks[base], nil, label .. ": with no movement track (nothing for a seamless edge to carry)")
+  -- The stride frame shows somewhere in the step (which frames is the
+  -- engine's: Objects.walkPhase, its own step-anim cycle), so every frame of
+  -- the step is looked at.
   local sawPhase = false
-  for _ = 1, 8 do Objects.update(game) end
+  for _ = 1, 8 do
+    Objects.update(game)
+    if Objects.walkPhase(eo) == 1 then sawPhase = true end
+  end
   local midX = avatars:cellOf("p1")
   check(midX > 4 and midX < 5, label .. ": mid-step the plate's cell glides (" .. tostring(midX) .. ")")
   for _ = 1, 8 do

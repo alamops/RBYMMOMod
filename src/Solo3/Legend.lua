@@ -119,9 +119,10 @@ end
 -- gen3_port rse: `statusNum`, else a numeric `status`) and the one
 -- src/CoopField.lua's status3 decodes for the next stand.  A sleeping
 -- monster whose counter nobody knows (an engine battle's word, banked
--- without one, and never ticked here) is left as that word: a byte with a
--- counter of 0 would be an awake monster, and a counter made up here would
--- be a roll the cart never made.
+-- without one, and never ticked here) is handed on as that word: a byte
+-- with a counter of 0 would be an awake monster, and a counter made up here
+-- would be a roll the cart never made.  (The engine's Roamer.statusWord
+-- then banks it with a counter of 1 -- its call, not this file's.)
 M.STATUS1_BITS = { PSN = 8, BRN = 16, FRZ = 32, PAR = 64, TOX = 128 }
 
 -- -> the byte, or nil for a sleeping monster with no known counter.
@@ -142,7 +143,8 @@ function M.statusByte3(status, sleep)
 end
 
 -- The roamer as the fight left it, in the shape Roamer.onBattleEnd reads
--- (`hp`, `status`, and FireRed's `statusNum`): the engine monster the core
+-- (`hp`, `status` and `sleep`; an engine from before roamer.lua's rewrite
+-- read FireRed's `statusNum` too): the engine monster the core
 -- wrote the referee's HP and status onto (SoloBattle M:_settle3,
 -- Sheet3.applyToMon), and the sleep counter off the referee's own sheet --
 -- applyToMon writes the word, not the counter (the core's _reconcile3 does
@@ -348,12 +350,14 @@ end
 -- 1.0 is the rule played.
 --
 -- The engine's own Roamer.onBattleEnd is called, once, for the HP and the
--- status: Emerald's arm is pret's (moveToOtherSet, then `code % 2 == 1`).
--- FireRed's arm keeps the roamer for every ending but a catch or a
--- knockout and relocates only the roamer it keeps (Roamer.jump) -- the port
--- "fixed" the bug (E1).  So, on FireRed, a roamer that is about to be put
--- away is moved first (what UpdateRoamerHPStatus does before the check), and
--- one the engine kept on an odd outcome is put away after.
+-- status.  Its arm is pret's on every cart (moveToOtherSet, then
+-- `code % 2 == 1`; roamer.lua, with its config off the battle profile).  An
+-- engine from before that rewrite (no Roamer.config) ran FireRed's arm its
+-- own way: it kept the roamer for every ending but a catch or a knockout and
+-- relocated only the roamer it kept (Roamer.jump) -- the port "fixed" the
+-- bug (E1).  There, a FireRed roamer about to be put away is moved first
+-- (what UpdateRoamerHPStatus does before the check); on either engine, one
+-- left active on an odd outcome is put away after.
 function M.roamerFinish3(ctx, outcome, ending)
   local session = ctx.session
   local roamer = type(session) == "table" and session.roamer or nil
@@ -368,9 +372,10 @@ function M.roamerFinish3(ctx, outcome, ending)
   local Natives = Gen3.engine("src.core.game3.scripting.natives")
   local code = int(Natives and try(Natives.outcome_to_code, word), nil) or int(session.battleOutcome, 0)
   local state = M.roamerState3(ctx.wildMon, foeSheet(ctx))
-  local rse = (type(Roamer.rseConfig) == "function" and try(Roamer.rseConfig, session) ~= nil)
-  if Roamer.rseConfig == nil then rse = familyOf(ctx) == "rse" end
-  if not rse and (word == "caught" or state.hp <= 0) and type(Roamer.jump) == "function" then
+  local pretArm = type(Roamer.config) == "function"
+    or (type(Roamer.rseConfig) == "function" and try(Roamer.rseConfig, session) ~= nil)
+    or (Roamer.rseConfig == nil and familyOf(ctx) == "rse")
+  if not pretArm and (word == "caught" or state.hp <= 0) and type(Roamer.jump) == "function" then
     pcall(Roamer.jump, session)
   end
   local ok, err = pcall(Roamer.onBattleEnd, session, state, word)

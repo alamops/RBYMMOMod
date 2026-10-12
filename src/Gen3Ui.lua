@@ -93,6 +93,10 @@
 -- started with; a layer pushed while that table is still current is marked
 -- pre-step, and ignores the whole of the first step it is handed as well
 -- (M.stamped).  A build or a harness without that link keeps the plain stamp.
+-- An engine that clears `pressed` in place instead of making a new one
+-- (upstream's Input.lua from fcc8b5d1) never changes the table, so the link
+-- also counts the steps it opens: a layer is free from the first step after
+-- the one it was stamped in, whichever of the two moved.
 --
 -- ------- while the cart's own battle runs
 --
@@ -876,11 +880,20 @@ end
 -- hook runs -- see "how the engine calls a layer" in the header.
 local preStepPressed = nil
 
+-- How many fixed steps the input.step link has opened (nil until it first
+-- runs).  An engine that clears `pressed` in place rather than making a new
+-- table each step (Input.lua ownedCleared, upstream from fcc8b5d1) never
+-- changes that table's identity, so the step a layer went up in is told by
+-- this count there; the table still tells it under an engine or a harness
+-- without the link.
+local stepSerial = nil
+
 -- Called first thing in the input.step hook, which runs before Input:step:
 -- until Input:step replaces `pressed`, a layer pushed is being pushed ahead
 -- of the step whose presses are about to be made (Client's network tick, the
 -- prompt queue), not by one of them.
 function M.beforeStep(game)
+  stepSerial = (stepSerial or 0) + 1
   local input = type(game) == "table" and game.input or nil
   local pressed = type(input) == "table" and input.pressed or nil
   preStepPressed = type(pressed) == "table" and pressed or nil
@@ -888,9 +901,16 @@ end
 
 -- True while `input` is still the step this screen was pushed in -- and, for
 -- a screen pushed ahead of a step (stamp, below), for the whole of the first
--- step it is handed, whose presses were all made before it went up.
+-- step it is handed, whose presses were all made before it went up.  A step
+-- the input.step link has opened since is never the one it went up in.
 function M.stamped(screen, input)
   if type(screen) ~= "table" or type(input) ~= "table" then return false end
+  if rawget(screen, "_g3Serial") ~= stepSerial then
+    rawset(screen, "_g3Serial", nil)
+    rawset(screen, "_g3Stamp", nil)
+    rawset(screen, "_g3PreStep", nil)
+    return false
+  end
   local stamp = rawget(screen, "_g3Stamp")
   if rawget(screen, "_g3PreStep") then
     if input.pressed ~= stamp then
@@ -910,6 +930,7 @@ end
 local function stamp(screen, game)
   local input = type(game) == "table" and game.input or nil
   local pressed = type(input) == "table" and input.pressed or nil
+  rawset(screen, "_g3Serial", stepSerial)
   rawset(screen, "_g3Stamp", pressed)
   if pressed ~= nil and pressed == preStepPressed then
     rawset(screen, "_g3PreStep", true)

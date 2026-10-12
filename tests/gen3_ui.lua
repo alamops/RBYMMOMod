@@ -1361,6 +1361,48 @@ local function run3(version)
     step(game, "a")
     eq(#ran, 2, L .. "and the next step's A is its own")
     Stack.clear()
+
+    -- ------- an engine that clears `pressed` in place (upstream Input.lua
+    -- ownedCleared, from fcc8b5d1): the table never changes, so only the
+    -- step the input.step link opens tells one step from the next.  Every
+    -- layer here went up and then ignored every press for good.
+    local kept = game.input.pressed
+    local function engineStep(...)
+      local buttons = { ... }
+      uiStep(function()
+        for k in pairs(kept) do kept[k] = nil end
+        game.input.state = {}
+        for _, btn in ipairs(buttons) do kept[btn] = true; game.input.state[btn] = true end
+      end, game, 1 / 60)
+      local top = Stack.top()
+      if top and top.mod and type(top.mod.handleInput) == "function" then top.mod.handleInput(game.input) end
+    end
+    game.input.pressed = kept
+    local twoItems = {
+      { label = "ONE", onSelect = function() ran[#ran + 1] = "ONE" end },
+      { label = "TWO", onSelect = function() ran[#ran + 1] = "TWO" end },
+    }
+    Gen3Ui.push(game, "Probe", { items = twoItems })
+    local probe = Gen3Ui.top()
+    engineStep()
+    engineStep("down")
+    eq(probe and probe.cursor, 2, L .. "one pressed table for every step: DOWN still moves the cursor")
+    engineStep("a")
+    eq(ran[#ran], "TWO", L .. "and A still selects")
+    Stack.clear()
+    -- the chain under the link: Client's tick pushes, then Input:step makes
+    -- this step's A in the same table, then the step's input is handed out
+    local before = #ran
+    uiStep(function()
+      Gen3Ui.push(game, "Probe", { items = twoItems })
+      for k in pairs(kept) do kept[k] = nil end
+      kept.a = true
+    end, game, 1 / 60)
+    Stack.top().mod.handleInput(game.input)
+    eq(#ran, before, L .. "one pressed table: a menu the tick pushed skips the step it went up ahead of")
+    engineStep("a")
+    eq(#ran, before + 1, L .. "and takes the next A")
+    Stack.clear()
   end
 
   -- ------- the line a trade holds the screen with
