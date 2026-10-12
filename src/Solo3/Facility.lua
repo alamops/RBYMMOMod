@@ -1381,6 +1381,10 @@ function Own.finish(ctx, outcome, ending)
   if ctx.kind ~= "trainer" then return nil end
   local record = M.lastFrontierBattle3(ending)
   local tower = hall == "tower" and set3(opts.battleTower)
+  -- This fight's gBattleOutcome, as settlement wrote it.  The same tick's
+  -- script reads it with frontier_get FRONTIER_DATA_BATTLE_OUTCOME, which
+  -- zeroes it (rse/frontier/util.lua Util.getData) before the tail below runs.
+  local battleOutcome = sess.battleOutcome
   return function()
     sess.lastFrontierBattle = record
     -- The battle room's script asked for the interview in the same tick the
@@ -1388,11 +1392,16 @@ function Own.finish(ctx, outcome, ending)
     -- BattleRoom_EventScript_DoTowerBattle: DoSpecialTrainerBattle, then
     -- tower_setinterviewdata with nothing waiting in between), from the
     -- record `done` had just rebuilt from the engine's stale battle state; it
-    -- is asked again over this fight's.
+    -- is asked again over this fight's, with the outcome the script's own
+    -- interview read (the script has since read and cleared it), and the
+    -- cleared value put back after.
     if tower then
       local Tower = Gen3.engine("src.core.game3.rse.frontier.tower")
       if type(Tower) == "table" and type(Tower.setInterviewData) == "function" then
+        local now = sess.battleOutcome
+        sess.battleOutcome = battleOutcome
         pcall(Tower.setInterviewData, sess)
+        sess.battleOutcome = now
       end
     end
   end

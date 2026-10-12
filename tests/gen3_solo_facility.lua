@@ -826,7 +826,11 @@ function FakeFrontierUtil.frontier(sess)
 end
 local interviews = {}
 local FakeTower = {}
-function FakeTower.setInterviewData(sess) interviews[#interviews + 1] = sess.lastFrontierBattle end
+local interviewOutcomes = {}
+function FakeTower.setInterviewData(sess)
+  interviews[#interviews + 1] = sess.lastFrontierBattle
+  interviewOutcomes[#interviewOutcomes + 1] = sess.battleOutcome
+end
 
 -- The Frontier's tables the cart owns (rse/frontier/f2_data.lua's manifest,
 -- decoded from the ROM at import), invented here: the Battle Palace's
@@ -891,7 +895,7 @@ local function fresh(cart)
   newGame()
   if cart == "frlg" then fireRed() else emerald() end
   createdWith, screenedWith, doubledWith = nil, nil, nil
-  pickups, interviews = {}, {}
+  pickups, interviews, interviewOutcomes = {}, {}, {}
   PYR.mult, PYR.items, PYR.qty, PYR.active = 4, {}, {}, false
   FakeVm.ctx.specialVars = {}
   BattleMod._nextFacility = nil
@@ -1207,6 +1211,9 @@ do
     -- runs on to tower_setinterviewdata in the same tick.
     SESSION.lastFrontierBattle = stale
     FakeTower.setInterviewData(SESSION)
+    -- ...then frontier_get FRONTIER_DATA_BATTLE_OUTCOME, which reads the
+    -- outcome and clears it (rse/frontier/util.lua Util.getData).
+    SESSION.battleOutcome = 0
   end })
   local solo = newSolo()
   local taken, stand = offerTrainer(solo, frontierFoe({ monOf(16, 2), monOf(16, 2) }), opts)
@@ -1238,7 +1245,7 @@ do
      "tower: ...and the referee refuses it (FRONTIER_NO_PYRAMID)")
   local _, fight = drive(solo, function(f) f:pickMove(1) end)
   eq(table.concat(results, ","), "win", "tower: done('win'), once")
-  eq(SESSION.battleOutcome, 1, "tower: B_OUTCOME_WON")
+  eq(SESSION.battleOutcome, 0, "tower: the script read B_OUTCOME_WON and cleared it")
   eq(SESSION.money, 1000, "tower: no prize, and PAY DAY's coins are not paid")
   check(not textOf(fight):find("picked up", 1, true), "tower: ...nor said")
   eq(lead.exp, expBefore, "tower: no EXP")
@@ -1254,6 +1261,8 @@ do
   eq(lfb and lfb.playerNickname, "CHARMANDER", "tower: ...and its name")
   eq(#interviews, 2, "tower: the interview was asked again after the script's own")
   eq(interviews[2], lfb, "tower: ...over this fight's record")
+  eq(interviewOutcomes[1], 1, "tower: the script's interview read B_OUTCOME_WON")
+  eq(interviewOutcomes[2], 1, "tower: ...and so did the one asked again, after the script cleared it")
   check(not textOf(fight):find("STRINGID_PLAYERWHITEOUT", 1, true), "tower: no whiteout lines")
 end
 

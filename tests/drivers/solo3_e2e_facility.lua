@@ -358,6 +358,10 @@ return function(kit)
         else
           kit.fightWith(how == "weak" and weakestMove(f) or kit.bestMove(f))
         end
+      elseif f.phase == "switch" and f.replaceOnly then
+        -- A fainted lead's replacement: B cannot leave this picker, so A
+        -- sends the first monster it lists (as driveDouble does).
+        U.tap(game, "a"); U.wait(8)
       elseif f.phase == "move" or f.phase == "target" or f.phase == "switch" or f.phase == "item" then
         U.tap(game, "b"); U.wait(6)
       else
@@ -446,17 +450,20 @@ return function(kit)
   end
 
   -- A party built for the leg: `{ species, level, hp?, moves? }` rows,
-  -- healthy, the strongest damaging move first unless `moves` pins them.
+  -- healthy, the strongest damaging move first unless `moves` pins them
+  -- (pret names, MOVE_*; a name the cart lacks leaves that row nil).
   local Moves = require("src.core.game3.battle.moves")
   local function moveId(name) return H.g3Const(game, "moves", name) end
   local function pinMoves(mon, list)
     local ids, pp = {}, {}
     for i, name in ipairs(list) do
       local id = moveId(name)
+      if not id then return false end
       local okM, row = pcall(Moves.get, id)
       ids[i], pp[i] = id, (okM and type(row) == "table" and tonumber(row.pp)) or 10
     end
     mon.moves, mon.pp, mon.maxPp = ids, pp, { unpack(pp) }
+    return true
   end
   local function seedTeam(rows)
     local team = {}
@@ -464,9 +471,13 @@ return function(kit)
       local mon = (i == 1) and H.g3SeedParty(game, row.species, row.level)
         or H.g3GiveMon(game, row.species, row.level)
       if mon then
-        if row.moves then pinMoves(mon, row.moves) else H.g3FrontloadDamage(mon) end
         mon.hp = row.hp or mon.maxHp
         mon.status = nil
+        if not row.moves then
+          H.g3FrontloadDamage(mon)
+        elseif not pinMoves(mon, row.moves) then
+          mon = nil
+        end
       end
       team[i] = mon
     end
@@ -514,7 +525,8 @@ return function(kit)
   -- commands.c:3130), then TrainerTower_EventScript_SetFloorCleared bumps
   -- floorsCleared.  The only shortcut: the walk from the lobby to 1F (the
   -- elevator / stair warp) is a warp onto 1F's foot, as the engine's own
-  -- game3_tower_run driver does.
+  -- game3_tower_run driver does; and a challenge an earlier leg left running
+  -- is closed before the next asks for its own.
 
   local function towerLegs()
     local Tower = require("src.core.game3.trainer_tower")
@@ -556,14 +568,59 @@ return function(kit)
       return started, modes
     end
 
+    -- The current map's coord events (the engine's own lookup,
+    -- game3/field.lua): the one gated on `var`, and all of them for a report.
+    local DOUBLES_TRIGGER = 0x400F -- pokefirered trainer_tower.inc VAR_TEMP_F
+    local function coordEvents()
+      local id = mapNow()
+      local def = id and game.data and game.data.maps and game.data.maps[id]
+      local events = def and def.coordEvents
+      if not events then
+        local ev = Space.bundle and Space.bundle.events and Space.bundle.events[id]
+        events = ev and ev.coordEvents
+      end
+      return type(events) == "table" and events or {}
+    end
+    local function coordTrigger(var)
+      for _, ev in ipairs(coordEvents()) do
+        if varId(ev.var) == var then return ev end
+      end
+      return nil
+    end
+    local function coordList()
+      local out = {}
+      for _, ev in ipairs(coordEvents()) do
+        out[#out + 1] = ("(%s,%s) var %s"):format(tostring(ev.x), tostring(ev.y), tostring(ev.var))
+      end
+      return table.concat(out, "; ")
+    end
+
     local function floorFight(leg, modeIndex, modeId, double)
       partyGate()
+      -- The floor's trainers are levelled to the party's highest level
+      -- (pokefirered trainer_tower.c GetPartyMaxLevel), so a level cannot
+      -- buy the win this leg needs: species and moves do (a starter met a
+      -- level-50 FERALIGATR here and lost).  The drivers pick the move of
+      -- the most power, so each monster's strongest is its one attack: three
+      -- types no Gen 3 monster is immune to past MEWTWO's.
       local team = seedTeam({
-        { species = kit.STARTER, level = 50 }, { species = "PIKACHU", level = 50 },
-        { species = kit.WILD, level = 45 },
+        { species = "MEWTWO", level = 50, moves = { "MOVE_PSYCHIC", "MOVE_RECOVER" } },
+        { species = "DRAGONITE", level = 50, moves = { "MOVE_DRAGON_CLAW", "MOVE_AGILITY" } },
+        { species = "ZAPDOS", level = 50, moves = { "MOVE_DRILL_PECK", "MOVE_AGILITY" } },
       })
-      check(#session().party == 3 and team[1] and team[2], leg .. ": a party of three was seeded")
+      check(#session().party == 3 and team[1] and team[2] and team[3],
+            leg .. ": a party of three was seeded, with its moves")
       onSolo(double)
+      -- A floor won leaves its challenge running (the clock, the lobby's
+      -- scene), and the counter will not open another over it.  A loss ends
+      -- it through the cart's own scripts; a win would need the walk back
+      -- down and out.  The second shortcut: the challenge is closed here.
+      if Tower.isTimerRunning(session()) then
+        log(("%s: closing the challenge an earlier leg left running (scene %s)"):format(
+          leg, tostring(getVar("VAR_MAP_SCENE_TRAINER_TOWER"))))
+        Tower.setTimerRunning(session(), false)
+        setVar("VAR_MAP_SCENE_TRAINER_TOWER", 0)
+      end
       local started, modes = startChallenge(modeIndex, leg)
       check(modes ~= nil, leg .. ": the lobby counter asked the challenge's mode (its own list)", tostring(modes))
       check(Tower.getChallengeId(session()) == modeId,
@@ -573,10 +630,19 @@ return function(kit)
       check(rec.floorsCleared == 0, leg .. ": no floor cleared yet", tostring(rec.floorsCleared))
       local moneyBefore, exp1 = money(), expOf(1)
 
-      -- 1F's foot (the elevator / stairs' landing; the engine's own driver's
-      -- cell), then up into the floor trigger.
+      -- 1F's foot (the engine's own driver's cell), then up into the floor
+      -- trigger.  A double floor's layout walls that corridor off, so the
+      -- double finds the coord event its trigger var gates
+      -- (DOUBLES_TRIGGER, VAR_TEMP_F) and steps onto it from the cell below:
+      -- a coord event runs on a step, never on a warp.
       H.g3Teleport(game, FLOOR1, 10, 14, "up")
       check(mapNow() == FLOOR1, leg .. ": on 1F with the challenge running")
+      if double then
+        local cell = coordTrigger(DOUBLES_TRIGGER)
+        if check(cell ~= nil, leg .. ": 1F has the doubles trigger's coord event", coordList()) then
+          H.g3Teleport(game, FLOOR1, cell.x, cell.y + 1, "up")
+        end
+      end
       local t0 = Tower.record(session()).timer
       local met = meet({
         idle = function()
@@ -584,7 +650,13 @@ return function(kit)
         end,
         seconds = 90, what = "1F's trainer to walk up and the fight to start",
       })
-      if not check(met, leg .. ": 1F's trigger walked the trainer up and the fight began") then return end
+      local why = not met and (("at (%d,%d), singles trigger %s, doubles trigger %s; said: %s"):format(
+        Player.cellX, Player.cellY, tostring(getVar(0x400E)), tostring(getVar(DOUBLES_TRIGGER)),
+        (table.concat(spoken, " | "):gsub("\n", " ")))) or nil
+      if not check(met, leg .. ": 1F's trigger walked the trainer up and the fight began", why) then
+        kit.shot(leg .. "-no-fight")
+        return
+      end
       assertTaken(leg, "facility", "trainerTower")
       check(seen.soloDouble == (double == true),
             leg .. (double and ": a double, on the double screen" or ": a single, on the single screen"))
