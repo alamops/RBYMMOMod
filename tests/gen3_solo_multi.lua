@@ -867,6 +867,31 @@ block("palace double through the core", function()
   eq(R.FakeVm.halted, 0, "palace double: no script halted")
 end)
 
+-- A Tower multi that came with no stand-in: the partner's monsters are still
+-- in session.party past `playerHalf` (doTowerBattle appends them), and they
+-- are never the player's -- a player whose own half is all fainted is not
+-- seated on his (pret Cmd_checkteamslost's INGAME_PARTNER branch counts the
+-- player's half alone).
+block("tower multi with no stand-in counts the player's half", function()
+  local function takesWith(mine)
+    R.newGame("emerald")
+    local s = R.session()
+    for _, m in ipairs(mine) do s.party[#s.party + 1] = m end
+    s.party[#s.party + 1] = his(4, 30)
+    s.party[#s.party + 1] = his(151, 30)
+    local ctx = { kind = "trainer", game = R.game(), session = s,
+                  foe = frontierFoe({ mon(16, 5, { otId = 1 }), mon(29, 5, { otId = 1 }),
+                                      mon(5, 5, { otId = 2 }), mon(263, 5, { otId = 2 }) }),
+                  opts = startOpts("tower", { playerHalf = #mine, frontierFoeHalf = 2 }) }
+    return Multi.takes(ctx, Multi.PARTNER)
+  end
+  local ok, why = takesWith({ mon(16, 30, { moves = { 300 }, hp = 0 }), mon(29, 30, { moves = { 300 }, hp = 0 }) })
+  eq(ok, false, "no stand-in: the player's half all fainted is not seated")
+  eq(why, "no usable mon", "no stand-in: ...for having nothing of the player's to send out")
+  local _, whyOne = takesWith({ mon(16, 30, { moves = { 300 }, hp = 0 }), mon(29, 30, { moves = { 300 } }) })
+  check(whyOne ~= "no usable mon", "no stand-in: one of the player's own standing is enough to count")
+end)
+
 -- ===================================================================
 -- 7. off Emerald
 -- ===================================================================

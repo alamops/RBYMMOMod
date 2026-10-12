@@ -5544,11 +5544,14 @@ function M:onEvent(msg)
         self.passMove = nil
         -- ...and Emerald's POKeBLOCK case, if it is still up over the grid.
         if self.phase == "pokeblock" then self:closePokeblockCase3() end
+        -- ...and the Battle Palace's frames before its pick (`stepPalace3`):
+        -- the nature would otherwise choose for the turn just spent.
+        self.palaceWait3 = nil
         if self.phase == "choose" or self.phase == "move"
            or self.phase == "target" or self.phase == "mimic"
            or self.phase == "item" or self.phase == "item_party"
            or self.phase == "item_move" or self.phase == "switch"
-           or self.phase == "ask" then
+           or self.phase == "ask" or self.phase == "palace" then
           self.phase = "play"
           -- A question still up (the forfeit yes / no) is about a turn the
           -- referee has already answered: it goes, unanswered.
@@ -9695,11 +9698,14 @@ end
 
 -- Gen 3's debit: the event names the item as its number in a string, and the
 -- spend comes out of the session's own pocket (Bag.remove).  With a bag of the
--- fight's own (screen option `bag`) the spend is that bag's: its sheet loses
--- the item whatever the session's pockets say, and the engine's Bag.remove is
--- still asked -- in the Battle Pyramid it is the Pyramid bag the engine
--- removes from (pret item.c RemoveBagItem's InBattlePyramid arm), and the
--- Facility kind squares that bag with the referee's count at the end.
+-- fight's own (screen option `bag`) the spend is that bag's sheet alone: the
+-- engine's Bag.remove is deliberately not asked, whatever the session's
+-- pockets hold.  The tutorials' bags are the cart's borrowed ones, put back
+-- untouched; in the Battle Pyramid the Pyramid bag (pret item.c
+-- RemoveBagItem's InBattlePyramid arm) is debited exactly once, after the
+-- fight, by the Facility kind squaring it with the referee's count
+-- (src/Solo3/Facility.lua `pyramidWriteback3`) -- a debit here as well would
+-- take every use twice.
 function M:confirmPendingItem3(itemId)
   local id = self.pendingItem
   if itemId ~= nil and tostring(itemId) ~= tostring(id) then return false end
@@ -15287,8 +15293,9 @@ end
 -- No input, no queue, no walk moves after the trigger.
 --
 -- `quit` answers true when it took the screen down (Solo3/Tutorial M.quit3 ->
--- SoloBattle M:quit3).  One that throws, or answers false with the screen
--- still up (no fight to end, the stand already gone), would leave it black
+-- SoloBattle M:quit3).  One that throws, or leaves the screen up whatever it
+-- answers (no fight to end, the stand already gone, a pop that threw inside
+-- its own pcall and still said true), would leave it black
 -- and deaf for good: a tutorial takes no buttons (`update`), the walk was
 -- dropped at the trigger, and the stand that drives his turns has stopped
 -- (Tutorial M.quit3 marks it quit before it asks).  So the screen ends the
@@ -15313,12 +15320,23 @@ function M:stepQuit3(input)
     if not q.called and (self.frame or 0) - q.at >= q.spec.quit then
       q.called = true
       local ok, res = pcall(self.tutorial.quit, q.how)
-      if not (ok and res) and not self.left then
+      -- Judged by the screen, not by the answer: `exit` (run by the pop on
+      -- its way out) is what sets `left`, so a quit that took the screen
+      -- down is never abandoned twice.  A true with the screen still up --
+      -- the pop threw inside the quit's own pcall -- is as stuck as a false.
+      if not self.left then
+        local why
+        if not ok then
+          why = tostring(res)
+        elseif res then
+          why = "the quit answered but the battle stayed on screen"
+        else
+          why = "nothing took the battle down"
+        end
         mod.log:warn("leaving the POKé DUDE's demonstration failed (%s), so it was ended "
           .. "as a draw instead; press A if the battle is still on screen, reload from your "
           .. "last save if your own party is not back afterwards, and report this with the "
-          .. "TEACHY TV program you watched",
-          ok and "nothing took the battle down" or tostring(res))
+          .. "TEACHY TV program you watched", why)
         self:abandonQuit3()
         -- Off the screen already, or over and taking A (`update`'s "over").
         return self.left == true
@@ -15786,7 +15804,16 @@ function M:fileAutoplay3(st)
     sent = self:sendChoice(choice)
     if not sent then
       self.pendingItem, self.pendingItemSlot = nil, nil
-      self.phase = "choose"
+      -- Back to the menu the turn was asked from: a forced replacement (an
+      -- empty seat, `mustReplace` / `replaceOnly`) is the party picker
+      -- again, never the action menu -- FIGHT from a seat with nobody on it
+      -- has nothing to file.
+      if self.replaceOnly or self.mustReplace then
+        self.replaceOnly = true
+        self.phase = "switch"
+      else
+        self.phase = "choose"
+      end
       if not self.autoplayWarned3 then
         self.autoplayWarned3 = true
         mod.log:warn("a tutorial turn was not taken by the referee (%s); the fight waits for "
@@ -15892,6 +15919,15 @@ end
 M.PALACE_PICK_FRAMES3 = 8
 
 function M:stepPalace3()
+  -- A turn already spent (a `chose` the referee sent in the wait -- a forced
+  -- skip, a recharge) or a fight already over: no pick, and no action menu
+  -- reopened over it.  The `chose` arm closes this phase itself; this is the
+  -- second lock, for an answer that came by any other way.
+  if self.answeredTurn or self.finished then
+    self.palaceWait3 = nil
+    if self.phase == "palace" then self.phase = "play" end
+    return
+  end
   self.palaceWait3 = (tonumber(self.palaceWait3) or 1) - 1
   if self.palaceWait3 > 0 then return end
   self.palaceWait3 = nil

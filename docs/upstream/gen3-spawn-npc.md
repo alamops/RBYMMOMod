@@ -434,6 +434,16 @@ map's NPCs. This closed known gap §4 (`docs/plans/gen3-known-gaps.md`), at
 the cost of depending on `Ghosts._pools`, `Ghosts.sync`'s rebuild and
 `Objects.spawnFromDefs` staying as they are.
 
+Since `dev` @ `fcc8b5d1` an empty slot no longer means an empty map:
+`Ghosts.sync` leaves a neighbour outside the visible rect unbuilt while
+`prepareOffscreen` waits on the worker (`ghosts.lua:124`, `:147`), and it and
+`Ghosts.blocksOn` only build into an empty slot. A pool the mod made there
+hid that map's NPCs until the next map change. So the mod now also mirrors
+the private `defsFor` (`ghosts.lua:29`, `Avatars` `neighbourDefs3`). It makes
+a pool only for a map with no templates, waits a tick for the engine's pool
+otherwise, and drops a made pool when its last avatar leaves (`dropPool3`).
+That is one more private rule to track. The seam above removes it.
+
 ### Proposed seam: a runtime object belongs to its map
 
 This extends `spawnNpc` above; it adds no new call.

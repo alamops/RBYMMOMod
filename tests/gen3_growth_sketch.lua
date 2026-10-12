@@ -97,6 +97,37 @@ for _, mode in ipairs({ 'coop_npc', '1v1' }) do
   eq(saved.ppBonusesPacked, mode == '1v1' and 7 or 4, mode .. ': Sketch clears only its PP Up bits')
   if mode ~= '1v1' then eq(saved.pp[1], learned.moves[1].pp, 'Sketch PP is saved') end
 end
+-- A save that keeps all four slots (0 for empty, as Gen3Save.fromPortMon
+-- writes them) still takes Sketch home: row j is the j-th known move.
+do
+  local saved = { species = 235, moves = { 166, 0, 0, 0 }, pp = { 1, 0, 0, 0 },
+    maxPp = { 1, 0, 0, 0 }, ppBonusesPacked = 7 }
+  local screen = Med.new({ battle = 'regression', game = { generation = 3 }, mode = 'coop_npc' })
+  screen.mine, screen.active = { mon(sketch) }, 1
+  screen.saveMon = function() return saved end
+  learned.seq = 1
+  screen:onEvent(learned)
+  eq(screen.mine[1].moves[1].num, 33, 'padded save: FIGHT shows the sketched move')
+  eq(saved.moves[1], 33, 'padded save: Sketch is written home')
+  eq(saved.moves[2], 0, 'padded save: the empty slots stay empty')
+  eq(saved.ppBonusesPacked, 4, 'padded save: only slot 1 loses its PP Up bits')
+  -- The empty slot first: the known move sits in save slot 2.
+  local gap = { moves = { 0, 166, 0, 0 }, pp = { 0, 1, 0, 0 }, maxPp = { 0, 1, 0, 0 },
+    ppBonusesPacked = 2 + 3 * 4 }
+  eq(Sheet.sketchHome(gap, { sketch }, learned.moves) ~= nil, true, 'gap save: Sketch is taken')
+  eq(gap.moves[2], 33, 'gap save: written onto the slot that held SKETCH')
+  eq(gap.moves[1], 0, 'gap save: the empty slot is untouched')
+  eq(gap.ppBonusesPacked, 2, "gap save: slot 2's PP Up bits clear, slot 1's survive")
+  -- Row-shaped save slots keep their shape.
+  local rows = { moves = { { id = 166, pp = 1, maxPp = 1 } } }
+  eq(Sheet.sketchHome(rows, { sketch }, learned.moves) ~= nil, true, 'row save: Sketch is taken')
+  eq(type(rows.moves[1]), 'table', 'row save: the slot stays a row')
+  eq(rows.moves[1].id, 33, 'row save: its id is the sketched move')
+  -- A save whose known moves disagree with the referee's rows is refused.
+  local other = { moves = { 166, 33, 0, 0 } }
+  eq(Sheet.sketchHome(other, { sketch }, learned.moves), nil, 'mismatched save: nothing written')
+  eq(other.moves[1], 166, 'mismatched save: untouched')
+end
 -- A double event can name the second seat and a non-leading save slot.
 for _, mode in ipairs({ 'coop_npc', 'coop_pvp' }) do
   local saved = { species = 235, moves = { 166 }, pp = { 1 }, maxPp = { 1 } }

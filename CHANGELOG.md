@@ -417,7 +417,8 @@ here must match `manifest.version`.
 
 - **Classic party-ball rendering** uses the engine-owned sheet and palette,
   clips empty slots to the actual party size, and passes the ROM-cache path
-  lint gate.
+  lint gate. Under a GBC colour palette the engine's own redraw of the row no
+  longer brings the empty slots back over the foe's picture.
 
 - **Gen 3 mid-battle growth reaches the referee.** Single and double battles
   now send the new level, combat stats and HP maximum, including levels that
@@ -426,7 +427,31 @@ here must match `manifest.version`.
   growth.
 - **Gen 3 SKETCH updates the move menu and the party.** The copied move and
   PP persist after NPC battles; link battles update the menu while preserving
-  the saved party.
+  the saved party. A save that keeps empty move slots (a Smeargle knowing
+  SKETCH alone) takes the copied move too.
+- **Neighbouring maps keep their people.** A player standing on a connected
+  map the engine had not finished preparing left that map without its
+  trainers and townsfolk — not drawn, not blocking — until you changed maps.
+  The mod now waits for the engine's own preparation and drops a holder it
+  made once nobody is standing there.
+- **Gen 3 fights that lose their screen give back what they borrowed at
+  once.** A POKé DUDE quit whose screen stayed up now ends as a draw instead
+  of a black, input-less screen; a fight screen that leaves the stack hands
+  the battle back to the game and returns any borrowed party or bag on the
+  next frame rather than at the next save; and the game's own TEACHY TV
+  (SOLO BATTLES off) settles a leftover borrow before it backs up your bag.
+  The bag and START menus are closed again behind a demonstration.
+- **A knockout draw is only promoted to a win on the save it started on**,
+  so loading another save mid-fight cannot pay a prize into it.
+- **Battle Palace and POKé DUDE turns.** A turn the referee answered during
+  the Palace's short wait no longer files a second pick, and a refused
+  POKé DUDE replacement keeps the replacement picker open.
+- **Steven's multi battle** checks your own half of the party for a monster
+  that can fight, not his.
+- **Cross-region trades on builds without the engine's link check.** A
+  FireRed / LeafGreen save without the National Dex is refused before any
+  pick, as the carts refuse it, and a Ruby / Sapphire partner the engine
+  clears is no longer turned away by the fallback.
 - **Crystal names its cart to the hub.** Gen 2 hellos now carry the version,
   so fights against the computer use Crystal's damage rules when appropriate.
 - **Badges no longer boost fights between players on Red or Gold.** A

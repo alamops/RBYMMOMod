@@ -793,6 +793,26 @@ do
   fight:commitItem(nil, nil)
   fight:onEvent({ battle = "bag1", seq = 2, t = "item", slot = 0, side = "a", text = "350" })
   eq(FakeBag.get(SESSION.bag, 350), 1, "the POKe FLUTE is not spent")
+  -- A bag of the fight's own (screen option `bag`: a tutorial's, the Battle
+  -- Pyramid's): the spend is its sheet's alone and the engine's Bag.remove is
+  -- never asked -- the Pyramid bag is debited once, after the fight, by
+  -- Facility `pyramidWriteback3`, and a second debit here would take every
+  -- use twice.
+  do
+    local own = Mediated.new({ game = GAME, battle = "bag2", mode = "wild",
+                               bag = { { id = 13, count = 2, name = "POTION" } } })
+    own.bagSheet = Mediated.bagCounts(own.bagEntries)
+    local asked = 0
+    local savedRemove = FakeBag.remove
+    FakeBag.remove = function(...) asked = asked + 1; return savedRemove(...) end
+    own.pendingItem = 13
+    local took = own:confirmPendingItem3("13")
+    FakeBag.remove = savedRemove
+    eq(took, true, "own bag: the `item` event is taken")
+    eq(asked, 0, "own bag: ...Gen3.bag.remove is never asked")
+    eq(FakeBag.get(SESSION.bag, 13), 2, "own bag: ...the session's pocket untouched")
+    eq(own.bagSheet[13], 1, "own bag: ...the fight's own sheet loses the one")
+  end
 end
 
 -- ------------------------------------------------------------------
@@ -4246,6 +4266,34 @@ do
       eq(dropped, false, "answered: the walk is dropped, onFiled(false)")
       eq(#sents, 0, "answered: ...nothing filed")
     end
+    -- A refused replacement (`fileAutoplay3`): the seat is still empty, so it
+    -- is the party picker again -- never the action menu, whose FIGHT has
+    -- nobody on the seat to fight with.
+    do
+      newGame()
+      SESSION.party = { monOf(4, 20), monOf(5, 22) }
+      local wild = assert(Sheet3.mon(SESSION, monOf(16, 5), 0, { wild = true }))
+      local f, ev, sent, drain = screen3("wild", { tutorial = { kind = "pokedude" }, bag = TUT_BAG },
+        { wildParty = { wild }, refuse = true })
+      ev({ t = "send", slot = 0, side = "a", text = "CHARMANDER", speciesId = "4", hp = 40, maxHp = 40, mon = 0 })
+      ev({ t = "send", slot = 3, side = "b", text = "PIDGEY", speciesId = "16", hp = 20, maxHp = 20 })
+      ev({ t = "turn" })
+      drain()
+      ev({ t = "faint", slot = 0, side = "a", text = "CHARMANDER", amount = 1 })
+      ev({ t = "turn", slot = 0 })
+      drain()
+      eq(f.phase, "switch", "refused replacement: the replacement picker")
+      local got = "unset"
+      local warned = #warns
+      f:autoplay3({ action = "switch", slot = 1 }, function(ok) got = ok end, { instant = true })
+      frames(f, 1)
+      eq(#sent, 1, "refused replacement: the switch was offered")
+      eq(got, false, "refused replacement: onFiled(false)")
+      eq(f.phase, "switch", "refused replacement: the party picker back, not the action menu")
+      eq(f.replaceOnly, true, "refused replacement: ...still a replacement only")
+      eq(#warns, warned + 1, "refused replacement: said once")
+      warns[#warns] = nil
+    end
 
     -- q5. the POKé DUDE on the arena: no overworld graphic of his on the
     --     cart, so his back pic's first frame stands on our edge; a fainted
@@ -4373,6 +4421,26 @@ do
       eq(f.phase, "play", tag .. "a pick that went spends the turn")
       eq(f.answeredTurn, true, tag .. "...answered")
       eq(#sent, 0, tag .. "...the screen filed nothing itself (the kind files the pick)")
+      -- The referee spends the turn inside the 8 frames (a forced skip, a
+      -- recharge): the wait is over, and the nature picks for nothing.
+      ev({ t = "turn" })
+      drain()
+      eq(f.phase, "choose", tag .. "a new turn: the menu again")
+      f:runCommand("FIGHT")
+      frames(f, 3)
+      eq(f.phase, "palace", tag .. "...FIGHT, the wait running")
+      local before = picks
+      ev({ t = "chose", slot = 0, side = "a", text = "ANN" })
+      eq(f.phase, "play", tag .. "a `chose` in the wait closes it")
+      eq(f.palaceWait3, nil, tag .. "...the count dropped")
+      frames(f, 10)
+      eq(picks, before, tag .. "...and no pick is filed for the spent turn")
+      eq(f.phase, "play", tag .. "...nor the menu reopened over it")
+      -- The second lock: a turn answered by any other way, the phase still up.
+      f.phase, f.palaceWait3, f.answeredTurn = "palace", 2, true
+      f:stepPalace3()
+      eq(picks, before, tag .. "stepPalace3 on an answered turn: no pick")
+      eq(f.phase, "play", tag .. "...the phase back to play")
       -- RUN still forfeits.
       ev({ t = "turn" })
       drain()
@@ -4909,10 +4977,18 @@ do
       SESSION.party = { monOf(4, 20), monOf(5, 22) }
       local wild = assert(Sheet3.mon(SESSION, monOf(16, 5), 0, { wild = true }))
       local quits = {}
-      -- The stand's answer when it took the screen down (Tutorial M.quit3).
-      local tut = { kind = "pokedude", quit = function(how) quits[#quits + 1] = how; return true end }
+      local f
+      -- The stand's answer when it took the screen down (Tutorial M.quit3):
+      -- the pop ran the screen's `exit` on its way, which is what marks it
+      -- left -- `stepQuit3` judges the quit by that, not by the true.
+      local tut = { kind = "pokedude", quit = function(how)
+        quits[#quits + 1] = how
+        if f then f:exit() end
+        return true
+      end }
       for k, v in pairs(extraTut or {}) do tut[k] = v end
-      local f, ev, sent, drain = screen3("wild", { tutorial = tut, bag = TUT_BAG },
+      local ev, sent, drain
+      f, ev, sent, drain = screen3("wild", { tutorial = tut, bag = TUT_BAG },
         { wildParty = { wild }, classicUi = classic ~= false })
       ev({ t = "send", slot = 0, side = "a", text = "CHARMANDER", speciesId = "4", hp = 40, maxHp = 40, mon = 0 })
       ev({ t = "send", slot = 3, side = "b", text = "PIDGEY", speciesId = "16", hp = 20, maxHp = 20 })
@@ -4940,6 +5016,7 @@ do
       frames(f, 30)
       held(f, { "b" }, true)
       eq(#quits, 1, "C-Q: ...exactly once")
+      eq(f.quitFailed3, nil, "C-Q: a quit that took the screen down is not abandoned as well")
       eq(#sent, 0, "C-Q: nothing was filed")
       check(classicDraw(f:gen3ClassicModel()) == true, "C-Q: the page still draws")
       drawnCalls = {}
@@ -5005,11 +5082,14 @@ do
       eq(d.quit3, nil, "C-Q: no quit handed, no quit")
     end
     -- A quit that fails -- throws, or answers false with the screen still up
-    -- (Tutorial M.quit3 with no stand to end) -- must not leave the screen
-    -- black and deaf: the fight ends as a draw through the ordinary way out.
+    -- (Tutorial M.quit3 with no stand to end), or answers true with the
+    -- screen still up (SoloBattle M:quit3 whose Gen3Ui.pop threw inside its
+    -- own pcall) -- must not leave the screen black and deaf: the fight ends
+    -- as a draw through the ordinary way out.
     for _, case in ipairs({
       { tag = "C-Q throws: ", quit = function() error("stand gone") end },
       { tag = "C-Q false: ", quit = function() return false end },
+      { tag = "C-Q true, screen up: ", quit = function() return true end },
     }) do
       local tag = case.tag
       local calls = 0

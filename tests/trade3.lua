@@ -730,6 +730,77 @@ do
   Family.localLinkPlayer, Family.canLinkNationally = originalLLP, originalCan
 end
 
+-- An unknown unlock is inferred only beside the National Dex.  Across
+-- regions nothing on the receiving side re-checks the mon (theirRefusal
+-- replays the sender's rule for this region only, and the Emerald sender
+-- tests a dex-less FireRed against the Hoenn dex), so a linkUnknown FireRed
+-- without the National Dex taken as unlocked would be handed a Hoenn-only
+-- TREECKO or an egg it cannot hold.  It is refused at the party instead.
+do
+  local originalLLP, originalCan = Family.localLinkPlayer, Family.canLinkNationally
+  Family.localLinkPlayer = nil
+  Family.canLinkNationally = function() error("unavailable") end
+  local offers = {
+    { name = "a Hoenn-only TREECKO", mon = mon(277, 10) },
+    { name = "an egg", mon = mon(25, 5, { isEgg = true }) },
+  }
+  for _, offer in ipairs(offers) do
+    local function exchange(national)
+      local s = newSession({ national = national, party = { mon(16, 5), mon(19, 4) } })
+      local peer = newSession({ version = "emerald", national = true, linkRegions = true,
+        party = { offer.mon, mon(19, 4) } })
+      local fr = Trade3.TradeSession.new({ generation = 3, session = s, data = {} }, {})
+      local em = Trade3.TradeSession.new({ generation = 3, session = peer, data = {} }, {})
+      eq(fr.me.linkUnknown, true, offer.name .. ": FireRed's unlock is unknown")
+      fr:handle(Json.decode(Json.encode(em:partyMessage())))
+      em:handle(Json.decode(Json.encode(fr:partyMessage())))
+      return fr, em
+    end
+
+    local fr, em = exchange(false)
+    eq(fr.stage, "cancelled",
+      offer.name .. ": a linkUnknown FireRed without the National Dex refuses Emerald's party")
+    eq(fr.error, "You can't trade\nwith that game yet.", offer.name .. ": as its own lock")
+    eq(em.stage, "cancelled", offer.name .. ": and Emerald refuses that FireRed too")
+    eq(em.error, "The other game\ncan't trade with\nyou yet.", offer.name .. ": as the other side's")
+
+    -- With the National Dex the inferred unlock stands and the mon may come.
+    local frN, emN = exchange(true)
+    eq(frN.stage, "picking", offer.name .. ": with the National Dex the parties are exchanged")
+    eq(emN.stage, "picking", offer.name .. ": on both sides")
+    frN:handle({ type = "pick", index = 1 })
+    eq(frN:theirRefusal(), nil, offer.name .. ": and FireRed takes it")
+  end
+  Family.localLinkPlayer, Family.canLinkNationally = originalLLP, originalCan
+end
+
+-- FireRed / LeafGreen meeting Ruby / Sapphire need only their own unlock
+-- (pokefirered trade.c:2820): R/S never set the high nibble, so the engine's
+-- yes stands.  R/S are launcher carts a Gen 3 hub seats, and their cable
+-- code passes sanitizeInfo.  Without a verdict, both nibbles are enforced.
+do
+  for _, rs in ipairs({ "ruby", "sapphire" }) do
+    local info = Trade3.sanitizeInfo(Json.decode(Json.encode(
+      Trade3.localInfo(newSession({ version = rs, national = true }), rs))))
+    check(info ~= nil and (info.version == 1 or info.version == 2),
+      rs .. ": the cart's own cable code passes sanitizeInfo")
+    eq(math.floor(info.progressFlags / 16) % 16, 0, rs .. ": with no cross-region unlock")
+    local unlocked = Trade3.TradeSession.new({
+      session = newSession({ national = true, linkRegions = true }) })
+    unlocked.theirInfo = info
+    eq(unlocked:versionGate(), nil, "an unlocked FireRed may trade with " .. rs)
+    local locked = Trade3.TradeSession.new({ session = newSession({ national = true }) })
+    locked.theirInfo = info
+    eq(locked:versionGate(), "You can't trade\nwith that game yet.",
+      "a locked FireRed may not trade with " .. rs)
+    local original = Family.gameProgressForLinkTrade
+    Family.gameProgressForLinkTrade = nil
+    eq(unlocked:versionGate(), "The other game\ncan't trade with\nyou yet.",
+      "missing helper: " .. rs .. "'s high nibble is still required")
+    Family.gameProgressForLinkTrade = original
+  end
+end
+
 do
   -- Before FireRed may link with the other region: both sides refuse.
   local sa = newSession({ name = "ANN", national = true, party = { mon(16, 5), mon(19, 4) } })

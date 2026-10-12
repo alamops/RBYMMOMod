@@ -2630,6 +2630,17 @@ local function teachyFallback3(inner, session, scriptId, opts, introPlayed)
   return ok and err
 end
 
+-- The ledger (src/Borrow3.lua) settled before the session's bag or party
+-- is backed up again -- by the divert's borrows or by the cart's own start:
+-- what a dead demonstration left swapped in goes back first (see below).
+local function settleBorrows3(session)
+  if type(session) ~= "table" then return end
+  local ok, restored = pcall(Borrow3.settle, session)
+  if ok and type(restored) == "number" and restored > 0 then
+    mod.log:info("gave back %d item(s) an unfinished battle had borrowed", restored)
+  end
+end
+
 -- What the engine's own start does before its battle (battle/pokedude.lua
 -- startTeachyTvBattle; pret teachy_tv.c:1172 TeachyTvPrepBattle): the battle
 -- music (PlayMapChosenOrBattleBGM -- a wild battle's, MUS_VS_WILD, as the
@@ -2669,13 +2680,7 @@ local function divertPokedude(inner, session, scriptId, opts)
   if not stand then return false end
   stand.holdsFn3 = type(handler.holds) == "function" and handler.holds or nil
   local function begin()
-    local live = Gen3.session()
-    if live then
-      local ok, restored = pcall(Borrow3.settle, live)
-      if ok and type(restored) == "number" and restored > 0 then
-        mod.log:info("gave back %d item(s) an unfinished battle had borrowed", restored)
-      end
-    end
+    settleBorrows3(Gen3.session())
     stand:coverTeachy3()
     -- Both borrows, or neither fight: a demonstration that kept the player's
     -- bag or party would play the POKe DUDE's script against the wrong one.
@@ -2731,6 +2736,18 @@ function M.installPokedude3(handler)
             .. "on the game's own battle screen -- turn SOLO BATTLES off in the mod "
             .. "manager (F10) if it keeps happening", tostring(taken))
         end
+        -- The cart's start backs the bag up over whatever backup is there
+        -- (TeachyTv.backUpPlayerBag), so a dead demonstration's swap still in
+        -- the session would be backed up as the player's and the player's
+        -- own lost at the next save: settled first, on every way the divert
+        -- declines (SOLO BATTLES off, a battle running, headless, a
+        -- hand-back).  Only the dead go back (Stand:fightLive3), and no
+        -- hand-back of ours comes through here -- Stand:fightAlone and
+        -- teachyFallback3 give back first and call `inner` itself.  Not for
+        -- a stale instance (the straight call below): its ledger reads this
+        -- load's records as an old load's and would give back a fight still
+        -- running.
+        settleBorrows3(type(session) == "table" and session or Gen3.session())
       end
       return inner(session, scriptId, opts)
     end

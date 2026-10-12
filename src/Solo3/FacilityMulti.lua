@@ -386,7 +386,24 @@ function Hooks.takes(ctx, shape)
   -- pret battle_pike.c:1052: the Pike offers its double room only while two
   -- of the player's monsters can fight (AtLeastTwoAliveMons); a multi's
   -- player brings their own two.
-  local mine = Solo.gen3UsableMons(session and session.party)
+  --
+  -- The player's own, and only those.  A multi with no stand-in still has the
+  -- partner's monsters in session.party past `playerHalf` (doTowerBattle
+  -- appends them; Doubles.partnerMons reads them there and leaves them in
+  -- place), so the whole list would count his as the player's -- and a
+  -- player whose own half is all fainted would be seated on monsters that
+  -- are not theirs (pret Cmd_checkteamslost's INGAME_PARTNER branch counts
+  -- the player's half alone).  A stand-in lifted his out already
+  -- (Stand:detachPartner3); its own `playerHalf` is read for that case.
+  local party = session and session.party
+  local half = two == M.PARTNER and (int(ctx.opts and ctx.opts.playerHalf, nil)
+    or int(type(ctx.stand) == "table" and ctx.stand.playerHalf or nil, nil)) or nil
+  if half and type(party) == "table" then
+    local own = {}
+    for i = 1, math.min(half, #party) do own[i] = party[i] end
+    party = own
+  end
+  local mine = Solo.gen3UsableMons(party)
   if two == M.TWO_OPPONENTS and mine < 2 then return false, "need two mons" end
   if mine < 1 then return false, "no usable mon" end
   local partyA, partyB = halves(ctx)

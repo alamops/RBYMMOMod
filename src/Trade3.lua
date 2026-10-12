@@ -454,9 +454,10 @@ function M.localInfo(session, version)
   -- PROGRESS_NATIONAL 0x01, PROGRESS_LINK_NATIONALLY 0x10), so an unlocked
   -- save still meets the other region.  When the unlock cannot be read at
   -- all, the info says so (`linkUnknown`, and it rides the wire): versionGate
-  -- then does not refuse that side for a nibble nobody could compute -- the
-  -- trade-off is that a locked save on a build this broken trades across
-  -- regions early, rather than every unlocked one being turned away.
+  -- then does not refuse that side for a nibble nobody could compute, as long
+  -- as it has the National Dex (gateFlags) -- the trade-off is that a locked
+  -- save with the National Dex on a build this broken trades across regions
+  -- early, rather than every unlocked one being turned away.
   local view = liveView(session)
   local national = Family and try(Family.nationalDex, view, version) == true
   local link = Family and try(Family.canLinkNationally, view, version)
@@ -699,10 +700,16 @@ end
 -- partner from the other region only.  Nil when the pair may trade.
 -- The progress flags the gate reads for one side: as sent, except that a
 -- side whose cross-region unlock could not be read (localInfo's last resort,
--- `linkUnknown`) is taken as unlocked -- see localInfo for the trade-off.
+-- `linkUnknown`) is taken as unlocked -- see localInfo for the trade-off --
+-- and only when its own National Dex nibble is set.  The carts read the
+-- high nibble as a save already past the National Dex: across regions the
+-- sender's CanTradeSelectedMon tests a dex-less partner against the
+-- *sender's* regional dex (an Emerald lets a Hoenn mon through to FireRed)
+-- and theirRefusal does not replay it, so an unlock claimed for a save
+-- without the National Dex would let it take a Hoenn-only mon or an egg.
 local function gateFlags(info)
   local flags = (tonumber(info.progressFlags) or 0) % 256
-  if info.linkUnknown and math.floor(flags / 16) % 16 == 0 then
+  if info.linkUnknown and math.floor(flags / 16) % 16 == 0 and flags % 16 ~= 0 then
     flags = flags + PROGRESS_LINK_NATIONALLY
   end
   return flags
@@ -720,9 +727,14 @@ function TradeSession:versionGate()
   local T = Family and type(Family.TRADE) == "table" and Family.TRADE or {}
   if code ~= nil and code == T.PLAYER_NOT_READY then return NOT_READY_MINE end
   if code ~= nil and code == T.PARTNER_NOT_READY then return NOT_READY_THEIRS end
-  -- The LinkPlayer high nibble is the cart's cross-region unlock, not
-  -- its National Dex low nibble. Keep enforcing both saves' flags even
-  -- when an older engine omits the helper or it cannot answer.
+  -- The engine's yes stands: FireRed / LeafGreen meeting Ruby / Sapphire
+  -- ask only their own unlock (trade.c:2820 -- Ruby / Sapphire never set the
+  -- high nibble), and those two are launcher carts a Gen 3 hub seats (their
+  -- hello cart reads as nil in Wire.version, it is not refused) whose cable
+  -- code sanitizeInfo accepts.  Only without a verdict -- an older engine
+  -- omits the helper, or it cannot answer -- are both saves' high nibbles
+  -- (the cross-region unlock, not the National Dex low nibble) enforced here.
+  if code ~= nil and code == T.BOTH_PLAYERS_READY then return nil end
   if math.floor(mine / 16) % 16 == 0 then
     return NOT_READY_MINE
   end
@@ -846,9 +858,10 @@ end
 -- *sender's* rule replayed with this save as the partner -- a FireRed with
 -- no National Dex is offered no Johto / Hoenn mon and no egg, whatever the
 -- far side's build thought.  A partner from the other region is already
--- covered by versionGate (neither side can reach this point before both are
--- past the flags that imply the National Dex), and its regional dex is not a
--- table this cart can read.
+-- covered by versionGate (this save cannot reach this point before it is past
+-- the flag that implies the National Dex -- gateFlags infers that flag for an
+-- unreadable unlock only alongside the National Dex), and its regional dex is
+-- not a table this cart can read.
 function TradeSession:theirRefusal()
   local mon = self.theirParty and self.theirParty[self.theirPick or 0]
   if type(mon) ~= "table" then return nil end

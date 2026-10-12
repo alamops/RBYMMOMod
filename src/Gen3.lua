@@ -47,7 +47,7 @@
 --
 --   active()                        is this a Gen 3 boot at all
 --   engine(moduleName)              the guarded lazy require every arm shares
---   loaded(moduleName)              the same gate, package.loaded only (never requires)
+--   loaded(moduleName)              the same gate, package.loaded only (sandboxed: engine())
 --   session() version() family()    live session; "firered"|"leafgreen"|"emerald"; "frlg"|"rse"
 --   player()                        { name, gender (0/1), trainerId, secretId }
 --   position()                      { mapId, x, y, facing, moving }
@@ -140,10 +140,19 @@ M.engine = engine
 -- game3 families (src.core.game3.* / src.ui.game3.* ...), so a caller can
 -- never use it to reach a Gen 1 / Gen 2 module round the loader's
 -- cross-generation denial.
+--
+-- Inside the loader's sandbox `package` is LegacyCompat's shim, whose
+-- `loaded` is an empty table of its own (the real one always holds
+-- "string"), so it can answer nothing.  There the ask falls back to
+-- `engine`'s require, which hands back the engine's cached module: the one
+-- caller (CoopField coverTeachy3) asks for the bag and START menus while the
+-- TEACHY TV is running out of the bag, so both are always already up.
 local function loaded(name)
   if not M.active() then return nil end
   if type(name) ~= "string" or not name:find("^src%.[%w_]+%.game3%.") then return nil end
-  local value = package.loaded[name]
+  local list = type(package) == "table" and package.loaded or nil
+  if type(list) ~= "table" or rawget(list, "string") == nil then return engine(name) end
+  local value = list[name]
   if type(value) == "table" then return value end
   return nil
 end

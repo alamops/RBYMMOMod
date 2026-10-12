@@ -413,6 +413,30 @@ M.FOE_BALL_ROW = 8
 
 -- Let the engine own its imported ball sheet and palette. Its helper draws
 -- six slots, so clip to real party members to keep empty tiles off the foe pic.
+--
+-- The clip covers the draw only. Under a sprite-OBP palette (GBC colour
+-- modes, Yellow) the helper also files each of the six tiles with
+-- PaletteFX.markUiSpriteRedraw, and the Renderer replays that list after the
+-- frame composites under its own scissor -- the empty tiles would come back
+-- over the foe pic. The tiles the helper filed past the real party are taken
+-- back off the list.
+-- (require, not package.loaded: the loader's sandbox hands a mod an empty
+-- package.loaded of its own, while require returns the engine's module --
+-- Battlefield reaches PaletteFX the same way.)
+local function ballRedraws()
+  local ok, PaletteFX = pcall(require, "src.render.PaletteFX")
+  if not (ok and type(PaletteFX) == "table"
+      and type(PaletteFX.uiSpriteRedraws) == "function") then return nil end
+  local okList, list = pcall(PaletteFX.uiSpriteRedraws)
+  return okList and type(list) == "table" and list or nil
+end
+
+local function trimBallRedraws(before, kept)
+  local list = ballRedraws()
+  if not (list and before) then return end
+  for i = #list, before + kept + 1, -1 do table.remove(list, i) end
+end
+
 function M.drawBallRow(BattleState, party, x, y, dx)
   if type(party) ~= "table" or #party == 0 then return false end
   local g = love and love.graphics
@@ -430,7 +454,10 @@ function M.drawBallRow(BattleState, party, x, y, dx)
       math.max(0, math.min(sy + sh, cy + ch) - top))
   end
   g.setColor(1, 1, 1, 1)
+  local redraws = ballRedraws()
+  local before = redraws and #redraws or nil
   local ok = pcall(BattleState.drawBallRow, BattleState, party, x, y, dx)
+  pcall(trimBallRedraws, before, math.min(#party, 6))
   if sx then g.setScissor(sx, sy, sw, sh) else g.setScissor() end
   return ok
 end

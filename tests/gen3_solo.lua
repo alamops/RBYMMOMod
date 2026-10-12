@@ -1972,6 +1972,61 @@ local function toMenu(solo)
   return f
 end
 
+-- (g2) The screen goes off the stack without its ending (the stack cleared
+--      under it -- no `exit`, no `onDone`).  The next frame of the core sees
+--      it: the referee stops, what the fight borrowed goes back at once
+--      rather than at the next save, and the cart's own battle is started in
+--      its place with the caller's `done`.  Over a save loaded under it, the
+--      fight is only dropped.
+do
+  local Borrow3 = need("Borrow3")
+  newGame()
+  SESSION.party = { monOf(4, 30) }
+  local solo = newSolo()
+  local result
+  check(solo:fromGen3Encounter(GAME, { species = 16, level = 5 }, { done = function(r) result = r end }),
+        "lost: taken")
+  local fight, sim = solo.fight, solo.sim
+  -- A borrow on the save ledger, alive while the core holds this fight (the
+  -- shape src/Solo3/Tutorial.lua's bag borrow has).
+  local gaveBack = 0
+  Borrow3.hold(SESSION, "test.lost", function() gaveBack = gaveBack + 1 end,
+    function() return solo.fight == fight and Gen3Ui.has(fight) end)
+  local turn = sim.turn
+  local mark = #warns
+  Stack.clear()
+  eq(Gen3Ui.has(fight), false, "lost: the screen is gone, its exit never run")
+  local calls = #bridgeCalls
+  solo:update(0.5, GAME)
+  eq(solo:isRunning(), false, "lost: the next frame lets the fight go")
+  eq(solo.gen3, nil, "lost: ...nothing of it is kept")
+  eq(sim.turn, turn, "lost: ...and the referee went no further")
+  eq(gaveBack, 1, "lost: the borrow is given back at once, not at the next save")
+  eq(Borrow3.held(SESSION, "test.lost"), false, "lost: ...and the ledger is clear")
+  eq(#bridgeCalls, calls + 1, "lost: the cart's own battle is started once")
+  local handed = bridgeCalls[#bridgeCalls]
+  eq(handed and handed[1], "startWild", "lost: ...the wild battle, in its place")
+  check(handed and handed[3] and type(handed[3].done) == "function", "lost: ...with the caller's done")
+  eq(result, nil, "lost: done is the engine battle's to call now")
+  check(contains(warns, "battle screen closed before the battle ended"), "lost: the log says why")
+  dropWarnsSince(mark)
+  solo:update(0.5, GAME)
+  eq(#bridgeCalls, calls + 1, "lost: a later frame starts nothing more")
+
+  -- A save loaded under it: dropped, nothing started, nothing said.
+  newGame()
+  SESSION.party = { monOf(4, 30) }
+  local dropped = newSolo()
+  check(dropped:fromGen3Encounter(GAME, { species = 16, level = 5 }, {}), "lost (reload): taken")
+  Stack.clear()
+  SESSION = newSession()
+  local markR = #warns
+  dropped:update(0.5, GAME)
+  eq(dropped:isRunning(), false, "lost (reload): the fight is let go")
+  eq(#bridgeCalls, 0, "lost (reload): nothing restarted over a different save")
+  eq(#warns, markR, "lost (reload): a load is not a fault")
+end
+
 -- (h) Gen 3's one door is `fromGen3*`.  The engine raises no `screen.pushed`
 --     on Gen 3, so the Gen 1 / Gen 2 screen divert (`onWildEncounter` /
 --     `onTrainerBattle`) declines there; src/Client.lua hands solo the
@@ -2118,6 +2173,31 @@ do
   eq(FakeVm.halted, 0, "ko draw: the waiting script continues")
   eq(SESSION.battleOutcome, FakeNatives.outcome_to_code("win"), "ko draw: the save records victory")
   check(SESSION.money > 500, "ko draw: the prize is paid")
+
+  -- The same knockout draw over a save loaded mid-fight: the sheets that
+  -- still stand are the old save's fight, and the loaded save never fought
+  -- it, so nothing is promoted -- no win, no flag, no prize paid into it.
+  newGame()
+  SESSION.party = { monOf(4, 20, { moves = { 10 }, pp = { 35 }, maxPp = { 35 } }) }
+  local koLoad = newSolo()
+  local opl = trainerOpcode()
+  FakeVm.running = true
+  check(koLoad:fromGen3Trainer(GAME, 900, { trainerId = 900, done = opl.done }), "ko draw (reload): taken")
+  local fought = koLoad.gen3
+  SESSION = newSession()
+  SESSION.party = { monOf(4, 20, { moves = { 10 }, pp = { 35 }, maxPp = { 35 } }) }
+  SESSION.money = 500
+  local markLoad = #warns
+  koLoad.sim:_finish("draw", nil, nil, "ko", "ko")
+  drive(koLoad, function(f) f:pickMove(1) end)
+  eq(fought.standingDraw, false, "ko draw (reload): the draw is not promoted")
+  eq(fought.verdict, "draw", "ko draw (reload): ...it stays a draw")
+  check(opl.answered ~= "win", "ko draw (reload): the caller is not told it won")
+  eq(opl.flag, false, "ko draw (reload): the trainer is not beaten in the loaded save")
+  eq(SESSION.money, 500, "ko draw (reload): no prize paid into the loaded save")
+  check(contains(warns, "the save changed while a battle was running"),
+        "ko draw (reload): the log says the save changed")
+  dropWarnsSince(markLoad)
 
   -- A win still answers the opcode, which sets the flag; a whiteout's loss
   -- answers it after the whiteout has halted the script.
@@ -2462,6 +2542,45 @@ do
   eq(sim.turn, turn, "quit: ...and no turn on later frames")
   eq(quitter:quit3("draw"), false, "quit: once")
   eq(table.concat(heard, ","), "draw", "quit: done heard once")
+
+  -- quit3 whose pop fails: the screen stays up, so the asker hears false
+  -- (MediatedBattle:stepQuit3 then ends it through its own way out); the
+  -- referee is dropped all the same, and the outcome code and `done` wait on
+  -- the screen's `onDone`, so they run once, when the screen really goes.
+  newGame()
+  SESSION.party = { monOf(4, 20, { moves = { 10 }, pp = { 35 }, maxPp = { 35 } }) }
+  heard = {}
+  local stuck = newSolo()
+  check(stuck:fromGen3Encounter(GAME, { species = 16, level = 2 },
+    { pokedude = true, wild = true, done = function(w) heard[#heard + 1] = w end }), "quit (stuck): taken")
+  local stuckSim, stuckFight = stuck.sim, stuck.fight
+  for _ = 1, 40 do
+    stuck:update(0.5, GAME)
+    stuckFight:update(2.0)
+    if stuckFight.phase == "choose" then break end
+  end
+  local stuckTurn = stuckSim.turn
+  local pop = Gen3Ui.pop
+  Gen3Ui.pop = function() error("the stack would not let go") end
+  local okQ, quitRes = pcall(stuck.quit3, stuck, "draw")
+  Gen3Ui.pop = pop
+  check(okQ, "quit (stuck): a pop that throws stays inside quit3")
+  eq(quitRes, false, "quit (stuck): the asker is told the screen did not come down")
+  eq(Gen3Ui.has(stuckFight), true, "quit (stuck): ...and it really is still up")
+  eq(stuck.sim, nil, "quit (stuck): the referee is dropped all the same")
+  eq(stuck.fight, nil, "quit (stuck): ...the core holds no fight")
+  eq(#heard, 0, "quit (stuck): done waits for the screen")
+  eq(SESSION.battleOutcome, nil, "quit (stuck): ...and so does the outcome code")
+  for _ = 1, 3 do stuck:update(0.5, GAME) end
+  eq(stuckSim.turn, stuckTurn, "quit (stuck): no turn on later frames")
+  -- The screen's own way out (stepQuit3's abandonQuit3: the DREW, then leave).
+  stuckFight:leave()
+  eq(Gen3Ui.has(stuckFight), false, "quit (stuck): the screen's leave takes it down")
+  eq(table.concat(heard, ","), "draw", "quit (stuck): ...and done('draw') runs then")
+  eq(SESSION.battleOutcome, FakeNatives.outcome_to_code("draw"), "quit (stuck): ...with the DREW written")
+  if type(stuckFight.onDone) == "function" then stuckFight.onDone("draw") end
+  eq(table.concat(heard, ","), "draw", "quit (stuck): an exit run again does not answer twice")
+  eq(stuck:quit3("draw"), false, "quit (stuck): nothing left to quit")
   Solo.unregisterKind3("tutorial")
 end
 

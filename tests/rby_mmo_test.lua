@@ -5881,6 +5881,19 @@ end)()
       eq(table.concat(clip, ","), "10,84,64,16", "negative spacing clips the leftward row")
     end
     check(ClassicBattle.drawBallRow(bs, party, 24, 32, -8), "leftward row draws")
+    -- A sprite-OBP palette files all six tiles for the Renderer's unclipped
+    -- replay; the empty slots come back off that list.
+    local savedFx = package.loaded["src.render.PaletteFX"]
+    local redraws = { { tag = "earlier" } }
+    package.loaded["src.render.PaletteFX"] = { uiSpriteRedraws = function() return redraws end }
+    function bs:drawBallRow()
+      for i = 1, 6 do redraws[#redraws + 1] = { tag = "ball" .. i } end
+    end
+    check(ClassicBattle.drawBallRow(bs, party, 24, 32, 8), "OBP row draws")
+    eq(#redraws, 5, "only the four real balls stay on the replay list")
+    eq(redraws[1].tag, "earlier", "an earlier sprite's redraw is kept")
+    eq(redraws[5].tag, "ball4", "...and the last kept is the party's last ball")
+    package.loaded["src.render.PaletteFX"] = savedFx
     _G.love = savedLove
   end
 

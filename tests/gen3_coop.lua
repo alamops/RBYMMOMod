@@ -2332,6 +2332,42 @@ do
 end
 
 do
+  -- The same knockout draw for the player who walked into the trainer: the
+  -- stand-in is buried under the co-op screen (coop.engineBattle), the draw
+  -- reaches it as "lose" (finishBuriedBattle: the referee's sheets say every
+  -- side is down, so blackout), and Stand:finish("lose") whites out -- the
+  -- engine side's ritual, so onBattleOver runs no second one.  Leftover HP
+  -- on this save changes none of it, and the trainer stays unbeaten.
+  newGame()
+  SESSION.party = { monOf(4, 10) }
+  SESSION.money = 1000
+  FakeObjects._byId = { [3] = { localId = 3, trainerId = 326 } }
+  local stand, results = trainerStand(326)
+  local walked = Coop.new({ isReady = function() return true end, send = function() end },
+    { say = function() return {} end }, nil, nil, nil)
+  walked.party = { count = function() return 2 end }
+  walked.battle = { plan = { kind = "npc", npcId = "g3t326" } }
+  walked.engineBattle = stand
+  eq(Coop.blacksOut("draw", GAME), false, "walk-in knockout draw: this save's party stands")
+  walked:onBattleOver("draw", GAME, {
+    gen3 = true, mode = "coop_npc", medEndReason = "ko", trainer = { trainerId = 326 },
+  })
+  CoopField.pump3(0.1)
+  eq(stand.finished, true, "walk-in knockout draw: the stand-in is finished")
+  eq(results[1], "lose", "walk-in knockout draw: ...the opcode hears a loss")
+  eq(#results, 1, "walk-in knockout draw: ...once")
+  eq(SESSION.battleOutcome, 2, "walk-in knockout draw: B_OUTCOME_LOST where scripts read it")
+  eq(recorded("respawn"), 1, "walk-in knockout draw: exactly one whiteout")
+  eq(recorded("moneyLoss"), 1, "walk-in knockout draw: ...and one money loss")
+  eq(STORE.flags[0x500 + 326], nil, "walk-in knockout draw: no trainer flag")
+  eq(walked.lastResult, "draw", "walk-in knockout draw: the result stays a draw")
+  local again, againRitual = Coop.finishBuriedBattle(stand, GAME, "draw", true)
+  CoopField.pump3(0.1)
+  eq(again and againRitual, true, "walk-in knockout draw: a late finish is somebody else's ritual")
+  eq(recorded("respawn"), 1, "walk-in knockout draw: ...and whites out no second time")
+end
+
+do
   -- A walk-in co-op trainer fight whose stand-in already finished (its ritual
   -- ran, or it was handed back to the cart) and whose plan carries the
   -- trainer's npcId: the ending must not finish that trainer a second time.

@@ -788,8 +788,64 @@ end
 -- Held weakly -- a pool the engine has let go of is nobody's to drop.
 local madePools3 = setmetatable({}, { __mode = "v" })
 
+-- The templates Ghosts.sync builds a neighbour's pool from, or nil when it
+-- will never build one.  A mirror of ghosts.lua defsFor (local there, so
+-- there is nothing to call): the scripting bundle's events for the map, then
+-- the def Map.world placed it with.  defsFor peeks at package.loaded; the
+-- sandbox's package is a stub, so this goes through Gen3.engine -- on a live
+-- boot the field has had the scripting space up since the first map, so the
+-- require only ever finds it.  An empty table is still an answer: the
+-- engine builds that map its (empty) pool itself.
+local function neighbourDefs3(mapId)
+  local def
+  local Map = Gen3.engine("src.core.game3.map")
+  for _, entry in ipairs(Map and type(Map.world) == "table" and Map.world or {}) do
+    if entry.id == mapId then def = entry.def; break end
+  end
+  def = def or mapDef3(mapId)
+  local Space = Gen3.engine("src.core.game3.scripting.space")
+  local bundle = Space and type(Space.bundle) == "table" and Space.bundle or nil
+  local ev = bundle and type(bundle.events) == "table" and bundle.events[mapId] or nil
+  local defs = type(ev) == "table" and (ev.objects or ev.objectEvents) or nil
+  if type(defs) ~= "table" then defs = type(def) == "table" and def.objects or nil end
+  return type(defs) == "table" and defs or nil
+end
+
+-- A pool this file made, out of the engine's table once no avatar stands in
+-- it -- the peer left, or walked onto another map.  Only while it is still
+-- the pool in that slot (dropPools3 says why); either way it is off the list.
+local function dropPool3(self, mapId)
+  local made = madePools3[mapId]
+  if not made then return false end
+  for _, av in pairs(self.spawned) do
+    if av.mapId == mapId then return false end
+  end
+  madePools3[mapId] = nil
+  local Ghosts = Gen3.engine("src.core.game3.ghosts")
+  local pools = type(Ghosts) == "table" and Ghosts._pools or nil
+  if type(pools) == "table" and pools[mapId] == made then
+    pools[mapId] = nil
+    return true
+  end
+  return false
+end
+
 -- Neighbours use their own cells and the engine's ghost-pool animation.
 -- FieldView applies Map.world's offsets when it draws those pools.
+--
+-- An empty slot in Ghosts._pools is not an empty map.  Since engine dev
+-- fcc8b5d1 Ghosts.sync also leaves it empty on purpose while prepareOffscreen
+-- defers a neighbour outside the visible rect to the worker's preparation
+-- (Objects.prefetchMap) -- and Ghosts.sync, like Ghosts.blocksOn, only ever
+-- builds into an empty slot.  An empty pool made here would stand in that
+-- map's place, its real NPCs neither drawn nor collided with until the next
+-- local map change.  So a pool is made only for a map with no templates at
+-- all; for one the engine is deferring this answers nil, and the caller asks
+-- again on the next sync.  Not built from the templates here, as blocksOn
+-- does on demand: that is the synchronous main-thread build the deferral
+-- exists to avoid, and a deferred map is off screen by prepareOffscreen's own
+-- test -- the engine builds it before it can be seen, so waiting shows
+-- nothing late.
 local function avatarPool3(self, av)
   local Objects = objects3()
   if av.mapId == self.mapId then return Objects end
@@ -797,6 +853,7 @@ local function avatarPool3(self, av)
   if not (Ghosts and type(Ghosts._pools) == "table") then return nil end
   local pool = Ghosts._pools[av.mapId]
   if not pool then
+    if neighbourDefs3(av.mapId) then return nil end
     pool = Objects.spawnFromDefs({}, mapDef3(av.mapId), av.mapId)
     Ghosts._pools[av.mapId] = pool
     madePools3[av.mapId] = pool
@@ -923,8 +980,16 @@ function M:spawn3(player)
   if not (Objects and type(Objects.spawnFromDefs) == "function") then return nil end
   local gfx, gfxName = self:spriteFor3(player.sprite, player)
   if not gfx then return nil end
+  -- Where it will stand, asked before anything is built: a neighbour whose
+  -- pool the engine is still deferring (avatarPool3) costs nothing this tick
+  -- -- no object, no localId, no log line -- and the next sync asks again.
+  local target = avatarPool3(self, { mapId = player.map })
+  if not target then return nil end
   local lid = self:allocLid3(player.id)
-  if not lid then return nil end
+  if not lid then
+    dropPool3(self, player.map)
+    return nil
+  end
 
   -- Gen.spawnObjDef's Gen 3 template: cell, facing, graphic, MOVEMENT_TYPE_NONE
   -- (stands where it is put, turns only when driven).  The rest is this
@@ -942,6 +1007,7 @@ function M:spawn3(player)
     and pool.byId[lid] or nil
   if type(eo) ~= "table" then
     self:freeLid3(lid)
+    dropPool3(self, player.map)
     if not self.spawnWarned then
       self.spawnWarned = true
       mod.log:warn("could not place another player on this map (%s); they "
@@ -964,11 +1030,6 @@ function M:spawn3(player)
     gfx = gfx, gfxName = gfxName, sprite = player.sprite,
   }
   self.spawned[player.id] = av
-  local target = avatarPool3(self, av)
-  if not target then
-    self:despawn3(player.id)
-    return nil
-  end
   inject3(target, av)
   M.nudge3(eo)
   return lid
@@ -986,6 +1047,7 @@ function M:despawn3(playerId)
   end
   M.retire3(av.eo)
   self:freeLid3(av.lid)
+  dropPool3(self, av.mapId)
   return true
 end
 
@@ -1045,7 +1107,8 @@ end
 -- (Ghosts.adopt), replaced with a capture (Ghosts.capture) or wiped with the
 -- rest (Ghosts.clear) is the engine's now, and an engine-built pool was
 -- never on the list.  Run after purgeGhosts3, so whatever the pool still
--- held has been retired already.
+-- held has been retired already.  despawn3 drops each one as its last
+-- avatar goes (dropPool3); this is the sweep a clear ends with.
 function M.dropPools3()
   local Ghosts = Gen3.engine("src.core.game3.ghosts")
   local pools = type(Ghosts) == "table" and Ghosts._pools or nil

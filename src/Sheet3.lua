@@ -462,18 +462,46 @@ function M.sketchSlots(prior, incoming)
   return slots
 end
 
+-- The referee's rows are M.moves' dense list (empty slots skipped), while a
+-- save may keep all four slots with 0 for the empty ones (the engine's
+-- Gen3Save.fromPortMon writes `{ 166, 0, 0, 0 }` for a Smeargle that knows
+-- SKETCH alone).  So row `j` is the save's `j`-th known move, not slot `j`:
+-- -> the save slot of each row, or nil when the two lists disagree on length.
+local function knownSlots(mon, rows)
+  local at = {}
+  for i = 1, 4 do
+    local id = moveAt(mon, i)
+    if id and id > 0 then at[#at + 1] = i end
+  end
+  if #at ~= rows then return nil end
+  return at
+end
+
 function M.sketchHome(mon, prior, incoming)
-  if type(mon) ~= "table" or type(mon.moves) ~= "table" or type(incoming) ~= "table"
-      or #mon.moves ~= #incoming then return nil end
+  if type(mon) ~= "table" or type(mon.moves) ~= "table" or type(incoming) ~= "table" then
+    return nil
+  end
+  local at = knownSlots(mon, #incoming)
+  if not at then return nil end
   local slots = M.sketchSlots(prior, incoming)
   if not slots then return nil end
-  for _, i in ipairs(slots) do if moveAt(mon, i) ~= 166 then return nil end end
+  for _, j in ipairs(slots) do if moveAt(mon, at[j]) ~= 166 then return nil end end
   mon.pp, mon.maxPp = mon.pp or {}, mon.maxPp or {}
-  for _, i in ipairs(slots) do
-    local row = incoming[i]
+  for _, j in ipairs(slots) do
+    local row, i = incoming[j], at[j]
     local pp = clamp(int(row.pp, 0), 0, 64)
     local maxPp = clamp(int(row.maxPp, pp), pp, 64)
-    mon.moves[i], mon.pp[i], mon.maxPp[i] = row.num, pp, maxPp
+    local entry = mon.moves[i]
+    if type(entry) == "table" then
+      -- A row-shaped save slot keeps its shape: the key moveAt read it by.
+      local key = entry.id ~= nil and "id" or entry.num ~= nil and "num" or "move"
+      entry[key] = row.num
+      if entry.pp ~= nil then entry.pp = pp end
+      if entry.maxPp ~= nil then entry.maxPp = maxPp end
+    else
+      mon.moves[i] = row.num
+    end
+    mon.pp[i], mon.maxPp[i] = pp, maxPp
     -- Imported/traded monsters keep PP Up bits beside the numeric moves.
     -- Sketch clears this slot's bits without changing any other slot.
     local weight = 4 ^ (i - 1)

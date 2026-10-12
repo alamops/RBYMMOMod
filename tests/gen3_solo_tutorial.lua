@@ -679,6 +679,36 @@ block("the old man's bag on the save ledger", function()
   eq(R.session().bag.pockets.POKE_BALLS, myBalls, "ledger: ...the player's pocket untouched")
   solo:_clear3()
 
+  -- The same screen thrown off, and then a frame of the core: it sees the
+  -- screen gone and hands the fight back there and then, so the pockets
+  -- come back without waiting for a save.
+  R.newGame("firered")
+  resetTut()
+  R.session().party = { mon(4, 20, { moves = { 33 } }) }
+  R.FakeBag.add(R.session().bag, 4, 3)
+  local myBallsNow = R.session().bag.pockets.POKE_BALLS
+  tut.HOLD = true
+  local lost = R.newSolo()
+  local _, takenLost = oldManDoor(lost, function() end)
+  check(takenLost and heldWalk(lost), "ledger (lost): his bag is in")
+  local lostFight = lost.fight
+  lostFight.onDone = nil
+  check(R.Gen3Ui.pop(R.game(), lostFight), "ledger (lost): the screen is thrown off the stack")
+  tut.HOLD, tut.held = false, nil
+  local markLost = #warns
+  lost:update(0.5, R.game())
+  eq(lost.gen3, nil, "ledger (lost): the core's next frame lets the fight go")
+  eq(Borrow3.held(R.session(), Tut.BAG_BORROW), false, "ledger (lost): the record is settled at once")
+  eq(R.session().bag.pockets.POKE_BALLS, myBallsNow, "ledger (lost): the player's POKé BALLS pocket is back")
+  eq(R.FakeBag.get(R.session().bag, 4), 3, "ledger (lost): ...all three of the player's balls")
+  eq(R.FakeBag.get(R.session().bag, 13), 0, "ledger (lost): ...and none of his POTION")
+  wrote = 0
+  eq(Borrow3.beforeSave(writeLink, R.game()), true, "ledger (lost): the next save goes through")
+  eq(wrote, 1, "ledger (lost): ...written")
+  check(#warns > markLost, "ledger (lost): the log says the screen closed early")
+  R.dropWarnsSince(markLost)
+  resetTut()
+
   -- A second tutorial after a dead one, with no save between: its borrow
   -- settles the dead one first, so what it keeps aside is the player's.
   R.newGame("firered")
@@ -1117,6 +1147,36 @@ block("the POKe DUDE: quit", function()
   for _, sseen in ipairs(R.FakeDex.seen) do check(sseen.species ~= PDBIRD, "quit: no dex") end
   t.quit("battle")
   eq(#codes, 1, "quit: a second quit does nothing")
+  -- A quit whose pop fails: `tutorial.quit` answers false, so the screen's
+  -- stepQuit3 ends it its own way (abandonQuit3: the DREW, then leave) -- and
+  -- the TEACHY TV, the player's party and bag come back once, when the
+  -- screen really goes, never while it still stands over them.
+  R.newGame("firered")
+  resetTut()
+  R.session().party = playerParty
+  codes = {}
+  local stuckSolo = R.newSolo()
+  local stuckStand, takenS = teachyDoor(stuckSolo, 0, function(code)
+    codes[#codes + 1] = { code = code, party = R.session().party, tv = R.Stack.has("teachy_tv") }
+  end)
+  check(takenS and stuckStand, "quit (stuck pop): taken")
+  check(R.untilChoose(stuckSolo), "quit (stuck pop): the menu comes up")
+  local stuckFight, stuckTut = stuckSolo.fight, lastScreenTutorial()
+  local pop = R.Gen3Ui.pop
+  R.Gen3Ui.pop = function() error("the stack would not let go") end
+  local okQ, answered = pcall(stuckTut.quit, "battle")
+  R.Gen3Ui.pop = pop
+  check(okQ, "quit (stuck pop): the throw stays inside the quit")
+  eq(answered, false, "quit (stuck pop): the screen hears it is still up")
+  eq(R.Gen3Ui.has(stuckFight), true, "quit (stuck pop): ...and it is")
+  eq(stuckSolo.fight, nil, "quit (stuck pop): the core let the fight go all the same")
+  eq(#codes, 0, "quit (stuck pop): the TEACHY TV is not answered behind a standing screen")
+  stuckFight:abandonQuit3()
+  eq(R.Gen3Ui.has(stuckFight), false, "quit (stuck pop): the screen's own way out takes it down")
+  eq(#codes, 1, "quit (stuck pop): the TEACHY TV is answered once")
+  eq(codes[1] and codes[1].code, 3, "quit (stuck pop): ...with B_OUTCOME_DREW")
+  eq(codes[1] and codes[1].party, playerParty, "quit (stuck pop): ...the player's party back")
+  eq(codes[1] and codes[1].tv, true, "quit (stuck pop): ...the TEACHY TV back on the stack")
   -- B in his bag or party menu: the same way out, gBattleOutcome left alone.
   R.newGame("firered")
   resetTut()

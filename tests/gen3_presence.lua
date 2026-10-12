@@ -831,6 +831,109 @@ local function cart(version)
     Ghosts.clear()
   end
 
+  -- An empty slot is not an empty map: Ghosts.sync also leaves a neighbour
+  -- with objects unbuilt while prepareOffscreen defers it to the worker (off
+  -- screen, worker threads up).  A pool the mod made there would hide that
+  -- map's NPCs until the next map change, so the player there waits for the
+  -- engine's own pool -- whether the templates are on the map def or in the
+  -- scripting bundle (ghosts.lua defsFor reads both).  A map with none still
+  -- gets a made pool, and a made pool goes once its last avatar does.
+  -- Driven through the engine's real Ghosts.sync with the deferral switched on.
+  do
+    local Map = Gen3.engine("src.core.game3.map")
+    local savedWorld, savedRoot = Map.world, Map._worldRoot
+    local savedRect, savedNear = Map.warmRect, Map.warmNear
+    local Space = Gen3.engine("src.core.game3.scripting.space")
+    local savedBundle = Space.bundle
+    local BARE, FULL, EVENTS = "MMO_DEFER_bare", "MMO_DEFER_full", "MMO_DEFER_events"
+    local npc = { localId = 1, graphicsId = gid(mySprite), x = 1, y = 1, movementType = 0 }
+    local layout = function() return { width = 9, height = 10, collAt = function() return 0 end } end
+    local defs = { [MAP] = { midLayout = { width = 13, height = 12 }, connections = {
+      { dir = "north", map = BARE, offset = 0 },
+      { dir = "south", map = FULL, offset = 0 },
+      { dir = "east", map = EVENTS, offset = 0 },
+    } } }
+    defs[BARE] = { midLayout = layout() }
+    defs[FULL] = { midLayout = layout(), objects = { npc } }
+    defs[EVENTS] = { midLayout = layout() }
+    local oldDefs = {}
+    for _, id in ipairs({ BARE, FULL, EVENTS }) do
+      oldDefs[id] = game.data.maps[id]
+      game.data.maps[id] = defs[id]
+    end
+    Space.bundle = { events = { [EVENTS] = { objects = { npc } } } }
+    for _, p in ipairs({ { "bare", BARE }, { "bare2", BARE }, { "full", FULL }, { "events", EVENTS } }) do
+      roster:put({ id = p[1], name = p[1], map = p[2], x = 3, y = 4,
+        facing = "down", sprite = mySprite, version = version })
+    end
+    local function defer(on)
+      if on then
+        Map.warmRect = function() return 0, 0, 1, 1 end
+        Map.warmNear = function() return false end
+        _G.love = { thread = { newThread = function() end } }
+      else
+        Map.warmRect, Map.warmNear = savedRect, savedNear
+        _G.love = nil
+      end
+    end
+    local savedLove = rawget(_G, "love")
+    local function lidsOf(playerId)
+      local n = 0
+      for _, owner in pairs(avatars.lids) do if owner == playerId then n = n + 1 end end
+      return n
+    end
+    Map.world = Map.computeWorld(defs, MAP, 1)
+    Map._worldRoot = MAP
+    Ghosts.clear()
+    avatars.spawnWarned = nil
+    defer(true)
+    avatars:sync(roster, here)
+    avatars:sync(roster, here)                 -- and the tick after: still waiting
+    defer(false)
+    _G.love = savedLove
+    eq(Ghosts._pools[FULL], nil, label .. ": a deferred neighbour with objects gets no pool from the mod")
+    eq(Ghosts._pools[EVENTS], nil, label .. ": nor one whose objects are in the scripting bundle")
+    eq(avatars.spawned.full, nil, label .. ": its player waits for the engine's pool")
+    eq(lidsOf("full"), 0, label .. ": with no object built and no localId held meanwhile")
+    eq(avatars.spawnWarned, nil, label .. ": and nothing logged while waiting")
+    local made = Ghosts._pools[BARE]
+    local bare, bare2 = avatars.spawned.bare, avatars.spawned.bare2
+    check(made ~= nil and bare ~= nil and bare2 ~= nil
+      and made.byId[bare.lid] == bare.eo and made.byId[bare2.lid] == bare2.eo,
+      label .. ": a neighbour with no objects still gets a made pool, deferred or not")
+    avatars:sync(roster, here)                 -- the engine stops deferring
+    local built, fromEvents = Ghosts._pools[FULL], Ghosts._pools[EVENTS]
+    local full, events = avatars.spawned.full, avatars.spawned.events
+    check(built ~= nil and full ~= nil and built.byId[full.lid] == full.eo,
+      label .. ": once the engine builds the pool, the waiting player lands in it")
+    check(built ~= nil and built.byId[1] ~= nil, label .. ": beside the map's own NPC")
+    check(fromEvents ~= nil and events ~= nil and fromEvents.byId[events.lid] == events.eo
+      and fromEvents.byId[1] ~= nil, label .. ": the bundle's map too, NPC and player")
+    -- the made pool goes with its last avatar, not before
+    roster:remove("bare2")
+    avatars:sync(roster, here)
+    eq(Ghosts._pools[BARE], made, label .. ": a made pool stays while an avatar stands in it")
+    roster:move("bare", MAP, 4, 4, "down", false)
+    avatars:sync(roster, here)
+    eq(Ghosts._pools[BARE], nil, label .. ": and is dropped once its last avatar walks off")
+    eq(Ghosts._pools[FULL], built, label .. ": the engine-built pools are left alone")
+    roster:move("bare", BARE, 3, 4, "down", false)
+    avatars:sync(roster, here)
+    local remade = Ghosts._pools[BARE]
+    check(remade ~= nil and remade ~= made, label .. ": a player back on the bare map gets a fresh one")
+    local captured = { byId = {}, order = {} }
+    Ghosts._pools[BARE] = captured
+    roster:remove("bare")
+    avatars:sync(roster, here)
+    eq(Ghosts._pools[BARE], captured, label .. ": a made pool the engine replaced is not dropped with the avatar")
+    Map.world, Map._worldRoot = savedWorld, savedRoot
+    Space.bundle = savedBundle
+    for _, id in ipairs({ "full", "events" }) do roster:remove(id) end
+    for _, id in ipairs({ BARE, FULL, EVENTS }) do game.data.maps[id] = oldDefs[id] end
+    avatars:clear()
+    Ghosts.clear()
+  end
+
   -- the local player's own pace, for presence
   P.biking, P.running, P.moving, P.stepFrames = false, false, false, 16
   eq(Avatars.localFast3(), false, label .. ": walking is not fast")

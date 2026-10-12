@@ -155,6 +155,8 @@ local SoloBrain = need("SoloBrain")
 -- off a Gen 3 boot), the Gen 3 sheet builder and the learn prompt.
 local Gen3 = need("Gen3")
 local Gen3Ui = need("Gen3Ui")
+-- The ledger of what a Gen 3 fight borrows from the save (M:_lost3).
+local Borrow3 = need("Borrow3")
 local Sheet3 = need("Sheet3")
 local LearnMove = need("LearnMove")
 
@@ -1270,6 +1272,12 @@ end
 function M:_pump()
   local sim, fight = self.sim, self.fight
   if not (sim and fight) then return false end
+
+  -- Gen 3: a screen that left the stack without its ending (M:_lost3).
+  if self.generation == 3 and self.gen3 and self.gen3.onStack3 and Gen3.active()
+      and not Gen3Ui.has(fight) then
+    return self:_lost3()
+  end
 
   -- A RUN a skipped-menu call site filed last frame, answered now that the
   -- screen has finished writing over its own choice state. See M:_choose.
@@ -3569,6 +3577,10 @@ function M:_begin3(game, ctx)
       .. "BATTLES off in the mod manager (F10) and report it")
     return false
   end
+  -- Seen on the stack now, so its going later is news (M:_pump, M:_lost3).
+  -- A modal stack this build cannot read never says so, and is never
+  -- mistaken for a screen that left.
+  ctx.onStack3 = Gen3Ui.has(fight)
   -- The seats, as the referee named them, side by side in slot order: one a
   -- side for a single; both of each shared team in a lone double
   -- (solo_player, solo_player#2; solo_foe and, for a trainer with two
@@ -4381,13 +4393,19 @@ function M:_settle3(outcome)
   -- and halt. Facilities keep their own judgment.
   -- Steven's three are never the player's: only the save's player half
   -- (Doubles' `playerHalf`) is read.
+  -- The save is the fight's own, or none: a save loaded mid-fight is another
+  -- party altogether, and reading its standing monsters would promote this
+  -- draw to a win -- flag set, prize paid -- into a save that never fought
+  -- it.  With the fight's save gone the draw stays a draw (M:_ended3 then
+  -- writes nothing home either: "the save changed while a battle was running").
   local how = CoopField.knockoutHow3(outcome.how, outcome.reason)
   local half = g3.name == "partner" and type(g3.dbl) == "table"
     and tonumber(g3.dbl.playerHalf) or nil
+  local own = g3.session ~= nil and g3.session == Gen3.session() and g3.session or nil
   g3.standingDraw = verdict == "draw" and g3.kind == "trainer"
     and (g3.name == "trainer" or g3.name == "pair" or g3.name == "partner"
       or g3.name == "firstBattle") and not g3.facility3
-    and how ~= nil and knockoutDisagreement3(sim, Gen3.session(), half) or false
+    and how ~= nil and own ~= nil and knockoutDisagreement3(sim, own, half) or false
   if g3.standingDraw then verdict = CoopField.trainerDrawResult3(verdict, how, true) end
   g3.verdict = verdict
   -- The referee's whole verdict (its `how` / `by`, contract C5), for the
@@ -5151,28 +5169,90 @@ end
 -- Natives.outcome_to_code; `saveWord` false writes none -- the POKe DUDE's
 -- bag and party menus leave it alone), the screen comes off without its own
 -- ending, and the caller's `done(word)` runs.  The kind gives back what it
--- borrowed before it asks.  -> true when there was a fight to end.
+-- borrowed before it asks.  -> true when the fight ended and its screen is
+-- off the stack; false when there was no fight to end, or when the screen
+-- would not come down.
+--
+-- A pop that fails leaves the screen up, and the asker has to hear that:
+-- MediatedBattle:stepQuit3 reads anything but true as "the screen is still
+-- mine" and ends it through its own way out (`abandonQuit3`: the DREW, then
+-- `leave`, which pops again and runs `exit`).  The referee is dropped all the
+-- same -- no further turn either way -- but the outcome code and `done` move
+-- onto the screen's `onDone`, so they run once, when the screen really goes
+-- (that second pop, or A on the ending a pop that fails again leaves
+-- readable): a TEACHY TV put back under a battle screen still standing would
+-- be resumed behind it, and a `done` run here and again from `exit` would
+-- give the POKe DUDE's party back twice.
 function M:quit3(word, saveWord)
   local g3, fight, game = self.gen3, self.fight, self.game
   if not (self.generation == 3 and g3 and fight) then return false end
   self:_clear3()
   fight.onDone = nil
-  if Gen3Ui.has(fight) then pcall(Gen3Ui.pop, game, fight) end
-  local session = Gen3.session()
-  if saveWord ~= false and session ~= nil and session == g3.session then
-    local Natives = Gen3.engine("src.core.game3.scripting.natives")
-    local code = Natives and try3(Natives.outcome_to_code, saveWord or word)
-    if code ~= nil then session.battleOutcome = code end
-  end
-  local done = g3.done
-  if type(done) == "function" then
-    local ok, err = pcall(done, word)
-    if not ok then
-      self:warn("done3", "what was waiting on this battle could not carry on (%s); "
-        .. "talk to the trainer again, or reload from your last save", tostring(err))
+  local function ending()
+    local session = Gen3.session()
+    if saveWord ~= false and session ~= nil and session == g3.session then
+      local Natives = Gen3.engine("src.core.game3.scripting.natives")
+      local code = Natives and try3(Natives.outcome_to_code, saveWord or word)
+      if code ~= nil then session.battleOutcome = code end
+    end
+    local done = g3.done
+    if type(done) == "function" then
+      local ok, err = pcall(done, word)
+      if not ok then
+        self:warn("done3", "what was waiting on this battle could not carry on (%s); "
+          .. "talk to the trainer again, or reload from your last save", tostring(err))
+      end
     end
   end
+  if Gen3Ui.has(fight) then pcall(Gen3Ui.pop, game, fight) end
+  if Gen3Ui.has(fight) then
+    local ran = false
+    fight.onDone = function()
+      if ran then return end
+      ran = true
+      ending()
+    end
+    -- Said by the asker (stepQuit3's own warning names the remedy).
+    return false
+  end
+  ending()
   return true
+end
+
+-- The fight's screen went off the stack without its ending: F2 loaded over
+-- it, something cleared the modal stack, a screen that threw was dropped.
+-- Its `exit` never ran, so nothing came home and nothing was told, and left
+-- alone the core would go on refereeing a fight nobody can see -- holding
+-- the TEACHY TV's party, a tutorial's bag, a facility's monsters until the
+-- next save's ledger settled them.  Handed back now instead, the way a fight
+-- the referee cannot keep going is (M:_reset3): a save that changed drops
+-- the fight and everything waiting on it; the same save gets back what the
+-- kind took -- the double's party snapshot, the kind's `handBack`, the
+-- stand-in's fightAlone -- and the cart's own battle in its place, with the
+-- caller's `done` on it, so a trainer script is not left waiting forever.
+-- Then the ledger (src/Borrow3.lua) is settled at once rather than at the
+-- next save: every borrow this fight held reads dead now (the core holds no
+-- fight), and whatever the kind's own return did not reach goes back.  The
+-- normal ending and every hand-back clear `fight` / `sim` before they pop,
+-- so none of them comes through here.
+function M:_lost3()
+  local g3 = self.gen3
+  local session = g3 and g3.session
+  local live = session ~= nil and session == Gen3.session()
+  if live then
+    self:warn("lost3", "the battle screen closed before the battle ended, so the "
+      .. "ordinary battle has been started in its place -- fight it as usual; report "
+      .. "it if it keeps happening, with what closed the screen")
+  end
+  self:_reset3()
+  if live then
+    local ok, err = pcall(Borrow3.settle, session)
+    if not ok then
+      self:warn("lost3settle", "what this battle borrowed from your save could not be "
+        .. "given back (%s); reload from your last save before saving again", tostring(err))
+    end
+  end
+  return false
 end
 
 function M:_reset3()
