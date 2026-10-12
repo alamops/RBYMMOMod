@@ -419,15 +419,20 @@ the current map's:
 
 A remote player on a neighbouring map has no place in any of this. Presence
 says which map and tile they stand on, but there is no public way to put an
-object into a neighbour's pool: `spawnNpc` is unsupported, and writing into
-`Ghosts._pools` would be one more private table to reach into. The avatars the
-mod injects into the *current* map end up in `Ghosts.capture`'s copy, frozen
-and later doubled (the "Ghost capture" cost above), so `rby_mmo` purges its
-avatars from every pool on each map change (`Avatars.purgeGhosts3`).
+object into a neighbour's pool: `spawnNpc` is unsupported. The avatars the
+mod injects into the *current* map also end up in `Ghosts.capture`'s copy,
+frozen and later doubled (the "Ghost capture" cost above).
 
-The result is known gap §4. You see another player only once you share a map,
-and they vanish whenever the edge is between you, while the NPC standing next
-to them is drawn.
+So `rby_mmo` reaches into one more private table. On each map change it
+purges its avatars from every pool (`Avatars.purgeGhosts3`), then writes each
+player on a placed neighbour straight into that map's pool
+(`Ghosts._pools[mapId]`, `Avatars` `avatarPool3`). A connected map with no
+object events has no pool (`Ghosts.sync` builds none), so the mod builds one
+with `Objects.spawnFromDefs`, and removes the ones it built when it clears
+its avatars (`Avatars.dropPools3`). The engine then ticks and draws the avatar like that
+map's NPCs. This closed known gap §4 (`docs/plans/gen3-known-gaps.md`), at
+the cost of depending on `Ghosts._pools`, `Ghosts.sync`'s rebuild and
+`Objects.spawnFromDefs` staying as they are.
 
 ### Proposed seam: a runtime object belongs to its map
 
@@ -477,8 +482,10 @@ Parity pair:
 
 - `Avatars.purgeGhosts3`, the per-map-change retirement of avatars
   (`retire3`), and their reinjection after a crossing.
-- A player on a neighbouring map is spawned there from presence (the roster
-  already carries every player's map and tile), which closes known gap §4.
+- The writes into `Ghosts._pools` and the pools it builds itself
+  (`avatarPool3`, `dropPools3`): a player on a neighbouring map is spawned
+  there through `spawnNpc` from presence (the roster already carries every
+  player's map and tile).
 
 ## Addendum C — a draw answer for `trainerbattle`
 

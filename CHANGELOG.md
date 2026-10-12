@@ -27,8 +27,11 @@ here must match `manifest.version`.
   of all three carts, rivals, professors, trainer classes, gym leaders and
   the Elite Four, every one a walking figure — and a look the viewer's cart
   lacks is drawn the way that cart's Cable Club draws a partner. `PLAYERS`
-  names places from the cart's own map sections, and your party is listed
-  over FireRed's TOWN MAP and Emerald's PokéNav HOENN MAP.
+  names places from the cart's own map sections. Your partners' characters
+  stand on FireRed's TOWN MAP and Emerald's PokéNav HOENN MAP, each on the
+  section they are in (`src/RegionMap3.lua`), and a player on a neighbouring
+  map is drawn across a seamless map edge, walking in that map's own pool
+  as its NPCs do.
 - **One hub for all three carts, region-scoped.** A Gen 3 hub seats
   FireRed, LeafGreen and Emerald together: chat, friends, parties, rank,
   trades and battles cross carts, while the overworld stays per region
@@ -323,11 +326,32 @@ here must match `manifest.version`.
     for HP figures.
   - **When it is handed back.** With fewer than two usable POKéMON the fight
     goes back to the cart, which refuses it in its own words. Two trainers at
-    once and Steven as a partner stay the cart's.
+    once and Steven as a partner are the next entry's.
   - **How it works.** The referee's twins share one team across two seats
     (`seats = 2`; `docs/plans/gen3-battle-sheet.md` §1.3). One-seat fights
     replay byte for byte, held by the turn-parity fixture. The plan is in
     `docs/plans/gen3-solo-doubles.md`.
+- **SOLO BATTLES takes every other Gen 3 fight a player can walk into.**
+  Each family is its own module behind one kind registry
+  (`SoloBattle.registerKind3`, `src/Solo3/`):
+  - two trainers at once, and Steven beside you (Emerald, `Doubles.lua`);
+  - the Safari Zone, on its own screen (`Safari.lua`);
+  - roamers, scripted wilds and legendaries, and the POKéMON TOWER ghosts,
+    veiled and unveiled (`Legend.lua`);
+  - the Battle Frontier's seven halls and three Battle Tents, Trainer Hill
+    and Secret Bases on Emerald, and the Trainer Tower on FireRed /
+    LeafGreen (`Facility.lua`); the Battle Tower multis with a partner and
+    the Battle Pike's two-trainer room (`FacilityMulti.lua`);
+  - the first battles, in Oak's lab and with Birch's ZIGZAGOON
+    (`First.lua`);
+  - the tutorials: the old man, WALLY, and the POKé DUDE through the
+    TEACHY TV (`Tutorial.lua`). What a demonstration lends you, a party or
+    a bag, is given back when it ends. A save while it still holds them is
+    refused, and one left behind by a crash or a hot reload is given back
+    before the next save (`src/Borrow3.lua`).
+
+  Link battles and the e-Reader trainer stay the cart's (see Known). The
+  plan is `docs/plans/gen3-solo-remaining-fights.md`.
 - **The encounter divert on Gen 3.** Step encounters are taken through the
   public `encounter.roll` hook. Trainers, and the wild fights that never pass
   that hook (fishing, Rock Smash, Sweet Scent), are taken at one contained
@@ -352,7 +376,9 @@ here must match `manifest.version`.
   `--generation 3` with FireRed, FireRed and Emerald, including a
   FireRed-vs-Emerald 1-on-1); `run-mismatch-e2e-gen3.sh`,
   `run-battlefield-e2e-gen3.sh` and `run-solo-battle-e2e.sh --gen3` (Pay Day,
-  both kinds of draw, overworld weather). `GEN3_LEGS` narrows a run to some
+  both kinds of draw, overworld weather, and every fight family SOLO
+  BATTLES takes: the field, the Frontier, the Trainer Tower and Hill;
+  `SOLO_LEGS` narrows it). `GEN3_LEGS` narrows a run to some
   legs. Each leg has a screenshot and an `index.html` contact sheet
   (`tests/drivers/shots_index.py`); the README's Gen 3 gallery is cropped
   from them (`docs/screenshots/gen3/`). `.env` takes
@@ -610,36 +636,29 @@ version, but each was a real failure on a live boot or on the wire:
   link with Ruby and Sapphire (the Sevii Islands post-game), Emerald once
   the player is Champion; a POKéMON from outside a cart's regional dex, or
   an egg, also needs that cart's National Dex. Same-region trades are free.
-- **SOLO BATTLES leaves more fights to the cart on Gen 3:**
-  - doubles against two trainers at once, or with Steven as your partner (a
-    lone double is the mod's; see Added);
-  - the Safari Zone;
-  - roaming and scripted legendaries;
-  - the Battle Frontier, Trainer Tower and Trainer Hill;
-  - the first battle and the tutorial fights.
-- **A player on a neighbouring map is not drawn across a seamless map edge.**
-  The engine copies live objects into the neighbour's draw pool when a map
-  loads, which left remote players frozen (and doubled) on the far side;
-  the mod now purges its avatars from those pools, so you see another player
-  once you share a map. The engine seam that would draw them there is asked
-  for in `docs/upstream/gen3-spawn-npc.md` (addendum B).
-- **Party-on-map on Gen 3 is a list over the region map**, not a figure
-  standing on a city as on Red.
+- **SOLO BATTLES leaves two kinds of Gen 3 fight to the cart.** Link
+  battles (the Cable Club, the Union Room, the link multis, a recorded
+  battle's replay), where another cart fights this one in lockstep: taking
+  them would make the mod a party to the link. And the e-Reader trainer,
+  which the engine does not implement on Emerald and which needs a scanned
+  e-Card on FireRed / LeafGreen (`Config.SOLO_REFUSED_GEN3`).
 - **No official Gen 3 server** is on the `SERVERS` list — none is deployed.
 - **LeafGreen has not been run live.** It shares FireRed's engine path and is
   covered by the headless suites.
 - **Gen 3 reaches into engine internals** (`engine_internals`, declared since
   before this release) where the game3 mod API has no seam yet: avatars are
-  injected into the engine's object list, the worn look wraps
+  injected into the engine's object list, and a player on a neighbouring
+  map into that map's ghost pool (`Ghosts._pools`); the worn look wraps
   `OwSprites.playerGraphicsId`, trainer diversion wraps
   `BattleBridge.start`, and avatars are shielded from the FireRed quest-log
   recorder and Emerald's rotating-tile puzzle. Each wrap keeps the engine's
   original and is re-applied, never stacked, across a hot reload; all of it
   is written up as one upstream proposal in
-  `docs/upstream/gen3-spawn-npc.md`, together with the two seams the map-edge
-  and trainer-draw items below need. An engine
-  update that renames one of those internals can break that feature on Gen 3
-  until the mod follows.
+  `docs/upstream/gen3-spawn-npc.md`, together with the seams for a player
+  across a map edge (addendum B), a trainer draw (addendum C) and the
+  TEACHY TV's demonstrations (addendum D). An engine update that renames
+  one of those internals can break that feature on Gen 3 until the mod
+  follows.
 - **A remote player walking nearby can hold the VS Seeker's charge a
   moment**: the cart waits for every object to stop moving, avatars
   included.
@@ -669,6 +688,10 @@ version, but each was a real failure on a live boot or on the wire:
 - **Engine, not mod:** on a fresh Emerald save the heal point is still the
   moving truck, so a whiteout before the first POKéMON CENTER — the cart's
   or a mod-run fight's — respawns there.
+- **Engine, not mod:** a FireRed / LeafGreen Trainer Tower trainer's line
+  before the fight reads "(missing text)". The cart prints it with `msgbox
+  gStringVar4`, and the engine's script VM reads that buffer only on Ruby
+  and Sapphire.
 
 ## [1.4.19] - 2026-09-29
 

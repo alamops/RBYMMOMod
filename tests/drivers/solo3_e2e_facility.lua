@@ -449,10 +449,12 @@ return function(kit)
     check(H.g3Free(game) and H.g3Idle(game), leg .. ": the field is the player's again (no box, no script, no warp)")
   end
 
-  -- A party built for the leg: `{ species, level, hp?, moves? }` rows,
-  -- healthy, the strongest damaging move first unless `moves` pins them
-  -- (pret names, MOVE_*; a name the cart lacks leaves that row nil).
+  -- A party built for the leg: `{ species, level, hp?, moves?, trained? }`
+  -- rows, healthy, the strongest damaging move first unless `moves` pins them
+  -- (pret names, MOVE_*; a name the cart lacks leaves that row nil);
+  -- `trained`: every IV 31 and 510 EVs, the stats recomputed by the engine.
   local Moves = require("src.core.game3.battle.moves")
+  local Pokemon = require("src.core.game3.pokemon")
   local function moveId(name) return H.g3Const(game, "moves", name) end
   local function pinMoves(mon, list)
     local ids, pp = {}, {}
@@ -470,6 +472,11 @@ return function(kit)
     for i, row in ipairs(rows) do
       local mon = (i == 1) and H.g3SeedParty(game, row.species, row.level)
         or H.g3GiveMon(game, row.species, row.level)
+      if mon and row.trained then
+        mon.ivs = { hp = 31, atk = 31, def = 31, spe = 31, spa = 31, spd = 31 }
+        mon.evs = { hp = 170, atk = 170, spa = 170 }
+        Pokemon.applyStats(mon)
+      end
       if mon then
         mon.hp = row.hp or mon.maxHp
         mon.status = nil
@@ -600,13 +607,14 @@ return function(kit)
       -- The floor's trainers are levelled to the party's highest level
       -- (pokefirered trainer_tower.c GetPartyMaxLevel), so a level cannot
       -- buy the win this leg needs: species and moves do (a starter met a
-      -- level-50 FERALIGATR here and lost).  The drivers pick the move of
-      -- the most power, so each monster's strongest is its one attack: three
-      -- types no Gen 3 monster is immune to past MEWTWO's.
+      -- level-50 FERALIGATR here and lost; untrained, the same team lost 1F's
+      -- double to ESPEON and JOLTEON one run in two).  The drivers pick the
+      -- move of the most power, so each monster's strongest is its one
+      -- attack: three types no Gen 3 monster is immune to past MEWTWO's.
       local team = seedTeam({
-        { species = "MEWTWO", level = 50, moves = { "MOVE_PSYCHIC", "MOVE_RECOVER" } },
-        { species = "DRAGONITE", level = 50, moves = { "MOVE_DRAGON_CLAW", "MOVE_AGILITY" } },
-        { species = "ZAPDOS", level = 50, moves = { "MOVE_DRILL_PECK", "MOVE_AGILITY" } },
+        { species = "MEWTWO", level = 50, trained = true, moves = { "MOVE_PSYCHIC", "MOVE_RECOVER" } },
+        { species = "DRAGONITE", level = 50, trained = true, moves = { "MOVE_DRAGON_CLAW", "MOVE_AGILITY" } },
+        { species = "ZAPDOS", level = 50, trained = true, moves = { "MOVE_DRILL_PECK", "MOVE_AGILITY" } },
       })
       check(#session().party == 3 and team[1] and team[2] and team[3],
             leg .. ": a party of three was seeded, with its moves")
