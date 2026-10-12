@@ -10,7 +10,17 @@
  * Phase 2: post-damage side-chance effects + flinch.
  * Phase 3: multi-hit, fixed damage, drain, recoil.
  * Phase 4: multi-turn charge, recharge, trap, thrash, rage.
+ * Stored battle stats: pokered's party / unmodified / battle stat sets, the
+ * stage-change door (`changeStat`) and both Gen 1 stat glitches.
  */
+
+// The two condition penalties are Status' formulas (and its vectors'); the
+// stat machinery below is where they are written into a battle stat.
+const Status = require('./Status.js');
+// The lines below name battlers the way the cart's <USER> / <TARGET> do:
+// through Events.named (contract K17), with the cart's breaks (K18); an
+// event's own `text` is the same line read plain (Events.plain).
+const Events = require('./events.js');
 
 const NAMES = [
   'NO_ADDITIONAL_EFFECT',
@@ -187,11 +197,29 @@ function stageMult(stage) {
   return STAGE_MULT[clampStage(stage)];
 }
 
+// CalculateModifiedStat (engine/battle/core.asm :6376-6440): the unmodified
+// stat times its StatModifierRatios entry (data/battle/stat_modifiers.asm --
+// 15/10 and 150/100 truncate alike, so the table above is that one as
+// percents), held to 1..MAX_STAT_VALUE. The two stat-change effects clamp only
+// one end each; see `changeStat`.
 function applyStage(base, stage) {
-  return Math.floor(Math.max(0, int(base, 0)) * stageMult(stage) / 100);
+  const value = Math.floor(Math.max(0, int(base, 0)) * stageMult(stage) / 100);
+  if (value < 1) return 1;
+  if (value > MAX_STAT_VALUE) return MAX_STAT_VALUE;
+  return value;
 }
 
-// Gen1 ApplyBadgeStatBoosts: ×9/8 when the fighter holds the matching badge.
+// Gen1 ApplyBadgeStatBoosts: ×9/8 when the fighter holds the matching badge,
+// capped at MAX_STAT_VALUE (999) -- pokered's .applyBoostToStat compares the
+// boosted word against it and writes 999 back when it went over; the engine's
+// port caps the same way (gen1recomp src/battle/Damage.lua:44-54, citing
+// engine/battle/core.asm:6454).
+// A fighter only holds a set where the cart would have applied it -- side a
+// of a fight against the computer; Turn.attempt drops it in 1v1 / coop_pvp
+// (link battles, which the cart never boosts) and on side b (Turn.BADGE_MODES)
+// -- so this never has to ask what kind of fight it is in.
+const MAX_STAT_VALUE = 999;
+
 const BADGE_FOR_STAT = {
   atk: 'BOULDERBADGE',
   def: 'THUNDERBADGE',
@@ -204,16 +232,255 @@ function badgeBoost(statValue, wireStatKey, badges) {
   if (!badges || typeof badges !== 'object') return base;
   const badge = BADGE_FOR_STAT[wireStatKey];
   if (!badge || !badges[badge]) return base;
-  return Math.floor((base * 9) / 8);
+  return Math.min(MAX_STAT_VALUE, Math.floor((base * 9) / 8));
+}
+
+// ------------------------------------------------------------------
+// Stored battle stats (pokered's own data flow)
+// ------------------------------------------------------------------
+//
+// pokered does not derive a battle stat when it needs one. It keeps three
+// sets per battler and *writes* the battle one at a handful of moments, and
+// every Gen 1 stat glitch falls out of which moment forgot what. So the
+// referee keeps the same three, under the same rules, rather than a read-time
+// formula that would round and cap differently:
+//
+//   * `mon.partyStats` -- the party struct (wPartyMon1Attack...). The sheet's
+//     stats; only a vitamin moves them, and Transform never does. A critical
+//     hit reads these at both ends (GetDamageVarsForPlayerAttack, core.asm
+//     :4059-4072, :4091-4104).
+//   * `mon.stats` -- the unmodified stats (wPlayerMonUnmodifiedAttack...), the
+//     base every stage change and Haze rebuild from. Reloaded from the party
+//     at every switch-in (LoadBattleMonFromParty :1654-1657); Transform copies
+//     the target's over them (transform.asm .copyStats).
+//   * `mon.cur` -- the battle stats (wBattleMonAttack...): what turn order,
+//     damage and the confusion self-hit read, and nothing else adds to them at
+//     read time. Written by the switch-in seed (party -> burn/paralysis
+//     penalty -> badges), every stage change, a badge re-run, a condition's
+//     penalty, Haze and Transform -- every one of them below or in Turn.
+//
+// `changeStat` is the one door every stage change goes through, so a new
+// stat-changing source hooks in there and inherits both glitches for free.
+
+const BATTLE_STATS = ['atk', 'def', 'spd', 'spc'];
+const IS_BATTLE_STAT = { atk: true, def: true, spd: true, spc: true };
+
+// Lua's max(0, int(v, 1)): a missing value is 1 (JS's Number(null) is 0, so
+// absence is spelled out rather than left to `int`).
+function statValue(value) {
+  if (value === undefined || value === null) return 1;
+  return Math.max(0, int(value, 1));
+}
+
+function statBlock(src) {
+  const from = src && typeof src === 'object' ? src : {};
+  return {
+    atk: statValue(from.atk), def: statValue(from.def),
+    spd: statValue(from.spd), spc: statValue(from.spc),
+  };
+}
+
+function resetStages(mon) {
+  mon.stages.atk = 0;
+  mon.stages.def = 0;
+  mon.stages.spd = 0;
+  mon.stages.spc = 0;
+  mon.stages.acc = 0;
+  mon.stages.eva = 0;
+}
+
+// Turn.attempt builds all three sets. A monster object assembled anywhere else
+// (the Effects suite, a future caller) carries `stats` alone, and gets the
+// other two from it here rather than making every function below guard null.
+function ensureBattleStats(mon) {
+  if (!mon || typeof mon !== 'object') return;
+  if (!mon.stats || typeof mon.stats !== 'object') mon.stats = statBlock(null);
+  if (!mon.partyStats || typeof mon.partyStats !== 'object') {
+    mon.partyStats = statBlock(mon.stats);
+  }
+  if (!mon.cur || typeof mon.cur !== 'object') mon.cur = statBlock(mon.stats);
+  if (!mon.stages || typeof mon.stages !== 'object') {
+    mon.stages = { atk: 0, def: 0, spd: 0, spc: 0, acc: 0, eva: 0 };
+  }
+}
+
+// ApplyBadgeStatBoosts (core.asm :6454-6500): every badge-owned stat of the
+// battle mon gets +stat>>3 (the 9/8 above), held at 999 -- every one of them,
+// every time it runs, compounding on whatever is already there. `badges` is
+// null wherever the cart returns early (a link battle) or never looks (the
+// enemy's battler): Turn.attempt keeps a set only on side a of BADGE_MODES.
+function applyBadgeBoosts(mon, badges) {
+  if (!mon || typeof mon !== 'object' || !badges || typeof badges !== 'object') return;
+  ensureBattleStats(mon);
+  for (const key of BATTLE_STATS) {
+    if (badges[BADGE_FOR_STAT[key]]) {
+      mon.cur[key] = badgeBoost(mon.cur[key], key, badges);
+    }
+  }
+}
+
+// QuarterSpeedDueToParalysis / HalveAttackDueToBurn (core.asm :6283-6366),
+// written into the battle stat, minimum 1, and only for the condition the
+// monster actually has. It runs when the condition lands (effects.asm :236,
+// :243, :289, :294; paralyze.asm), when the monster is sent out
+// (LoadBattleMonFromParty :1658), and after every successful stat change on
+// whichever battler's turn it is NOT, whatever stat the change touched
+// (effects.asm :504-506, :694-698) -- the re-penalty glitch. Nothing lifts it
+// but a rebuild of that stat: a stage change, Haze, a switch, the player's
+// own status-cure item (`reloadPartyStats`).
+function applyStatusPenalty(mon) {
+  if (!mon || typeof mon !== 'object') return;
+  ensureBattleStats(mon);
+  if (mon.status === 'paralysis') {
+    mon.cur.spd = Status.paralysisSpeed(mon.cur.spd);
+  } else if (mon.status === 'burn') {
+    mon.cur.atk = Status.burnAttack(mon.cur.atk);
+  }
+}
+
+// CalculateModifiedStats + ApplyBurnAndParalysisPenalties +
+// ApplyBadgeStatBoosts: the battle stats rebuilt from the unmodified ones
+// through the current stages, the way a level-up mid-fight rebuilds them
+// (engine/battle/experience.asm :226-238). Turn.attempt seeds with it -- a
+// live sheet states no stages, so that is LoadBattleMonFromParty's own seed;
+// the suites' sheets state some -- and a vitamin on the fielded monster
+// re-runs it.
+function recalcBattleStats(mon, badges) {
+  if (!mon || typeof mon !== 'object') return;
+  ensureBattleStats(mon);
+  for (const key of BATTLE_STATS) {
+    mon.cur[key] = applyStage(mon.stats[key], mon.stages[key]);
+  }
+  applyStatusPenalty(mon);
+  applyBadgeBoosts(mon, badges);
+}
+
+// LoadBattleMonFromParty (core.asm :1626-1667) / LoadEnemyMonFromParty: the
+// party stats become the unmodified ones (undoing a Transform), then the
+// battle ones, then the penalty, then the badges, and every stage goes back to
+// neutral. Turn runs it at every switch-in, and at a faint so nothing a fallen
+// monster carried survives to a revival.
+function loadBattleStats(mon, badges) {
+  if (!mon || typeof mon !== 'object') return;
+  ensureBattleStats(mon);
+  mon.stats = statBlock(mon.partyStats);
+  resetStages(mon);
+  mon.cur = statBlock(mon.stats);
+  applyStatusPenalty(mon);
+  applyBadgeBoosts(mon, badges);
+}
+
+// ItemUseMedicine's .cureStatusAilment (engine/items/item_effects.asm
+// :868-913): curing the fielded monster copies its party stats over its
+// battle stats -- which drops the penalty, every badge boost and every stage's
+// effect (the stages themselves stay) -- and on a Transformed one, its own
+// stats come back. Turn calls it for the player's items only; the computer's
+// AICureStatus (engine/battle/trainer_ai.asm :625-636) touches no stat.
+function reloadPartyStats(mon) {
+  if (!mon || typeof mon !== 'object') return;
+  ensureBattleStats(mon);
+  mon.cur = statBlock(mon.partyStats);
+}
+
+// A copy of a battle-stat block, for the one caller that moves a whole set
+// between battlers (Transform).
+function copyStats(src) {
+  return statBlock(src);
+}
+
+// One stage change, the way StatModifierUpEffect / StatModifierDownEffect
+// (engine/battle/effects.asm :351-514 / :539-716) make it. Every stage change
+// in this referee goes through here: a move's primary or side effect
+// (applyPrimary / applySide below), an X item and Rage (Turn).
+//
+// ctx:
+//   mon, fighter -- the battler whose stage moves, and its seat
+//   stat, delta  -- 'atk' .. 'eva', +-1 / +-2
+//   mover        -- the seat whose turn it is (hWhoseTurn): the move's or the
+//                   item's user, or the raging battler for Rage, which
+//                   HandleBuildingRage makes the user (core.asm :4913-4950)
+//   nonMover     -- the battle mon "whose turn it is not", which the
+//                   re-penalty lands on: the action's target for a move, the
+//                   battler opposite for an item, the attacker for Rage. null
+//                   when nobody is standing there.
+//
+// Returns { outcome, stage }:
+//   'rose' / 'fell' -- the stage moved and the battle stat was rebuilt
+//   'max' / 'min'   -- already at +6 / -6: nothing moved (the cart's
+//                      "Nothing happened!" / CantLowerAnymore)
+//   'stuck'         -- the battle stat itself was already at 999 (a raise) or
+//                      1 (a drop). The stage is wound back ONE step whatever
+//                      the delta (RestoreOriginalStatModifier `dec [hl]`,
+//                      CantLowerAnymore_Pop `inc [hl]`), so a +2 move on a 999
+//                      stat still nets +1 -- the cart's quirk, kept.
+//
+// The rebuild is the changed stat alone: unmodified x the new stage's ratio,
+// held at 999 on a raise and at 1 on a drop, the one end each routine checks.
+// The other end is left open as the cart leaves it: a drop from a raised stage
+// can store more than 999 (a 458 Defense lowered from +4 to +3 is 1145), and a
+// raise out of -6 on a tiny stat can store 0; the damage step scales and
+// clamps what it is handed. Burn, paralysis and badges are not in the rebuild
+// -- which is why a stage change on a burned Attack lifts the burn until the
+// re-penalty puts it back.
+function changeStat(ctx) {
+  const { mon, fighter, stat } = ctx;
+  const delta = int(ctx.delta, 0);
+  ensureBattleStats(mon);
+  const before = clampStage(mon.stages[stat]);
+  if (delta > 0 && before >= STAGE_MAX) return { outcome: 'max', stage: before };
+  if (delta < 0 && before <= STAGE_MIN) return { outcome: 'min', stage: before };
+  const after = clampStage(before + delta);
+  mon.stages[stat] = after;
+
+  if (IS_BATTLE_STAT[stat]) {
+    const current = int(mon.cur[stat], 0);
+    if (delta > 0 && current === MAX_STAT_VALUE) {
+      mon.stages[stat] = after - 1;
+      return { outcome: 'stuck', stage: mon.stages[stat] };
+    }
+    if (delta < 0 && current === 1) {
+      mon.stages[stat] = after + 1;
+      return { outcome: 'stuck', stage: mon.stages[stat] };
+    }
+    let value = Math.floor(Math.max(0, int(mon.stats[stat], 0)) * stageMult(after) / 100);
+    if (delta > 0) {
+      value = Math.min(MAX_STAT_VALUE, value);
+    } else {
+      value = Math.max(1, value);
+    }
+    mon.cur[stat] = value;
+  }
+
+  // The badge-stacking glitch. ApplyBadgeStatBoosts runs again on the
+  // player's battle mon after the player's own raise (effects.asm :497-499)
+  // and after the enemy's drop (:687-689) -- accuracy and evasion included --
+  // over all four stats, so every badge stat compounds another 9/8. "The
+  // player" is the seat holding a badge set (Turn.attempt keeps one only on
+  // side a of a fight against the computer), so a raise re-runs the mover's
+  // own set and a drop re-runs the set of a target sitting across from it.
+  if (delta > 0) {
+    if (ctx.mover === fighter) applyBadgeBoosts(mon, fighter ? fighter.badges : null);
+  } else if (ctx.mover && fighter && ctx.mover.side !== fighter.side) {
+    applyBadgeBoosts(mon, fighter.badges);
+  }
+
+  // The re-penalty glitch: both routines end on QuarterSpeedDueToParalysis +
+  // HalveAttackDueToBurn for the battler whose turn it is not, whichever stat
+  // moved ("these shouldn't be here", effects.asm :504-506; :694-698).
+  if (ctx.nonMover) applyStatusPenalty(ctx.nonMover);
+
+  return { outcome: delta > 0 ? 'rose' : 'fell', stage: after };
 }
 
 // ------------------------------------------------------------------
 // Phase 1 primary handlers
 // ------------------------------------------------------------------
 
+// StatModTextStrings (data/battle/stat_mod_names.asm): the evasion stat is
+// "EVADE" in the cart's sentences.
 const STAT_LABELS = {
   atk: 'ATTACK', def: 'DEFENSE', spd: 'SPEED',
-  spc: 'SPECIAL', acc: 'ACCURACY', eva: 'EVASION',
+  spc: 'SPECIAL', acc: 'ACCURACY', eva: 'EVADE',
 };
 
 // effect id -> { stat, delta, selfTarget }
@@ -243,6 +510,99 @@ const STAT_EFFECTS = {
   62: { stat: 'acc', delta: -2, selfTarget: false },
   63: { stat: 'eva', delta: -2, selfTarget: false },
 };
+
+// TransformEffect_'s `.copyPPLoop`: every copied move gets 5 PP.
+const TRANSFORM_PP = 5;
+// DisableEffect's slot draw is a loop the cart never needs to bound; the
+// referee bounds it (applyPrimary) so a malformed sheet cannot hang a hub.
+const DISABLE_PICK_GUARD = 4096;
+// The same bound on every other redraw loop the referee runs for a cart
+// routine that loops until a byte suits it (SleepEffect's counter,
+// SwitchAndTeleportEffect's level roll, MimicEffect's `.getRandomMove`): a
+// generator that never yields one is a frozen cart, and the referee answers
+// the loop's fallback instead (quirks reproduced, freezes never).
+const REDRAW_GUARD = 4096;
+
+// The primary stat drops, StatModifierDownEffect's non-side branch.
+function isPrimaryStatDown(effectId) {
+  const fx = STAT_EFFECTS[int(effectId, 0)];
+  return fx !== undefined && fx.delta < 0;
+}
+
+// MoveHitTest's Mist check (core.asm :5262-5299): the mover's effect in
+// ATTACK_DOWN1..HAZE or ATTACK_DOWN2..REFLECT against a target PROTECTED_BY_
+// MIST misses, before the accuracy byte. Of those, only the stat drops ever
+// call MoveHitTest (Conversion, Haze and the screens are ResidualEffects1 and
+// never do), so the drops are the whole of it.
+function mistBlocks(effectId, targetMon) {
+  return isPrimaryStatDown(effectId) && !!targetMon && typeof targetMon === 'object'
+    && targetMon.mist === true;
+}
+
+// How a power-0 move meets MoveHitTest, by its pokered routine. The cart
+// never runs MoveHitTest for a power-0 move on the way in (CalculateDamage's
+// `jp z, PlayerCheckIfFlyOrChargeEffect`, core.asm :3145; ResidualEffects1
+// jumps past it, :3125), so each effect's routine decides:
+//   'none'     -- no hit test at all: no INVULNERABLE miss, no accuracy byte.
+//                 The self and field effects, Bide, Teleport (its own level
+//                 roll), Transform (its own broken check), Splash, Mirror
+//                 Move / Metronome (the called move tests), and an
+//                 effect-less move (`.executeOtherEffects` finds nothing).
+//   'conversion' -- ConversionEffect_'s own INVULNERABLE check, no byte.
+//   'statdown' -- StatModifierDownEffect: the computer's extra miss byte, a
+//                 Substitute, then MoveHitTest (Mist inside it).
+//   'poison'   -- PoisonEffect: a Substitute, a status, a Poison type, then
+//                 MoveHitTest.
+//   'disable'  -- DisableEffect: MoveHitTest, "But it failed!" on a miss.
+//   'sleep'    -- SleepEffect (effects.asm :26-68): a recharging target skips
+//                 every check and the hit test; else already asleep, any
+//                 status, then MoveHitTest -- no byte before the last.
+//   'paralyze' -- ParalyzeEffect_ (move_effects/paralyze.asm): any status, an
+//                 ELECTRIC move into a GROUND type, then MoveHitTest.
+//   'confusion' -- ConfusionEffect (effects.asm :1120-1126): a Substitute,
+//                 then MoveHitTest, then already confused.
+//   'mimic'    -- MimicEffect (effects.asm :1203-1273): MoveHitTest, then
+//                 the pick (the player's menu, or `BattleRandom & 3`).
+//   'leechseed' -- LeechSeedEffect_ (move_effects/leech_seed.asm):
+//                 MoveHitTest, then a GRASS type, then already seeded.
+// None of the last five asks CheckTargetSubstitute but Confusion, so a doll
+// stops none of the others (`blockedBySubstitute`).
+const STATUS_PLAN = {
+  0: 'none', 1: 'none', 9: 'none', 83: 'none',
+  10: 'none', 11: 'none', 12: 'none', 13: 'none', 14: 'none', 15: 'none',
+  50: 'none', 51: 'none', 52: 'none', 53: 'none', 54: 'none', 55: 'none',
+  25: 'none', 26: 'none', 28: 'none', 46: 'none', 47: 'none',
+  56: 'none', 57: 'none', 64: 'none', 65: 'none', 79: 'none', 85: 'none',
+  24: 'conversion',
+  18: 'statdown', 19: 'statdown', 20: 'statdown', 21: 'statdown',
+  22: 'statdown', 23: 'statdown', 58: 'statdown', 59: 'statdown',
+  60: 'statdown', 61: 'statdown', 62: 'statdown', 63: 'statdown',
+  66: 'poison', 86: 'disable',
+  32: 'sleep', 49: 'confusion', 67: 'paralyze', 82: 'mimic',
+  84: 'leechseed',
+};
+
+// An effect outside the table is a power-0 move whose routine is a damaging
+// one (a modded sheet): CalculateDamage returned before the hit test, so it
+// is 'none' too.
+function statusPlan(effectId) {
+  return STATUS_PLAN[int(effectId, 0)] || 'none';
+}
+
+// PoisonEffect's turn-aways (effects.asm :78-96), checked before its
+// MoveHitTest: a Substitute, any status at all, a Poison type (`cp POISON`
+// on both type bytes; `poisonType` is the ruleset's index, null when it
+// named none). The primary routine says "It didn't affect" for all three.
+function poisonTurnsAway(targetMon, poisonType) {
+  if (!targetMon || typeof targetMon !== 'object') return true;
+  if (hasSubstitute(targetMon) || hasMajorStatus(targetMon)) return true;
+  if (poisonType !== null && poisonType !== undefined && Array.isArray(targetMon.types)) {
+    for (const t of targetMon.types) {
+      if (t === poisonType) return true;
+    }
+  }
+  return false;
+}
 
 const PHASE1_PRIMARY = {
   10: true, 11: true, 12: true, 13: true, 14: true, 15: true,
@@ -301,70 +661,355 @@ function fighterFields(fighter) {
 // the status event (1 inflicted, 0 snapped out), independent of PSN/SLP/…
 function confuse(out, fighter, mon, rng, failIfAlready) {
   if (mon.confusion && mon.confusion > 0) {
-    if (failIfAlready) out.nothing = true;
+    // ConfusionEffectFailed (effects.asm :1158-1163): the primary's
+    // ConditionalPrintButItFailed prints (wMoveDidntMiss is clear on a
+    // power-0 move); the side effect's `cp CONFUSION_SIDE_EFFECT / ret z`
+    // says nothing.
+    if (failIfAlready) out.messages.push('But, it failed!');
     return;
   }
   const turns = (rng ? rng.byte() : 0) % 4 + 2;
   mon.confusion = turns;
-  const text = `${mon.species} became confused`;
+  // ConfusionSideEffectSuccess plays the move's animation for the primary
+  // (`cp CONFUSION_SIDE_EFFECT / call nz, PlayCurrentMoveAnimation2`).
+  out.animates = true;
+  // BecameConfusedText, "<TARGET>\nbecame confused!".
+  const text = `${Events.named(fighter.side, mon.species)}\nbecame confused!`;
   out.messages.push(text);
   const fields = fighterFields(fighter);
   fields.confused = 1;
-  fields.text = text;
+  fields.text = Events.plain(text);
   out.events.push({ kind: 'status', fields });
 }
 
-function applyStatChange(out, fighter, mon, stat, delta) {
-  if (delta < 0 && mon.mist) {
-    out.messages.push('But it failed');
-    return;
-  }
+// A move's stage change, narrated. `changeStat` does the arithmetic and both
+// glitches; this adds the sentences. `mover` is the move's user and
+// `nonMover` the battle mon of the seat the action was aimed at -- the battler
+// whose turn it is not, in the cart's one-opponent terms. `side` is a move's
+// side effect, which the cart lets fail silently where a primary prints
+// "Nothing happened!" (CantLowerAnymore: `cp ATTACK_DOWN_SIDE_EFFECT; ret nc`).
+// Both of a drop's failures go through that label -- the stage already at -6
+// (`dec b; jp z, CantLowerAnymore`) and the stat already at 1 -- so a side
+// effect says nothing at either wall.
+//
+// Mist stops a primary drop and never a side effect's. The cart's only Mist
+// check is MoveHitTest's (core.asm `.enemyMistCheck` / `.playerMistCheck`),
+// which looks at effects ATTACK_DOWN1..HAZE and ATTACK_DOWN2..REFLECT alone;
+// the side-effect drops (ATTACK_DOWN_SIDE_EFFECT..SPECIAL_DOWN_SIDE_EFFECT)
+// are past that range, and StatModifierDownEffect's side branch never calls
+// MoveHitTest -- so AURORA BEAM lowers a Mist user's Attack.
+//
+// The walls a primary hits say what the cart's routines say: a raise at +6
+// is StatModifierUpEffect's `jp c, PrintNothingHappenedText` (effects.asm
+// :368-370) and a drop at -6 is CantLowerAnymore (:705-710), both "Nothing
+// happened!" -- the same line the 999 / 1 walls print. Mist is no longer
+// asked here: it is MoveHitTest's (core.asm :5262-5283), and Turn runs that
+// before the accuracy byte (`_statusHitTest`). Returns true when the stage
+// moved -- the one outcome UpdateStatDone / UpdateLoweredStatDone animate.
+function applyStatChange(out, fighter, mon, stat, delta, mover, nonMover, side) {
   const label = STAT_LABELS[stat] || stat;
-  const before = clampStage(mon.stages[stat]);
-  const after = clampStage(before + delta);
-  if (after === before) {
-    if (delta > 0) {
-      out.messages.push(`${mon.species}'s ${label} won't go any higher`);
-    } else {
-      out.messages.push(`${mon.species}'s ${label} won't go any lower`);
-    }
-    return;
-  }
-  mon.stages[stat] = after;
-  const verb = delta > 0 ? 'rose' : 'fell';
-  const text = `${mon.species}'s ${label} ${verb}`;
-  out.messages.push(text);
-  const fields = fighterFields(fighter);
-  fields.amount = after;
-  fields.text = text;
-  out.events.push({ kind: 'stat', fields });
-}
-
-function resetStages(mon) {
-  mon.stages.atk = 0;
-  mon.stages.def = 0;
-  mon.stages.spd = 0;
-  mon.stages.spc = 0;
-  mon.stages.acc = 0;
-  mon.stages.eva = 0;
-}
-
-// Cartridge Substitute blocks foe-targeting primaries (Sleep Powder, Growl,
-// Disable, Transform, Mimic). Self-targeting (Recover, Swords Dance,
-// Substitute) and field-wide Haze still run; Conversion copies onto the user.
-function blockedBySubstitute(effectId) {
-  const statFx = STAT_EFFECTS[effectId];
-  if (statFx) return !statFx.selfTarget;
-  if (effectId === 24 || effectId === 25 || effectId === 46 || effectId === 47
-      || effectId === 56 || effectId === 64 || effectId === 65
-      || effectId === 79 || effectId === 85) {
+  const { outcome, stage } = changeStat({
+    mon, fighter, stat, delta, mover, nonMover,
+  });
+  if (outcome === 'max' || outcome === 'min' || outcome === 'stuck') {
+    if (!side) out.messages.push('Nothing happened!');
     return false;
   }
+  // MonsStatsRoseText / MonsStatsFellText (effects.asm :516-536, :718-742):
+  // "<USER>'s <STAT> rose!" and "<TARGET>'s <STAT> fell!", with "greatly"
+  // for the two-stage effects (an UP2 effect: `cp ATTACK_DOWN1_EFFECT / ret
+  // nc`; a DOWN2 one: BIDE_EFFECT up to ATTACK_DOWN_SIDE_EFFECT). A side
+  // effect's one stage is plain "fell!". The name is <USER>'s for a raise
+  // and <TARGET>'s for a drop -- `mon` either way, on `fighter`'s side
+  // (K17) -- and the box breaks after it ("'s" / `line`) and, for a
+  // "greatly", at GreatlyRoseText's / GreatlyFellText's <SCROLL> (K18).
+  const text = `${Events.named(fighter.side, mon.species)}'s\n${label}`
+    + `${(delta >= 2 || delta <= -2) ? '\ngreatly ' : ' '}${outcome}!`;
+  out.messages.push(text);
+  const fields = fighterFields(fighter);
+  // The stage it now sits at -- when that is not below neutral. `amount` is
+  // unsigned on the wire (Wire.AMOUNT_MAX / lib/sanitize: the direction is the
+  // sentence's), so the sanitiser strips a negative one in transit; leaving it
+  // out here keeps the stream the referee emits the stream a client receives.
+  if (stage >= 0) fields.amount = stage;
+  // ...and `stage` says it signed, -6..6, every time (contract K10).
+  fields.stage = stage;
+  fields.text = Events.plain(text);
+  out.events.push({ kind: 'stat', fields });
   return true;
 }
 
+// HazeEffect_ (engine/battle/move_effects/haze.asm) on one battler: every
+// stage back to neutral (ResetStatMods), the unmodified stats copied over the
+// battle ones -- which lifts a burn or paralysis penalty and every badge boost
+// until something rebuilds them (ResetStats skips HP and nothing else) -- its
+// Disable gone, and CureVolatileStatuses: confusion, X Accuracy, Mist, Focus
+// Energy, Leech Seed, and BattleStatus3's Bad Poison, Reflect and Light
+// Screen (`and %11110000 | 1 << TRANSFORMED` keeps the Transform). The Bad
+// Poison bit going leaves a TOXIC monster plain poisoned -- its PSN bit is in
+// the status byte, which Haze cures on the target alone (`applyPrimary`) --
+// and takes a lingering bit (`toxicLinger`) with it. Returns whether the
+// battler was confused, for the snap-out chip.
+function hazeReset(mon) {
+  ensureBattleStats(mon);
+  resetStages(mon);
+  mon.cur = statBlock(mon.stats);
+  mon.reflect = false;
+  mon.lightScreen = false;
+  mon.disable = null;
+  mon.xAccuracy = false;
+  mon.mist = false;
+  mon.focusEnergy = false;
+  mon.leechSeed = null;
+  if (mon.status === 'toxic') mon.status = 'poison';
+  mon.toxicLinger = null;
+  const confused = int(mon.confusion, 0) > 0;
+  mon.confusion = 0;
+  return confused;
+}
+
+// Whether a Substitute stands in front of `mon`. The doll's HP is
+// `substitute`; AttackSubstitute (core.asm :4849-4900) leaves a doll standing
+// at 0 when a hit takes exactly its HP (`sub [hl]` / `ret nc`), and that doll
+// is `subAtZero` -- still up, so it still blocks, still soaks the next hit
+// (which breaks it) and still makes a second SUBSTITUTE fail.
+function hasSubstitute(mon) {
+  if (!mon || typeof mon !== 'object') return false;
+  return int(mon.substitute, 0) > 0 || mon.subAtZero === true;
+}
+
+// The primaries a doll stops are the routines that ask CheckTargetSubstitute
+// (effects.asm :1436-1446): StatModifierDownEffect (:551), PoisonEffect
+// (:86) and ConfusionEffect (:1121) -- and no other. SleepEffect,
+// ParalyzeEffect_, LeechSeedEffect_, TransformEffect_ (whose only
+// HAS_SUBSTITUTE_UP test is the user's own, for its animation), MimicEffect
+// and DisableEffect never ask, and MoveHitTest's own Substitute check is the
+// broken drain one (core.asm :5251-5256), so SLEEP POWDER, THUNDER WAVE,
+// LEECH SEED, TRANSFORM, MIMIC and DISABLE all reach the monster behind a
+// doll. The self and field effects never had a target to stop. Turn runs
+// each of the three where its routine does (the 'statdown', 'poison' and
+// 'confusion' plans), before the hit test; this is the backstop for a caller
+// that skipped them.
+function blockedBySubstitute(effectId) {
+  const statFx = STAT_EFFECTS[effectId];
+  if (statFx) return !statFx.selfTarget;
+  return effectId === 49 || effectId === 66;
+}
+
+// ------------------------------------------------------------------
+// CalcStat (home/move_mon.asm :54-229)
+// ------------------------------------------------------------------
+//
+// One stat from its base, its DV, the level and (when `statExp` is not null)
+// the stat exp: floor(((base + DV) * 2 + floor(b / 4)) * level / 100) + 5,
+// and + level + 10 for HP, held at 999. `b` is `.statExpLoop`'s: the least
+// b >= 1 with b * b >= stat exp, at most 255 -- so a stat exp of 0 still
+// counts 1, which floors to 0. `statExp` null is CalcStat called with `b = 0`
+// ("consider stat exp?" no): the term is 0. GetEnemyMonStat (core.asm
+// :4258-4297) is the second; a level-up's CalcStats (experience.asm) the
+// first.
+function statExpBonus(statExp) {
+  const se = Math.max(0, int(statExp, 0));
+  let b = 1;
+  while (b < 255 && b * b < se) b += 1;
+  return b;
+}
+
+function calcStat(base, dv, level, statExp, isHp) {
+  let term = 0;
+  if (statExp !== null && statExp !== undefined) term = Math.floor(statExpBonus(statExp) / 4);
+  const L = Math.max(0, int(level, 1));
+  let value = Math.floor(((Math.max(0, int(base, 0)) + Math.max(0, int(dv, 0))) * 2 + term) * L / 100);
+  if (isHp) value += L + 10; else value += 5;
+  if (value > MAX_STAT_VALUE) value = MAX_STAT_VALUE;
+  return value;
+}
+
+// The HP DV CalcStat builds out of the other four's low bits (`.getHPIV`).
+function hpDv(dvs) {
+  if (!dvs || typeof dvs !== 'object') return 0;
+  return (int(dvs.atk, 0) % 2) * 8 + (int(dvs.def, 0) % 2) * 4
+    + (int(dvs.spd, 0) % 2) * 2 + (int(dvs.spc, 0) % 2);
+}
+
+// ------------------------------------------------------------------
+// A move's maximum PP, and the PP items that read it
+// ------------------------------------------------------------------
+
+// GetMaxPP (engine/items/item_effects.asm): the move's base PP plus, for each
+// PP Up the PP byte's top two bits count *now*, AddBonusPP's fifth of the
+// base capped at 7. So a DecrementPP that wraps a slot at 0 (Turn `stepPp`:
+// 63 PP and one PP Up fewer) moves the maximum with the bits, and the cart's
+// ETHER reads that. The client's sheet states the same number
+// (MediatedBattle maxPpOf), which is what `basePpOf` reads the base back out
+// of: the referee holds no move table.
+const PP_UP_BONUS_MAX = 7;
+const PP_BASE_MAX = 63; // PP_MASK: a base PP is the low six bits
+
+function getMaxPp(base, ups) {
+  return base + ups * Math.min(PP_UP_BONUS_MAX, Math.floor(base / 5));
+}
+
+// The base PP behind a stated maximum: the one `base` (0..PP_BASE_MAX) whose
+// GetMaxPP over `ups` is `maxPp` -- strictly increasing in the base, so there
+// is at most one -- or null for a number no base gives (a sheet stating a
+// maximum of its own), whose maximum then never moves.
+function basePpOf(maxPp, ups) {
+  for (let base = Math.min(maxPp, PP_BASE_MAX); base >= 0; base -= 1) {
+    const value = getMaxPp(base, ups);
+    if (value === maxPp) return base;
+    if (value < maxPp) return null;
+  }
+  return null;
+}
+
+// ItemUsePPRestore's `.restorePP` (item_effects.asm), on one move row, for an
+// ETHER's 10 (`amount` a number) or a MAX ETHER (`amount` true; the ELIXERs
+// run it on every slot). `b` is GetMaxPP -- the row's `maxPp`, which the
+// sheet states and a wrap re-reads. ETHER: the PP's low six bits equal to
+// `b` is no effect (`ret z`); otherwise +10, kept only below `b`. MAX ETHER
+// compares the WHOLE byte with `b` -- the cart's own bug ("doesn't mask out
+// the upper two bits"), so a full move with PP Ups is restored to what it
+// has. Either writes the PP Ups beside `b`: a slot past its wrap -- 63 over
+// a lower maximum -- is brought DOWN to it, and that is a restore. True when
+// the cart's flag says restored: `add b` left a byte other than 0.
+function restorePp(move, amount) {
+  const pp = Math.max(0, int(move.pp, 0));
+  const ups = int(move.ppUps, 0) % 4;
+  let b = Math.max(0, int(move.maxPp, pp));
+  if (amount === true) {
+    if (ups * 64 + pp === b) return false;
+  } else {
+    if (pp === b) return false;
+    const next = pp + int(amount, 0);
+    if (next < b) b = next;
+  }
+  move.pp = b;
+  return (ups * 64 + b) % 256 !== 0;
+}
+
+// ------------------------------------------------------------------
+// Transform (engine/battle/move_effects/transform.asm), and undoing it
+// ------------------------------------------------------------------
+
+function copyMoveRow(m) {
+  return {
+    id: m.id || 'move', name: m.name,
+    pp: Math.max(0, int(m.pp, 0)), maxPp: m.maxPp,
+    power: Math.max(0, int(m.power, 0)), accuracy: Math.max(0, int(m.accuracy, 255)),
+    type: Math.max(0, int(m.type, 0)), effect: Math.max(0, int(m.effect, 0)),
+    chance: Math.max(0, int(m.chance, 0)), highCrit: m.highCrit === true,
+    ppUps: m.ppUps, basePp: m.basePp,
+  };
+}
+
+function copyKeyed(t) {
+  if (!t || typeof t !== 'object') return null;
+  return { ...t };
+}
+
+// What a switch-out gives back. TransformEffect_ rewrites the battle
+// struct only (wBattleMon / wEnemyMon); the party struct keeps the
+// monster's own species, types, moves and PP -- DecrementPP returns before
+// the party copy while TRANSFORMED is set -- so LoadBattleMonFromParty
+// (core.asm :1626-1667) brings all of it back. The referee keeps the
+// pre-Transform copy on the monster (`preTransform`, the first Transform's
+// only: a second one copies over a battle struct the party never saw) and
+// restores it here, at a switch-in and at a faint. The stats are
+// `loadBattleStats`'.
+function untransform(mon) {
+  if (!mon || typeof mon !== 'object') return;
+  const saved = mon.preTransform;
+  mon.preTransform = null;
+  mon.transformed = false;
+  if (!saved) return;
+  mon.types = saved.types;
+  mon.moves = saved.moves;
+  mon.baseSpd = saved.baseSpd;
+  mon.base = saved.base;
+  mon.dvs = saved.dvs;
+}
+
+// Everything a switch-out or a faint gives back of the battle struct's move
+// list (LoadBattleMonFromParty reloads it from the party): the Transform's
+// (`untransform`), then every slot a MIMIC wrote while the monster was itself
+// -- the party's own move again, at the slot's PP, which DecrementPP kept in
+// step with the party's. A MIMIC used while TRANSFORMed wrote over a copy the
+// party never had, and `untransform` already threw it away. Walked in slot
+// order so both runtimes rebuild the same list.
+function restoreMoves(mon) {
+  if (!mon || typeof mon !== 'object') return;
+  untransform(mon);
+  const saved = mon.preMimic;
+  mon.preMimic = null;
+  if (!saved || typeof saved !== 'object' || !Array.isArray(mon.moves)) return;
+  for (let i = 1; i <= mon.moves.length; i += 1) {
+    const row = saved[i];
+    if (row) {
+      const back = copyMoveRow(row);
+      back.pp = Math.max(0, int(mon.moves[i - 1].pp, back.pp));
+      // ...and its PP Ups: one byte, which a wrapping DecrementPP borrows
+      // from in both copies alike (Turn `_decrementPp`) -- and GetMaxPP over
+      // MIMIC's base re-reads them (`getMaxPp`).
+      if (mon.moves[i - 1].ppUps !== undefined && mon.moves[i - 1].ppUps !== null) {
+        back.ppUps = mon.moves[i - 1].ppUps;
+      }
+      if (typeof back.basePp === 'number') {
+        back.maxPp = getMaxPp(back.basePp, int(back.ppUps, 0));
+      }
+      mon.moves[i - 1] = back;
+    }
+  }
+}
+
+// `.setSleepCounter` (effects.asm :55-59): `BattleRandom / and SLP_MASK`,
+// redrawn while it comes out 0 -- 1..7 turns. No generator draws nothing and
+// answers 1 (a caller that cannot roll still gets an honest sleep).
+function sleepTurns(rng) {
+  if (!rng) return 1;
+  for (let i = 0; i < REDRAW_GUARD; i += 1) {
+    const turns = rng.byte() % 8;
+    if (turns !== 0) return turns;
+  }
+  return 1;
+}
+
+// SwitchAndTeleportEffect's level roll (effects.asm :810-846, and the
+// enemy's mirror :856-880), for a wild fight: a user at or above the
+// target's level always gets away, with no draw. Otherwise `add b / inc c`
+// -- c is the two levels plus one, an 8-bit sum -- and `BattleRandom` is
+// redrawn until it is below c, then compared with the target's level / 4
+// (`srl b / srl b`): at or above it, the escape works. A c that wrapped to 0
+// has no byte below it and freezes the cart; the referee draws nothing there
+// and the escape fails (quirks reproduced, freezes never).
+function teleportEscapes(userLevel, targetLevel, rng) {
+  const a = Math.max(0, int(userLevel, 1)) % 256;
+  const b = Math.max(0, int(targetLevel, 1)) % 256;
+  if (a >= b) return true;
+  const c = (a + b + 1) % 256;
+  if (c === 0 || !rng) return false;
+  for (let i = 0; i < REDRAW_GUARD; i += 1) {
+    const r = rng.byte();
+    if (r < c) return r >= Math.floor(b / 4);
+  }
+  return false;
+}
+
 // ctx: effectId, rng, userMon, targetMon, userFighter, targetFighter,
-//      moveIndex (1-based), statusToWire
+//      moveIndex (1-based), statusToWire, plus
+//   moveId       the move's id (PoisonEffect's `cp TOXIC`)
+//   field        every standing battler, { fighter, mon } in field order
+//                (Haze's reach)
+//   playerMover  the user is "the player" (Transform's broken check)
+//   unlimitedPp  the target is the computer's, whose PP DisableEffect never
+//                reads outside a link battle
+// Returns { nothing, messages, events, heals, cannotMove, animates } where
+// heals = { amount } for user, `cannotMove` is Haze's CANNOT_MOVE on the
+// target and `animates` says the routine played the move's animation
+// (PlayCurrentMoveAnimation / PlayCurrentMoveAnimation2): every routine here
+// plays it where it succeeds and nowhere it fails -- HAZE and SPLASH always
+// -- which is what Turn reads to keep or take back the power-0 move's `anim`
+// (contract K22's audit).
 function applyPrimary(ctx) {
   const out = {
     nothing: false, messages: [], events: [], heals: [], costs: [],
@@ -377,26 +1022,95 @@ function applyPrimary(ctx) {
   } = c;
   const wire = c.statusToWire || {};
 
-  if (targetMon && (targetMon.substitute || 0) > 0 && blockedBySubstitute(effectId)) {
+  if (targetMon && hasSubstitute(targetMon) && blockedBySubstitute(effectId)) {
     out.nothing = true;
     return out;
   }
 
+  // SplashEffect (effects.asm :1282-1284): its animation, then
+  // PrintNoEffectText -- "No effect!".
   if (effectId === 85) {
-    out.nothing = true;
+    out.animates = true;
+    out.messages.push('No effect!');
     return out;
   }
 
   if (effectId === 56) {
-    const amount = Math.floor(Math.max(1, int(userMon.maxHp, 1)) / 2);
+    // HealEffect_ (move_effects/heal.asm). Full HP fails it, through a
+    // compare that is the cart's own bug: `cp [hl]` on the high bytes only
+    // sets the carry and `sbc [hl]` on the low ones decides, so a monster
+    // 255 or 511 HP short of its maximum fails too -- "But, it failed!".
+    // REST then writes 2 over the whole status byte -- asleep for two turns,
+    // any poison, burn, freeze or paralysis gone (their stored penalties
+    // stay: nothing recomputes the stats) and a TOXIC's BADLY_POISONED bit,
+    // which lives in BattleStatus3, left lingering -- says "started
+    // sleeping!" or, when it had a status, "fell asleep and became
+    // healthy!", and heals to the full; RECOVER and SOFTBOILED heal half the
+    // maximum. RegainedHealthText follows the HP (`afterHeals`).
+    const hp = Math.max(0, int(userMon.hp, 0));
+    const maxHp = Math.max(1, int(userMon.maxHp, 1));
+    const carry = ((Math.floor(hp / 256) % 256) < (Math.floor(maxHp / 256) % 256)) ? 1 : 0;
+    if (((((hp % 256) - (maxHp % 256) - carry) % 256) + 256) % 256 === 0) {
+      out.messages.push('But, it failed!');
+      return out;
+    }
+    let amount = Math.floor(maxHp / 2);
+    if (moveKey(c.moveId) === 'REST') {
+      const had = hasMajorStatus(userMon);
+      if (userMon.status === 'toxic') userMon.toxicLinger = true;
+      userMon.status = 'sleep';
+      userMon.statusTurns = 2;
+      // FellAsleepBecameHealthyText / StartedSleepingEffect, <USER>'s.
+      const user = Events.named(userFighter.side, userMon.species);
+      const text = had ? `${user}\nfell asleep and\nbecame healthy!`
+        : `${user}\nstarted sleeping!`;
+      out.messages.push(text);
+      const fields = fighterFields(userFighter);
+      fields.status = wire.sleep || 'SLP';
+      fields.text = Events.plain(text);
+      out.events.push({ kind: 'status', fields });
+      amount = maxHp;
+    }
     out.heals.push({ amount });
+    out.afterHeals = [`${Events.named(userFighter.side, userMon.species)}\nregained health!`];
+    // `.playAnim`, the restore's (heal.asm): never on the failed compare.
+    out.animates = true;
     return out;
   }
 
   if (effectId === 25) {
-    resetStages(userMon);
-    resetStages(targetMon);
-    out.messages.push('All stat changes were eliminated');
+    // Every battler on the field gets hazeReset -- the cart's two, every
+    // standing one of a 2v2 (`c.field`, field order; the user and the target
+    // when a caller names none) -- and only the TARGET's status byte is cured
+    // (`.cureStatuses`), whatever it held. A target that was asleep or frozen
+    // loses the move it has not used yet: `ld a, $ff / ld [de], a` writes
+    // CANNOT_MOVE over its selected move (`cannotMove`, Turn's to honour).
+    let field = c.field;
+    if (!Array.isArray(field) || field.length === 0) {
+      field = [{ fighter: userFighter, mon: userMon },
+        { fighter: targetFighter, mon: targetMon }];
+    }
+    const snapped = [];
+    for (const seat of field) {
+      if (hazeReset(seat.mon)) snapped.push(seat);
+    }
+    const cured = targetMon.status;
+    if (cured) {
+      targetMon.status = null;
+      targetMon.statusTurns = 0;
+      if (cured === 'sleep' || cured === 'freeze') out.cannotMove = true;
+      const fields = fighterFields(targetFighter);
+      fields.text = `${targetMon.species} recovered`;
+      out.events.push({ kind: 'status', fields });
+    }
+    for (const seat of snapped) {
+      const fields = fighterFields(seat.fighter);
+      fields.confused = 0;
+      fields.text = `${seat.mon.species} snapped out of confusion`;
+      out.events.push({ kind: 'status', fields });
+    }
+    out.messages.push('All STATUS changes\nare eliminated!');
+    out.animates = true;
     return out;
   }
 
@@ -404,40 +1118,65 @@ function applyPrimary(ctx) {
   if (statFx) {
     const mon = statFx.selfTarget ? userMon : targetMon;
     const fighter = statFx.selfTarget ? userFighter : targetFighter;
-    applyStatChange(out, fighter, mon, statFx.stat, statFx.delta);
+    // UpdateStatDone / UpdateLoweredStatDone play it on a stage that moved;
+    // a wall is "Nothing happened!" and no animation.
+    out.animates = applyStatChange(out, fighter, mon, statFx.stat, statFx.delta,
+      userFighter, targetMon, false);
     return out;
   }
 
   if (effectId === 32) {
-    if (hasMajorStatus(targetMon)) {
+    // SleepEffect (effects.asm :26-68), past the checks Turn ran first (the
+    // 'sleep' plan). `c.overwrite` is its recharging target, which skips
+    // them all: `.setSleepCounter` writes the counter over the whole status
+    // byte, so a poison, a burn or a paralysis is simply gone (their stored
+    // penalties stay -- nothing recomputes them) and a TOXIC's BADLY_POISONED
+    // bit, which lives in BattleStatus3, outlives it (`toxicLinger`), as it
+    // does a disobedience nap.
+    if (hasMajorStatus(targetMon) && !c.overwrite) {
       out.nothing = true;
       return out;
     }
-    const turns = (rng ? rng.byte() : 0) % 7 + 1;
+    if (targetMon.status === 'toxic') targetMon.toxicLinger = true;
+    // `.setSleepCounter`: `BattleRandom / and SLP_MASK`, redrawn while it is
+    // 0 -- 1..7, uniform, one draw or more.
+    const turns = sleepTurns(rng);
     targetMon.status = 'sleep';
     targetMon.statusTurns = turns;
+    out.animates = true;
     const token = wire.sleep || 'SLP';
-    const text = `${targetMon.species} fell asleep`;
+    const text = `${Events.named(targetFighter.side, targetMon.species)}\nfell asleep!`;
     out.messages.push(text);
     const fields = fighterFields(targetFighter);
     fields.status = token;
-    fields.text = text;
+    fields.text = Events.plain(text);
     out.events.push({ kind: 'status', fields });
     return out;
   }
 
   if (effectId === 66) {
+    // PoisonEffect's turn-aways (a doll, any status, a Poison type) ran in
+    // Turn before the hit test (`poisonTurnsAway`); this is what is left for
+    // a target that has none. `.inflictPoison`: TOXIC -- the move, by its id
+    // (`cp TOXIC` on wPlayerMoveNum) -- sets BADLY_POISONED and zeroes the
+    // counter (the referee's counter is the cart's plus one, so 1), and says
+    // "<TARGET>'s badly poisoned!"; anything else is plain PSN.
     if (hasMajorStatus(targetMon)) {
       out.nothing = true;
       return out;
     }
-    targetMon.status = 'poison';
-    const token = wire.poison || 'PSN';
-    const text = `${targetMon.species} was poisoned`;
+    const toxic = moveKey(c.moveId) === 'TOXIC';
+    out.animates = true;
+    targetMon.status = toxic ? 'toxic' : 'poison';
+    targetMon.toxicLinger = null;
+    if (toxic) targetMon.toxicCounter = 1;
+    const token = toxic ? (wire.toxic || 'TOX') : (wire.poison || 'PSN');
+    const text = Events.named(targetFighter.side, targetMon.species)
+      + (toxic ? "'s\nbadly poisoned!" : '\nwas poisoned!');
     out.messages.push(text);
     const fields = fighterFields(targetFighter);
     fields.status = token;
-    fields.text = text;
+    fields.text = Events.plain(text);
     out.events.push({ kind: 'status', fields });
     return out;
   }
@@ -448,12 +1187,18 @@ function applyPrimary(ctx) {
       return out;
     }
     targetMon.status = 'paralysis';
+    out.animates = true;
+    // ParalyzeEffect_ quarters the battle Speed the moment it lands
+    // (paralyze.asm `callfar QuarterSpeedDueToParalysis`).
+    applyStatusPenalty(targetMon);
     const token = wire.paralysis || 'PAR';
-    const text = `${targetMon.species} is paralyzed`;
+    // PrintMayNotAttackText (paralyze.asm :39).
+    const text = Events.named(targetFighter.side, targetMon.species)
+      + "'s\nparalyzed! It may\nnot attack!";
     out.messages.push(text);
     const fields = fighterFields(targetFighter);
     fields.status = token;
-    fields.text = text;
+    fields.text = Events.plain(text);
     out.events.push({ kind: 'status', fields });
     return out;
   }
@@ -469,96 +1214,215 @@ function applyPrimary(ctx) {
       return out;
     }
     targetMon.leechSeed = { fromSlot: userFighter.slot };
-    const text = `${targetMon.species} was seeded`;
+    out.animates = true;
+    const text = `${Events.named(targetFighter.side, targetMon.species)}\nwas seeded!`;
     out.messages.push(text);
     const fields = fighterFields(targetFighter);
-    fields.text = text;
+    fields.text = Events.plain(text);
     out.events.push({ kind: 'status', fields });
     return out;
   }
 
   if (effectId === 86) {
-    const lastIdx = int(targetMon.lastMoveIndex, 0);
-    if (lastIdx < 1 || !targetMon.moves[lastIdx - 1]) {
-      out.nothing = true;
+    // DisableEffect (effects.asm :1286-1367), after its MoveHitTest (Turn):
+    // a target with a move already disabled fails; otherwise `BattleRandom
+    // & 3` picks a slot, redrawn until it holds a move. When the target is
+    // the player's monster (the enemy's turn, or a link battle -- both sides
+    // of one here, the owner's rule), the slot must also have PP: every PP
+    // at 0 (masked) is "But it failed!" -- after the draw that found a move
+    // -- and a slot whose raw PP byte is 0 is redrawn. The raw byte holds
+    // the PP Ups in its top two bits, so a 0-PP move with PP Ups (K8
+    // `ppUps`) can be the one disabled. The computer's moves have unlimited
+    // PP outside a link battle (`c.unlimitedPp`) and are taken as found.
+    // Then `BattleRandom & 7` + 1 turns: 1..8.
+    if (targetMon.disable && int(targetMon.disable.turns, 0) > 0) {
+      out.messages.push('But, it failed!');
       return out;
     }
-    if (targetMon.disable && targetMon.disable.turns && targetMon.disable.turns > 0) {
-      out.nothing = true;
+    const moves = targetMon.moves || [];
+    if (moves.length === 0 || !rng) {
+      out.messages.push('But, it failed!');
       return out;
     }
-    const turns = (rng ? rng.byte() : 0) % 4 + 2;
-    targetMon.disable = { moveIndex: lastIdx, turns };
-    out.messages.push(`${moveLabel(targetMon.moves[lastIdx - 1])} was disabled`);
+    let slot = null;
+    let tries = 0;
+    while (slot === null) {
+      tries += 1;
+      // A freeze guard the cart does not need (a target always holds a move
+      // with PP by the time this loops); `byte % 4` reaches every slot long
+      // before it.
+      if (tries > DISABLE_PICK_GUARD) {
+        for (let i = 1; i <= moves.length; i += 1) {
+          if (c.unlimitedPp || int(moves[i - 1].pp, 0) > 0
+              || int(moves[i - 1].ppUps, 0) > 0) {
+            slot = i;
+            break;
+          }
+        }
+        break;
+      }
+      const pick = rng.byte() % 4 + 1;
+      const m = moves[pick - 1];
+      if (m) {
+        if (c.unlimitedPp) {
+          slot = pick;
+        } else {
+          let anyPp = false;
+          for (let i = 1; i <= moves.length; i += 1) {
+            if (int(moves[i - 1].pp, 0) > 0) anyPp = true;
+          }
+          if (!anyPp) {
+            out.messages.push('But, it failed!');
+            return out;
+          }
+          if (int(m.pp, 0) > 0 || int(m.ppUps, 0) > 0) slot = pick;
+        }
+      }
+    }
+    if (slot === null) {
+      out.messages.push('But, it failed!');
+      return out;
+    }
+    const turns = rng.byte() % 8 + 1;
+    // The slot (the menu's wPlayerDisabledMove nibble) and the move's id
+    // (wPlayerDisabledMoveNumber, TriedToUseDisabledMoveCheck's).
+    targetMon.disable = { moveIndex: slot, turns, moveId: moves[slot - 1].id };
+    out.animates = true;
+    // MoveWasDisabledText, "<TARGET>'s\n<MOVE> was\ndisabled!".
+    out.messages.push(`${Events.named(targetFighter.side, targetMon.species)}`
+      + `'s\n${moveLabel(moves[slot - 1])} was\ndisabled!`);
     return out;
   }
 
   if (effectId === 79) {
+    // SubstituteEffect_ (move_effects/substitute.asm): HasSubstituteText
+    // for a doll already up, TooWeakSubstituteText for HP the quarter would
+    // not leave standing. (The cart's own bug lets a monster at exactly a
+    // quarter make one and sit at 0 HP; the referee does not field a 0-HP
+    // monster, and keeps the `<=`.)
     const cost = Math.floor(Math.max(1, int(userMon.maxHp, 1)) / 4);
-    if (userMon.substitute && userMon.substitute > 0) {
-      out.nothing = true;
+    if (hasSubstitute(userMon)) {
+      out.messages.push(
+        `${Events.named(userFighter.side, userMon.species)}\nhas a SUBSTITUTE!`);
       return out;
     }
     if (userMon.hp <= cost) {
-      out.nothing = true;
+      out.messages.push('Too weak to make\na SUBSTITUTE!');
       return out;
     }
     userMon.hp -= cost;
     userMon.substitute = cost;
+    userMon.subAtZero = null;
+    out.animates = true;
     out.directDamage = [{ amount: cost }];
-    out.messages.push(`${userMon.species} created a substitute`);
+    out.messages.push('It created a\nSUBSTITUTE!');
     return out;
   }
 
+  // Reflect and Light Screen are per battler and do not stack: a second cast
+  // while the bit is up is "But it failed!" (ReflectLightScreenEffect_,
+  // engine/battle/move_effects/reflect_light_screen.asm `.moveFailed`).
   if (effectId === 64) {
+    if (userMon.lightScreen) {
+      out.messages.push('But, it failed!');
+      return out;
+    }
     userMon.lightScreen = true;
-    out.messages.push(`${userMon.species} created a light screen`);
+    out.animates = true;
+    out.messages.push(`${Events.named(userFighter.side, userMon.species)}`
+      + "'s\nprotected against\nspecial attacks!");
     return out;
   }
 
   if (effectId === 65) {
+    if (userMon.reflect) {
+      out.messages.push('But, it failed!');
+      return out;
+    }
     userMon.reflect = true;
-    out.messages.push(`${userMon.species} created a reflect`);
+    out.animates = true;
+    out.messages.push(
+      `${Events.named(userFighter.side, userMon.species)}\ngained armor!`);
     return out;
   }
 
+  // MistEffect_ / FocusEnergyEffect_ (move_effects/mist.asm,
+  // focus_energy.asm): a bit already set is `.mistAlreadyInUse` /
+  // `.alreadyUsing`, PrintButItFailedText_ -- "But it failed!".
   if (effectId === 46) {
+    if (userMon.mist) {
+      out.messages.push('But, it failed!');
+      return out;
+    }
     userMon.mist = true;
-    out.messages.push(`${userMon.species} is shrouded in mist`);
+    out.animates = true;
+    out.messages.push(
+      `${Events.named(userFighter.side, userMon.species)}'s\nshrouded in mist!`);
     return out;
   }
 
   if (effectId === 47) {
+    if (userMon.focusEnergy) {
+      out.messages.push('But, it failed!');
+      return out;
+    }
     userMon.focusEnergy = true;
-    out.messages.push(`${userMon.species} is getting pumped`);
+    out.animates = true;
+    out.messages.push(
+      `${Events.named(userFighter.side, userMon.species)}'s\ngetting pumped!`);
     return out;
   }
 
   if (effectId === 24) {
-    const foeType = targetMon.types[0] || 0;
-    userMon.types = [foeType];
-    out.messages.push(`${userMon.species} converted type`);
+    // ConversionEffect_ (move_effects/conversion.asm) copies BOTH of the
+    // target's type bytes over the user's (`ld a, [hli] / ld [de], a`
+    // twice), then ConvertedTypeText.
+    const types = [];
+    for (let i = 0; i < (targetMon.types || []).length; i += 1) types.push(targetMon.types[i]);
+    if (types.length === 0) types.push(0);
+    userMon.types = types;
+    out.animates = true;
+    out.messages.push(
+      `Converted type to\n${Events.named(targetFighter.side, targetMon.species)}'s!`);
     return out;
   }
 
   if (effectId === 82) {
+    // MimicEffect (effects.asm :1203-1273), past its MoveHitTest and its
+    // pick, which Turn makes (`c.mimicSlot`: the player's menu, or
+    // `BattleRandom & 3`). `.playerTurn`'s `ld [hl], a` writes the picked
+    // move's id over the user's slot at wPlayerMoveListIndex -- the chosen
+    // slot (`c.moveIndex`) -- and nothing else: the slot keeps the PP and
+    // the PP Ups MIMIC had, this turn's spend included. It is the battle
+    // struct's alone; the party keeps MIMIC, and a switch-out or a faint
+    // brings it back (`restoreMoves`) with the PP the two shared --
+    // DecrementPP writes both while the monster is not TRANSFORMed.
     const moveIndex = int(c.moveIndex, 0);
-    const lastIdx = int(targetMon.lastMoveIndex, 0);
-    if (lastIdx < 1 || lastIdx > targetMon.moves.length) {
-      out.nothing = true;
+    const pick = int(c.mimicSlot, 0);
+    const source = Array.isArray(targetMon.moves) && pick >= 1
+      ? targetMon.moves[pick - 1] : undefined;
+    const slotMove = moveIndex >= 1 ? userMon.moves[moveIndex - 1] : undefined;
+    if (!(source && slotMove)) {
+      out.messages.push('But, it failed!');
       return out;
     }
-    const source = targetMon.moves[lastIdx - 1];
-    if (!source) {
-      out.nothing = true;
-      return out;
+    if (!userMon.transformed) {
+      if (!userMon.preMimic) userMon.preMimic = {};
+      if (!userMon.preMimic[moveIndex]) {
+        userMon.preMimic[moveIndex] = copyMoveRow(slotMove);
+      }
     }
     userMon.moves[moveIndex - 1] = {
       id: source.id || 'move',
       // The copy is narrated under the same name the original was, so a
       // mimicked move does not revert to its slug on the learner's screen.
       name: source.name,
-      pp: Math.max(0, int(source.pp, 0)),
+      pp: Math.max(0, int(slotMove.pp, 0)),
+      maxPp: slotMove.maxPp,
+      ppUps: slotMove.ppUps,
+      // The PP byte is still MIMIC's, and so is the GetMaxPP an ETHER reads
+      // for the slot (the party's MIMIC, ItemUsePPRestore): its base rides on.
+      basePp: slotMove.basePp,
       power: Math.max(0, int(source.power, 0)),
       accuracy: Math.max(0, int(source.accuracy, 255)),
       type: Math.max(0, int(source.type, 0)),
@@ -566,16 +1430,56 @@ function applyPrimary(ctx) {
       chance: Math.max(0, int(source.chance, 0)),
       highCrit: source.highCrit === true,
     };
-    out.messages.push(`${userMon.species} learned ${moveLabel(source)}`);
+    out.animates = true;
+    // MimicLearnedMoveText, "<USER>\nlearned\n<MOVE>!".
+    out.messages.push(`${Events.named(userFighter.side, userMon.species)}`
+      + `\nlearned\n${moveLabel(source)}!`);
     out.movesChanged = true;
     return out;
   }
 
   if (effectId === 57) {
+    // TransformEffect_ (transform.asm) copies the target's battle stats AND
+    // its unmodified ones, and its stat mods below; the user's party stats are
+    // untouched, which is what a later critical hit reads. Its INVULNERABLE
+    // check is the cart's bug: on the player's turn it tests the USER's own
+    // BattleStatus1 (`ld a, [wPlayerBattleStatus1]`), so only a player's
+    // monster still flagged INVULNERABLE (the full-paralysis FLY glitch)
+    // fails; on the enemy's turn `a` is hWhoseTurn (1) and bit 6 is clear,
+    // so nothing fails. `c.playerMover` is the owner's rule for "the player"
+    // (Turn: side a against the computer, both sides of a link).
+    if (c.playerMover && userMon.invulnerable) {
+      out.messages.push('But, it failed!');
+      return out;
+    }
+    ensureBattleStats(userMon);
+    ensureBattleStats(targetMon);
+    // The party struct's view, kept for the switch-out (`untransform`).
+    if (!userMon.preTransform) {
+      userMon.preTransform = {
+        types: [...(userMon.types || [])],
+        moves: (userMon.moves || []).map(copyMoveRow),
+        baseSpd: userMon.baseSpd,
+        base: copyKeyed(userMon.base),
+        dvs: copyKeyed(userMon.dvs),
+      };
+    }
+    // The species byte (wBattleMonSpecies), which CriticalHitTest reads its
+    // base Speed off, and GetEnemyMonStat its base stats: the target's sheet
+    // names them (`baseSpd`, K7 `base`). The DVs come along too (`.next`
+    // copies two bytes of the target's), which GetEnemyMonStat reads as well.
+    userMon.baseSpd = targetMon.baseSpd;
+    if ((userMon.baseSpd === undefined || userMon.baseSpd === null)
+        && targetMon.base && typeof targetMon.base === 'object') {
+      userMon.baseSpd = targetMon.base.spd;
+    }
+    userMon.base = copyKeyed(targetMon.base);
+    userMon.dvs = copyKeyed(targetMon.dvs);
     userMon.stats.atk = Math.max(1, int(targetMon.stats.atk, 1));
     userMon.stats.def = Math.max(1, int(targetMon.stats.def, 1));
     userMon.stats.spd = Math.max(1, int(targetMon.stats.spd, 1));
     userMon.stats.spc = Math.max(1, int(targetMon.stats.spc, 1));
+    userMon.cur = copyStats(targetMon.cur);
     userMon.types = targetMon.types.length ? [...targetMon.types] : [0];
     userMon.stages.atk = clampStage(targetMon.stages.atk);
     userMon.stages.def = clampStage(targetMon.stages.def);
@@ -583,10 +1487,16 @@ function applyPrimary(ctx) {
     userMon.stages.spc = clampStage(targetMon.stages.spc);
     userMon.stages.acc = clampStage(targetMon.stages.acc);
     userMon.stages.eva = clampStage(targetMon.stages.eva);
+    // `.copyPPLoop`: 5 PP for every move copied (the whole PP byte, so no
+    // PP Ups), whatever the target had left.
     userMon.moves = targetMon.moves.map((m) => ({
       id: m.id || 'move',
       name: m.name,
-      pp: Math.max(0, int(m.pp, 0)),
+      pp: TRANSFORM_PP,
+      maxPp: TRANSFORM_PP,
+      ppUps: 0,
+      // No GetMaxPP behind the 5 (Turn `stepPp` keeps it fixed).
+      basePp: false,
       power: Math.max(0, int(m.power, 0)),
       accuracy: Math.max(0, int(m.accuracy, 255)),
       type: Math.max(0, int(m.type, 0)),
@@ -595,7 +1505,11 @@ function applyPrimary(ctx) {
       highCrit: m.highCrit === true,
     }));
     userMon.transformed = true;
-    out.messages.push(`${userMon.species} transformed into ${targetMon.species}`);
+    out.animates = true;
+    // TransformedText, "<USER>\ntransformed into\n<SPECIES>!": the copied
+    // species is wNameBuffer's (GetMonName), printed bare.
+    out.messages.push(`${Events.named(userFighter.side, userMon.species)}`
+      + `\ntransformed into\n${targetMon.species}!`);
     out.movesChanged = true;
     return out;
   }
@@ -607,103 +1521,260 @@ function applyPrimary(ctx) {
 // ------------------------------------------------------------------
 // Phase 2 side-chance handlers (post-damage, damaging hits only)
 // ------------------------------------------------------------------
+//
+// **Red keeps the odds on the effect, not on the move.** pokered's move
+// records carry no chance byte (data/moves/moves.asm: animation, effect,
+// power, type, accuracy, PP), and the engine's imported Red records follow
+// them -- EMBER is `effect = "BURN_SIDE_EFFECT1"` and nothing more -- so every
+// Red move reaches the referee with `chance = 0` (MediatedBattle `moveOf`
+// reads a `def.chance` no Red record has). Each routine in
+// engine/battle/effects.asm holds its own constant and compares one
+// BattleRandom byte against it raw (`cp b` / `ret nc`: the effect lands when
+// the byte is below it), RGBDS `percent` being `* $ff / 100` in integer
+// arithmetic (macros/data.asm):
+//
+//   PoisonEffect          POISON_SIDE_EFFECT1   20 percent + 1 =  52  (:101)
+//                         POISON_SIDE_EFFECT2   40 percent + 1 = 103  (:104)
+//                         TWINEEDLE_EFFECT: TwoToFiveAttacksEffect's
+//                         `.twineedle` rewrites the move's effect to
+//                         POISON_SIDE_EFFECT1, so                  52
+//   FreezeBurnParalyzeEffect  BURN / FREEZE / PARALYZE_SIDE_EFFECT1
+//                                               10 percent + 1 =  26  (:215)
+//                         ..._SIDE_EFFECT2      30 percent + 1 =  77  (:218)
+//   FlinchSideEffect      FLINCH_SIDE_EFFECT1   10 percent + 1 =  26  (:984)
+//                         FLINCH_SIDE_EFFECT2   30 percent + 1 =  77  (:986)
+//   StatModifierDownEffect  ATTACK..SPECIAL_DOWN_SIDE_EFFECT
+//                                               33 percent + 1 =  85  (:562)
+//   ConfusionSideEffect   CONFUSION_SIDE_EFFECT 10 percent     =  25  (:1116)
+//                         -- the one constant without the + 1
+//
+// A sheet `chance` above 0 is an explicit override in the percent the sheet
+// has always spoken -- floor(chance * 255 / 100), so 100 is 255 and still
+// fails on the byte 255, Accuracy.js's quirk -- because the suites state one
+// and a content mod's move record may carry one. 0 or absent reads the cart's
+// constant: it is what every Red move sends. The override moves the threshold
+// and nothing else; when a routine draws, and what it checks before it does,
+// stay the cart's (`applySide`).
+const SIDE_THRESHOLD = {
+  2: 52, 33: 103, 77: 52, // PoisonEffect
+  4: 26, 5: 26, 6: 26, // FreezeBurnParalyzeEffect
+  34: 77, 35: 77, 36: 77,
+  31: 26, 37: 77, // FlinchSideEffect
+  68: 85, 69: 85, 70: 85, 71: 85, // StatModifierDownEffect
+  76: 25, // ConfusionSideEffect
+};
 
-// Same 1/256 quirk as Accuracy.js: byte is 0..255, threshold is
-// floor(chance * 255 / 100), proc when byte < threshold. chance 0 never;
-// chance 100 is byte < 255 (always except the 1/256 roll of 255).
-function sideChanceProc(rng, chance) {
-  let c = Math.max(0, Math.min(100, int(chance, 0)));
-  if (c <= 0) return false;
-  const threshold = Math.floor(c * 255 / 100);
-  if (threshold <= 0) return false;
-  return rng && rng.byte() < threshold;
+// StatModifierDownEffect's extra miss on the enemy's turn outside a link
+// battle (:549-554, `cp 25 percent + 1`), drawn before anything else the
+// routine looks at -- and the side-effect drops go through that routine too,
+// where `MoveMissed` is silent.
+const COMPUTER_DROP_MISS = 64;
+
+// The byte a side effect's draw has to land below: the sheet's percent when it
+// states one, else the cart's constant for the effect. 0 for an effect with
+// no routine here, which never draws -- whatever chance its sheet states,
+// because no Red routine would roll for it.
+function sideThreshold(effectId, chance) {
+  const base = SIDE_THRESHOLD[int(effectId, 0)];
+  if (base === undefined) return 0;
+  const pct = Math.max(0, Math.min(100, int(chance, 0)));
+  if (pct > 0) return Math.floor(pct * 255 / 100);
+  return base;
 }
 
+// One BattleRandom against a threshold: drawn whatever it is compared to.
+function drawBelow(rng, threshold) {
+  if (!rng) return false;
+  return rng.byte() < threshold;
+}
+
+const SIDE_POISON = { 2: true, 33: true, 77: true };
+const SIDE_STATUS = {
+  4: 'burn', 5: 'freeze', 6: 'paralysis',
+  34: 'burn', 35: 'freeze', 36: 'paralysis',
+};
+const SIDE_FLINCH = { 31: true, 37: true };
 const SIDE_STAT_DOWN = {
   68: 'atk', 69: 'def', 70: 'spd', 71: 'spc',
 };
 
-// ctx: effectId, chance, rng, targetMon, targetFighter, statusToWire
+// PoisonedText, BurnedText, FrozenText, ParalyzedMayNotAttackText (text_3
+// .asm): "<TARGET>" and the cart's breaks after it.
+const INFLICTED = {
+  poison: { token: 'PSN', says: '\nwas poisoned!' },
+  burn: { token: 'BRN', says: '\nwas burned!' },
+  freeze: { token: 'FRZ', says: '\nwas frozen solid!' },
+  paralysis: { token: 'PAR', says: "'s\nparalyzed! It may\nnot attack!" },
+};
+
+// Whether chart index `typeIndex` is one of the monster's (wEnemyMonType1 /
+// wEnemyMonType2: the battle types, so a Conversion or a Transform counts).
+// null names no type and matches nothing.
+function hasType(mon, typeIndex) {
+  if (typeIndex === null || typeIndex === undefined || !Array.isArray(mon.types)) return false;
+  for (const t of mon.types) {
+    if (t === typeIndex) return true;
+  }
+  return false;
+}
+
+// A side effect's condition landing. The penalty is the routine's own:
+// .burn1 / .burn2 run HalveAttackDueToBurn and paralyze1 / paralyze2
+// QuarterSpeedDueToParalysis the moment it lands (:243, :294; :236, :289);
+// poison and freeze have none, and applyStatusPenalty leaves them be.
+function inflict(out, fighter, mon, status, wire) {
+  mon.status = status;
+  applyStatusPenalty(mon);
+  const entry = INFLICTED[status];
+  const text = `${Events.named(fighter.side, mon.species)}${entry.says}`;
+  out.messages.push(text);
+  const fields = fighterFields(fighter);
+  fields.status = wire[status] || entry.token;
+  fields.text = Events.plain(text);
+  out.events.push({ kind: 'status', fields });
+}
+
+// One move's side effect, the way its pokered routine runs it. Turn calls
+// this once per move, after the last hit (`.executeOtherEffects`), and only
+// where the cart gets that far: a target that fainted returned at `ret z`
+// (core.asm :3242), and a Substitute the move broke zeroed the move's effect
+// (AttackSubstitute `.nullifyEffect`, :4899). A Substitute still standing is
+// read here, off `targetMon.substitute` (hasSubstitute: a doll standing at
+// 0 HP included), because each routine answers it
+// differently.
+//
+// ctx: effectId, chance, rng, targetMon, targetFighter, userFighter,
+//      statusToWire, plus what the routines look at before they draw:
+//   moveType       the move's chart index (FreezeBurnParalyzeEffect's
+//                  same-type return, CheckDefrost's Fire test)
+//   poisonType, fireType
+//                  the chart indices of POISON and FIRE (Turn reads them off
+//                  the ruleset's `typeIds`). null when it named none: then a
+//                  Poison-type target can be poisoned and nothing thaws,
+//                  because no index can be told to be either type.
+//   computerMover  the move is the computer's (StatModifierDownEffect's
+//                  extra miss)
+//   playerMover    the move is the player's (FreezeBurnParalyzeEffect's
+//                  ClearHyperBeam on a freeze, and its HUD shake)
+// Returns { proc, messages, events, shake }; `proc` is the routine's own draw
+// landing (not the computer's miss byte), `shake` the cart animation the
+// routine plays on a status it lands, ahead of its line (Turn sends it on the
+// target's seat):
+//   PoisonEffect (:118-151), a side effect -- the primary plays the move's
+//     own: ENEMY_HUD_SHAKE_ANIM on the player's turn, SHAKE_SCREEN_ANIM on
+//     the enemy's (`ld b, SHAKE_SCREEN_ANIM` ... `jr nz, .ok` / `ld b,
+//     ENEMY_HUD_SHAKE_ANIM`, then `ld a, b / call PlayBattleAnimation2`);
+//   FreezeBurnParalyzeEffect (:194-302): ENEMY_HUD_SHAKE_ANIM on the
+//     player's turn (`.burn1` / `.freeze1` / paralyze1), nothing on the
+//     enemy's (`.burn2` / `.freeze2` / paralyze2 print only).
+// "The player's turn" is `playerMover`, the owner's rule. No other side
+// effect plays one: a flinch, a stat drop, a confusion side effect say
+// nothing or only their line.
 function applySide(ctx) {
   const out = { proc: false, messages: [], events: [] };
   const c = ctx || {};
   const effectId = int(c.effectId, 0);
-  const chance = int(c.chance, 0);
   const { rng, targetMon, targetFighter } = c;
   const wire = c.statusToWire || {};
+  const threshold = sideThreshold(effectId, c.chance);
+  if (threshold <= 0 || !targetMon || typeof targetMon !== 'object') return out;
+  const behindSub = hasSubstitute(targetMon);
+  const moveType = c.moveType === undefined || c.moveType === null
+    ? null : int(c.moveType, null);
 
-  if (!sideChanceProc(rng, chance)) return out;
-  out.proc = true;
-
-  if (effectId === 2 || effectId === 33 || effectId === 77) {
-    if (hasMajorStatus(targetMon)) return out;
-    targetMon.status = 'poison';
-    const token = wire.poison || 'PSN';
-    const text = `${targetMon.species} was poisoned`;
-    out.messages.push(text);
-    const fields = fighterFields(targetFighter);
-    fields.status = token;
-    fields.text = text;
-    out.events.push({ kind: 'status', fields });
+  // PoisonEffect (:78-162): a Substitute, any status at all and a
+  // Poison-type target each leave through `.noEffect` -- silent for a side
+  // effect -- before `.sideEffectTest` draws.
+  if (SIDE_POISON[effectId]) {
+    if (behindSub || hasMajorStatus(targetMon)
+      || hasType(targetMon, c.poisonType)) {
+      return out;
+    }
+    if (!drawBelow(rng, threshold)) return out;
+    out.proc = true;
+    inflict(out, targetFighter, targetMon, 'poison', wire);
+    out.shake = c.playerMover ? 'ENEMY_HUD_SHAKE_ANIM' : 'SHAKE_SCREEN_ANIM';
     return out;
   }
 
-  if (effectId === 4 || effectId === 34) {
-    if (hasMajorStatus(targetMon)) return out;
-    targetMon.status = 'burn';
-    const token = wire.burn || 'BRN';
-    const text = `${targetMon.species} was burned`;
-    out.messages.push(text);
-    const fields = fighterFields(targetFighter);
-    fields.status = token;
-    fields.text = text;
-    out.events.push({ kind: 'status', fields });
+  // FreezeBurnParalyzeEffect (:194-302): a Substitute returns first; a target
+  // that already has a status jumps to CheckDefrost (:312-345), where a Fire
+  // move thaws a frozen one ("Fire defrosted <TARGET>!", text_3.asm) and
+  // anything else does nothing; then a target sharing the move's type returns
+  // ("an ice move can't freeze an ice-type, body slam can't paralyze a
+  // normal-type"). None of them draws.
+  const status = SIDE_STATUS[effectId];
+  if (status) {
+    if (behindSub) return out;
+    if (hasMajorStatus(targetMon)) {
+      if (targetMon.status === 'freeze' && c.fireType !== null && c.fireType !== undefined
+        && moveType === c.fireType) {
+        targetMon.status = null;
+        targetMon.statusTurns = 0;
+        const text = `Fire defrosted\n${Events.named(targetFighter.side, targetMon.species)}!`;
+        out.messages.push(text);
+        // No token: a `status` event without one is a cure (events.js).
+        const fields = fighterFields(targetFighter);
+        fields.text = Events.plain(text);
+        out.events.push({ kind: 'status', fields });
+      }
+      return out;
+    }
+    if (hasType(targetMon, moveType)) return out;
+    if (!drawBelow(rng, threshold)) return out;
+    out.proc = true;
+    // `.freeze1` -- the player's turn -- calls ClearHyperBeam on the target
+    // before writing FRZ; `.freeze2` does not ("hyper beam bits aren't reset
+    // for opponent's side"). `playerMover` is the owner's reading of "the
+    // player": side a against the computer, both sides of a link fight.
+    if (status === 'freeze' && c.playerMover) targetMon.mustRecharge = false;
+    inflict(out, targetFighter, targetMon, status, wire);
+    if (c.playerMover) out.shake = 'ENEMY_HUD_SHAKE_ANIM';
     return out;
   }
 
-  if (effectId === 5 || effectId === 35) {
-    if (hasMajorStatus(targetMon)) return out;
-    targetMon.status = 'freeze';
-    const token = wire.freeze || 'FRZ';
-    const text = `${targetMon.species} was frozen solid`;
-    out.messages.push(text);
-    const fields = fighterFields(targetFighter);
-    fields.status = token;
-    fields.text = text;
-    out.events.push({ kind: 'status', fields });
-    return out;
-  }
-
-  if (effectId === 6 || effectId === 36) {
-    if (hasMajorStatus(targetMon)) return out;
-    targetMon.status = 'paralysis';
-    const token = wire.paralysis || 'PAR';
-    const text = `${targetMon.species} is paralyzed`;
-    out.messages.push(text);
-    const fields = fighterFields(targetFighter);
-    fields.status = token;
-    fields.text = text;
-    out.events.push({ kind: 'status', fields });
-    return out;
-  }
-
-  if (effectId === 31 || effectId === 37) {
+  // FlinchSideEffect (:971-993): a Substitute returns before the draw; a
+  // flinch that lands runs ClearHyperBeam on its target (:991), on either
+  // side's turn -- so a HYPER BEAM user a slower foe flinches never
+  // recharges.
+  if (SIDE_FLINCH[effectId]) {
+    if (behindSub) return out;
+    if (!drawBelow(rng, threshold)) return out;
+    out.proc = true;
     targetMon.flinch = true;
+    targetMon.mustRecharge = false;
     return out;
   }
 
+  // StatModifierDownEffect (:539-562): the computer's extra miss draws first,
+  // then a Substitute misses -- both through `MoveMissed`, silent for a side
+  // effect -- and only then the side-effect byte. The drop is the one a
+  // primary drop makes, so a side-effect drop on the player's monster re-runs
+  // its badges too (the glitch's Psychic case); Mist is never asked
+  // (applyStatChange).
   const stat = SIDE_STAT_DOWN[effectId];
   if (stat) {
-    applyStatChange(out, targetFighter, targetMon, stat, -1);
+    if (c.computerMover && drawBelow(rng, COMPUTER_DROP_MISS)) return out;
+    if (behindSub) return out;
+    if (!drawBelow(rng, threshold)) return out;
+    out.proc = true;
+    applyStatChange(out, targetFighter, targetMon, stat, -1,
+      c.userFighter, targetMon, true);
     return out;
   }
 
+  // ConfusionSideEffect (:1114-1118) draws before it looks at anything, and
+  // ConfusionSideEffectSuccess (:1128-1152) never asks about a Substitute, so
+  // the side effect confuses the monster behind one. A target already
+  // confused fails silently (ConfusionEffectFailed: `cp
+  // CONFUSION_SIDE_EFFECT; ret z`) without the 2-5 turn byte.
   if (effectId === 76) {
+    if (!drawBelow(rng, threshold)) return out;
+    out.proc = true;
     confuse(out, targetFighter, targetMon, rng, false);
     return out;
   }
 
-  out.proc = false;
   return out;
 }
 
@@ -711,7 +1782,12 @@ function applySide(ctx) {
 // Phase 3 multi-hit, fixed damage, drain, recoil
 // ------------------------------------------------------------------
 
-const MULTIHIT = { 29: true, 44: true, 77: true };
+// TWO_TO_FIVE_ATTACKS_EFFECT (29) and EFFECT_1E (30) share
+// TwoToFiveAttacksEffect in the cart's pointer table
+// (data/moves/effects_pointers.asm) and both sit in AlwaysHappenSideEffects,
+// so a move carrying the unused 30 hits two to five times as 29 does;
+// ATTACK_TWICE (44) and TWINEEDLE (77) are the fixed pair.
+const MULTIHIT = { 29: true, 30: true, 44: true, 77: true };
 const FIXED_DAMAGE = { 38: true, 40: true, 41: true };
 const DRAIN = { 3: true, 8: true };
 const RECOIL = { 48: true };
@@ -720,10 +1796,29 @@ function isMultihit(effectId) {
   return MULTIHIT[int(effectId, 0)] === true;
 }
 
+// CalculateDamage (core.asm :4321-4325) jumps past its power-0 return for
+// the two-to-five pair, so a 0-power TWO_TO_FIVE / EFFECT_1E move still
+// computes a hit: a 0 quotient plus the 2 floor, then STAB, the chart and
+// the roll (a 2 rolls).
+function hitsAtPowerZero(effectId) {
+  const id = int(effectId, 0);
+  return id === 29 || id === 30;
+}
+
+// TwoToFiveAttacksEffect (effects.asm :925-969): ATTACK_TWICE and TWINEEDLE
+// are 2 with no draw; the two-to-five pair draws `BattleRandom & 3`, keeps a
+// 0 or 1 (2 or 3 hits), and on a 2 or 3 draws `& 3` again and keeps that --
+// 2, 3, 4, 5 hits at 3/8, 3/8, 1/8, 1/8. The caller draws this where the cart
+// does: at the first hit's AlwaysHappenSideEffects, so after that hit (a
+// knockout included) and never when that hit broke a Substitute (Turn).
 function hitCount(effectId, rng) {
   const id = int(effectId, 0);
   if (id === 44 || id === 77) return 2;
-  if (id === 29) return 2 + (rng ? rng.byte() : 0) % 4;
+  if (id === 29 || id === 30) {
+    let n = (rng ? rng.byte() : 0) % 4;
+    if (n >= 2) n = (rng ? rng.byte() : 0) % 4;
+    return 2 + n;
+  }
   return 1;
 }
 
@@ -739,34 +1834,118 @@ function isRecoil(effectId) {
   return RECOIL[int(effectId, 0)] === true;
 }
 
+// DrainHPEffect_ (engine/battle/move_effects/drain_hp.asm): wDamage halved
+// in place, and a 0 bumped to 1 -- "the attacker gains at least 1 HP".
 function drainAmount(damage) {
-  return Math.floor(Math.max(0, int(damage, 0)) / 2);
+  return Math.max(1, Math.floor(Math.max(0, int(damage, 0)) / 2));
 }
 
-function recoilAmount(damage) {
-  return Math.max(1, Math.floor(Math.max(0, int(damage, 0)) / 4));
+// RecoilEffect_ (engine/battle/move_effects/recoil.asm): a quarter of
+// wDamage, or half for STRUGGLE (`cp STRUGGLE` before the second `srl`), at
+// least 1.
+function recoilAmount(damage, struggle) {
+  const d = Math.max(0, int(damage, 0));
+  if (struggle) return Math.max(1, Math.floor(d / 2));
+  return Math.max(1, Math.floor(d / 4));
 }
 
-function fixedDamage(ctx) {
+// SetDamageEffects (data/battle/set_damage_effects.asm): SUPER FANG and
+// SPECIAL_DAMAGE skip CriticalHitTest, HandleCounterMove, CalculateDamage,
+// AdjustDamageForMoveType and RandomizeDamage (core.asm :3137-3140) and go
+// straight to MoveHitTest, so they draw no crit byte and no roll and reach a
+// Ghost or a Normal type the chart would wall; their number is
+// ApplyAttackToEnemyPokemon's (:4612-4672). OHKO is not one of them: it runs
+// the ordinary path with OneHitKOEffect_ in CalculateDamage's place.
+const SET_DAMAGE = { 40: true, 41: true };
+
+function isSetDamage(effectId) {
+  return SET_DAMAGE[int(effectId, 0)] === true;
+}
+
+function isOhko(effectId) {
+  return int(effectId, 0) === 38;
+}
+
+// OneHitKOEffect_ (move_effects/one_hit_ko.asm): `sub b / sbc b / jr c,
+// .userIsSlower` -- the move fails only when the user's current Speed is
+// below the target's, so a tie lands.
+function ohkoLands(userSpeed, foeSpeed) {
+  return int(userSpeed, 0) >= int(foeSpeed, 0);
+}
+
+// The wDamage a landed OHKO carries into the hit, before RandomizeDamage's
+// roll (the caller's): OneHitKOEffect_ writes $FFFF, and CalculateDamage
+// hands it on to AdjustDamageForMoveType -- STAB is `add hl, bc` on 16 bits
+// (65535 + 32767 wraps to 32766), and each matching TypeEffects row is a
+// Multiply / Divide by 10 whose quotient keeps its low two bytes (core.asm
+// :5100-5170). `percents` are the rows in the walk's order (Turn
+// `_typeRows`); a 0 is an immunity. Never under a few thousand on a real
+// chart, so AttackSubstitute breaks a doll outright (a high byte) and an
+// overkill writes the target's HP back over it.
+function ohkoDamage(stab, percents) {
+  let d = 65535;
+  if (stab) d = (d + Math.floor(d / 2)) % 65536;
+  for (const pct of (Array.isArray(percents) ? percents : [])) {
+    d = Math.floor(d * Math.max(0, int(pct, 100)) / 100) % 65536;
+  }
+  return d;
+}
+
+// `.specialDamage` reads wPlayerMoveNum, not the move's power (every one of
+// these is power 1 on the cart): SEISMIC TOSS and NIGHT SHADE deal the
+// user's level, SONICBOOM 20, DRAGON RAGE 40, and anything else is PSYWAVE.
+// Keyed by the move id the way COUNTER and QUICK ATTACK are.
+const SPECIAL_DAMAGE = {
+  SEISMIC_TOSS: 'level', NIGHT_SHADE: 'level',
+  SONICBOOM: 20, DRAGON_RAGE: 40, PSYWAVE: 'psywave',
+};
+
+// PSYWAVE's damage: b = level + level / 2 (an 8-bit `add`, so a level over
+// 170 wraps), then `BattleRandom` redrawn until it is in range -- and the
+// range is the mover's. The player's `.specialDamage` (core.asm :4657-4670)
+// redraws a 0 too (`and a / jr z, .loop`): [1, b). The enemy's (:4776-4789)
+// has no such test: [0, b), so the computer's PSYWAVE can deal 0 ("it's
+// possible for the enemy to do 0 damage"). `computer` is the computer's seat
+// (Turn `isComputerSeat`); both sides of a link fight are players, each on
+// its own cart, and keep [1, b). A range with no byte in it -- b of 0 or 1
+// for the player, 0 for the computer -- freezes the cart; the referee deals
+// the range's floor there (1, or 0) and draws nothing, and bounds the loop
+// the same way (quirks reproduced, freezes never).
+function psywaveDamage(level, rng, computer) {
+  const L = Math.max(0, int(level, 1)) % 256;
+  const b = (L + Math.floor(L / 2)) % 256;
+  const floorV = computer ? 0 : 1;
+  if (b <= floorV || !rng) return floorV;
+  for (let i = 0; i < REDRAW_GUARD; i += 1) {
+    const r = rng.byte();
+    if (r >= floorV && r < b) return r;
+  }
+  return floorV;
+}
+
+// ctx: effectId, moveId, userMon, targetMon, power, rng, computerMover
+// The damage a SetDamageEffects move deals, drawn where the cart draws it
+// (PSYWAVE's loop, after the hit test; `computerMover` picks the enemy's
+// range, `psywaveDamage`). A SPECIAL_DAMAGE move whose id the
+// cart's table does not name is a modded one with no cart rule to follow: it
+// keeps the referee's older reading, its power when above 1 and the user's
+// level otherwise.
+function setDamage(ctx) {
   const c = ctx || {};
   const effectId = int(c.effectId, 0);
-  const { userMon, targetMon } = c;
-  const movePower = int(c.power, 0);
-  const userSpeed = int(c.userSpeed, 0);
-  const foeSpeed = int(c.foeSpeed, 0);
-
-  if (effectId === 38) {
-    if (userSpeed <= foeSpeed) return null;
-    return Math.max(1, int(targetMon.hp, 0));
-  }
+  const userMon = c.userMon || {};
+  const targetMon = c.targetMon || {};
   if (effectId === 40) {
     return Math.max(1, Math.floor(int(targetMon.hp, 0) / 2));
   }
-  if (effectId === 41) {
-    if (movePower >= 1) return movePower;
-    return Math.max(1, int(userMon.level, 1));
-  }
-  return null;
+  const key = moveKey(c.moveId);
+  const rule = Object.prototype.hasOwnProperty.call(SPECIAL_DAMAGE, key) ? SPECIAL_DAMAGE[key] : undefined;
+  if (rule === 'level') return Math.max(0, int(userMon.level, 1));
+  if (rule === 'psywave') return psywaveDamage(userMon.level, c.rng, c.computerMover === true);
+  if (typeof rule === 'number') return rule;
+  const power = int(c.power, 0);
+  if (power > 1) return power;
+  return Math.max(1, int(userMon.level, 1));
 }
 
 // ------------------------------------------------------------------
@@ -801,27 +1980,32 @@ function vanishes(effectId, moveOrId) {
   return isFly(effectId) || isDigMove(moveOrId);
 }
 
-function chargeMessage(mon, effectId, moveOrId) {
+// ChargeMoveEffectText (text_3.asm): "<USER>", then the move's own `line`.
+// `side` is the user's (K17's mark); a caller that names none gets the bare
+// name.
+function chargeMessage(mon, effectId, moveOrId, side) {
   const key = moveKey(moveOrId);
-  const species = (mon && mon.species) || 'POKéMON';
-  if (key === 'DIG') return `${species} dug a hole`;
-  if (key === 'SOLARBEAM') return `${species} took in sunlight`;
-  if (key === 'SKULL_BASH') return `${species} lowered its head`;
-  if (key === 'RAZOR_WIND') return `${species} made a whirlwind`;
-  if (key === 'FLY' || isFly(effectId)) return `${species} flew up high`;
-  return `${species} is glowing`;
+  let species = (mon && mon.species) || 'POKéMON';
+  if (side !== undefined && side !== null) species = Events.named(side, species);
+  if (key === 'DIG') return `${species}\ndug a hole!`;
+  if (key === 'SOLARBEAM') return `${species}\ntook in sunlight!`;
+  if (key === 'SKULL_BASH') return `${species}\nlowered its head!`;
+  if (key === 'RAZOR_WIND') return `${species}\nmade a whirlwind!`;
+  if (key === 'FLY' || isFly(effectId)) return `${species}\nflew up high!`;
+  return `${species}\nis glowing!`;
 }
 
-// Gen 1 cartridge: Swift skips the invuln check; Thunder reaches Fly;
-// Earthquake / Fissure miss Dig.
+// MoveHitTest (core.asm :5228-5262): SWIFT's `ret z` comes before the
+// INVULNERABLE test, so SWIFT reaches a FLY or DIG user, and nothing else
+// does -- `bit INVULNERABLE / jp nz, .moveMissed` has no exception. (THUNDER
+// reaching FLY, EARTHQUAKE reaching DIG are Gold's, not Red's.)
+// `chargeMoveId` is kept for the callers' shape.
 function hitsInvulnerable(chargeMoveId, attackerMove) {
-  const charge = moveKey(chargeMoveId);
   const id = moveKey(attackerMove);
   if (id === 'SWIFT') return true;
   if (attackerMove && typeof attackerMove === 'object' && isSwift(attackerMove.effect)) {
     return true;
   }
-  if (charge === 'FLY' && id === 'THUNDER') return true;
   return false;
 }
 
@@ -829,8 +2013,23 @@ function isTrapping(effectId) {
   return int(effectId, 0) === 42;
 }
 
+// TrappingEffect (effects.asm :1080-1103): `BattleRandom & 3`, kept when 0
+// or 1, else drawn again -- the counter is that plus one, the attacks after
+// the first, so 2..5 attacks in all at 3/8, 3/8, 1/8, 1/8 (the two-to-five
+// odds). The referee's `turns` is the total.
 function trapTurns(rng) {
-  return 2 + (rng ? rng.byte() : 0) % 4;
+  let n = (rng ? rng.byte() : 0) % 4;
+  if (n >= 2) n = (rng ? rng.byte() : 0) % 4;
+  return 2 + n;
+}
+
+// The two SpecialEffectsCont routines (data/battle/special_effects.asm):
+// PlayerCanExecuteMove runs them before damage calculation and every hit
+// test (core.asm :3131-3133), so their counters are drawn first and
+// TrappingEffect's ClearHyperBeam lands even when the move then misses.
+function startsBeforeHit(effectId) {
+  const id = int(effectId, 0);
+  return id === 27 || id === 42;
 }
 
 function isHyperBeam(effectId) {
@@ -849,15 +2048,58 @@ function isRage(effectId) {
   return int(effectId, 0) === 81;
 }
 
-// Gen1: Reflect halves physical, Light Screen halves special.
-function screenDamage(damage, defender, isSpecial) {
-  let d = Math.max(0, int(damage, 0));
-  if (isSpecial) {
-    if (defender.lightScreen) d = Math.floor(d / 2);
-  } else if (defender.reflect) {
-    d = Math.floor(d / 2);
-  }
-  return d;
+// The effects ExecutePlayerMove / ExecuteEnemyMove hand to JumpMoveEffect
+// before the hit, so a move carrying one never reaches HandleBuildingRage:
+// ResidualEffects1 at PlayerCanExecuteMove (pokered
+// data/battle/residual_effects_1.asm), ResidualEffects2 at `.next`
+// (residual_effects_2.asm), and Mirror Move / Metronome, which jump back to
+// CheckIfPlayerNeedsToChargeUp with the move they call (core.asm :3198-3211).
+// Only a power-0 move asks (Turn's `_useMove`): one with power builds by
+// landing.
+const SKIPS_BUILDING_RAGE = new Set([
+  // ResidualEffects1
+  24, 25, 28, 46, 47,
+  49, 56, 57, 64, 65,
+  66, 67, 79, 82, 84,
+  85,
+  // ResidualEffects2
+  1, 10, 11, 12, 13,
+  14, 15, 18, 19, 20,
+  21, 22, 23, 26, 32,
+  50, 51, 52, 53, 54,
+  55, 58, 59, 60, 61,
+  62, 63,
+  // the two that call another move
+  9, 83,
+]);
+
+function skipsBuildingRage(effectId) {
+  return SKIPS_BUILDING_RAGE.has(int(effectId, 0));
+}
+
+// ------------------------------------------------------------------
+// move priority
+// ------------------------------------------------------------------
+//
+// pokered has no priority table: MainInBattleLoop (core.asm :370-391) asks
+// two questions of wPlayerSelectedMove / wEnemySelectedMove before it
+// compares Speed -- QUICK_ATTACK moves first, COUNTER moves last, and the two
+// sides naming the same one fall through to `.compareSpeed`. As brackets
+// that is +1, -1 and 0 for everything else, which is battle2's shape
+// (GetMovePriority) with Gen 1's two rows. Keyed by the move id, because the
+// cart compares move ids: the selected move is what is read, so Metronome and
+// Mirror Move sit in bracket 0 whatever they call.
+const BASE_PRIORITY = 0;
+const MOVE_PRIORITY = {
+  QUICK_ATTACK: 1,
+  COUNTER: -1,
+};
+
+// The priority bracket of a move (a move record or its id).
+function movePriority(moveOrId) {
+  const key = moveKey(moveOrId);
+  if (!Object.prototype.hasOwnProperty.call(MOVE_PRIORITY, key)) return BASE_PRIORITY;
+  return MOVE_PRIORITY[key];
 }
 
 // Gen1 category is type-based. specialTypes is a set of chart indices.
@@ -969,8 +2211,15 @@ function applyVitamin(mon, itemId) {
     mon.maxHp = Math.max(1, int(mon.maxHp, 1) + delta);
     mon.hp = Math.min(mon.maxHp, int(mon.hp, 0) + delta);
   } else {
-    if (!mon.stats) mon.stats = {};
-    mon.stats[stat] = Math.max(1, int(mon.stats[stat], 1) + delta);
+    // A party stat moved: the party struct always, the unmodified stat only
+    // when no Transform has replaced it -- the rule a level-up mid-fight
+    // follows (experience.asm :226-232). The battle stat is Turn's to rebuild
+    // (recalcBattleStats), and only for the fielded monster.
+    ensureBattleStats(mon);
+    mon.partyStats[stat] = Math.max(1, int(mon.partyStats[stat], 1) + delta);
+    if (!mon.transformed) {
+      mon.stats[stat] = Math.max(1, int(mon.stats[stat], 1) + delta);
+    }
   }
   return { stat, delta, before, after };
 }
@@ -1020,16 +2269,32 @@ const BALL_DEFS = {
 };
 const BALL_DEFAULT = { randMax: 255, hpFactor: 12, wobbleFactor: 150 };
 
+// ItemUseBall's Rand1 (`.loop`, item_effects.asm :180-214): a byte is drawn
+// before the ball is even looked at -- the MASTER BALL's too, which then
+// captures -- and a GREAT BALL's is redrawn while above 200, an ULTRA or a
+// SAFARI BALL's while above 150 (`cp b / jr c, .loop`). The loop never
+// freezes on a real generator; the referee bounds it all the same and
+// answers the range's top (quirks reproduced, freezes never). No generator
+// draws nothing and answers 0.
 function catchRoll(rng, maxV) {
-  maxV = Math.max(0, int(maxV, 0));
-  if (maxV <= 0) return 0;
-  if (maxV >= 255) return rng ? rng.byte() : 0;
-  return (rng ? rng.byte() : 0) % (maxV + 1);
+  if (!rng) return 0;
+  maxV = Math.max(0, Math.min(255, int(maxV, 255)));
+  for (let i = 0; i < REDRAW_GUARD; i += 1) {
+    const r = rng.byte();
+    if (r <= maxV) return r;
+  }
+  return maxV;
 }
 
+// Returns { caught, shakes } (shakes 0-3). RNG order: Rand1 (above), then
+// Rand2 only when Rand1 - Status passed the catch rate and W came out at 255
+// or below. Wobble math draws nothing.
 function catchAttempt(ballId, targetMon, rng) {
   const def = BALL_DEFS[ballId] || BALL_DEFAULT;
-  if (def.autoCatch) return { caught: true, shakes: 3 };
+  if (def.autoCatch) {
+    catchRoll(rng, 255);
+    return { caught: true, shakes: 3 };
+  }
 
   let rate = int(targetMon && targetMon.catchRate, 255);
   if (rate < 0) rate = 0;
@@ -1046,11 +2311,16 @@ function catchAttempt(ballId, targetMon, rng) {
     shakeBonus = 5;
   }
 
+  // W = ((MaxHP * 255) / BallFactor) / max(HP / 4, 1), unclamped: the HP
+  // quarter is the low byte of the 16-bit shift (`srl b / rr a` twice), a 0
+  // read as 1; X = min(W, 255) is the byte Rand2 and the shakes read.
   const maxhp = Math.max(1, int(targetMon && targetMon.maxHp, 1));
   const hp = Math.max(0, int(targetMon && targetMon.hp, 0));
-  const hpQuarter = Math.max(1, Math.floor(hp / 4));
+  let hpQuarter = Math.floor(hp / 4) % 256;
+  if (hpQuarter === 0) hpQuarter = 1;
   const factor = def.hpFactor || BALL_DEFAULT.hpFactor;
-  const f = Math.min(255, Math.floor(Math.floor(maxhp * 255 / factor) / hpQuarter));
+  const w = Math.floor(Math.floor(maxhp * 255 / factor) / hpQuarter);
+  const f = Math.min(255, w);
 
   function shakes() {
     const ballFactor2 = def.wobbleFactor || BALL_DEFAULT.wobbleFactor;
@@ -1066,6 +2336,9 @@ function catchAttempt(ballId, targetMon, rng) {
   const r = catchRoll(rng, def.randMax || 255) - statusBonus;
   if (r < 0) return { caught: true, shakes: 3 };
   if (r > rate) return { caught: false, shakes: shakes() };
+  // "If W > 255, the ball captures the Pokémon" (`jr nz, .captured`, :305-310)
+  // -- before Rand2 is drawn.
+  if (w > 255) return { caught: true, shakes: 3 };
   if (catchRoll(rng, 255) <= f) return { caught: true, shakes: 3 };
   return { caught: false, shakes: shakes() };
 }
@@ -1103,8 +2376,12 @@ function isJumpKick(effectId) {
   return int(effectId, 0) === 45;
 }
 
-function jumpKickCrash(maxHp) {
-  return Math.max(1, Math.floor(Math.max(1, int(maxHp, 1)) / 8));
+// PrintMoveFailureText (core.asm :3718-3768): the crash is wDamage / 8,
+// bumped to 1 -- and wDamage is always 0 by then ("since the move missed,
+// wDamage will always contain 0 at this point"), so it is 1, whatever the
+// monster's HP. `wDamage` is taken for the cart's own reading.
+function jumpKickCrash(wDamage) {
+  return Math.max(1, Math.floor(Math.max(0, int(wDamage, 0)) / 8));
 }
 
 function isSwitchAndTeleport(effectId) {
@@ -1125,8 +2402,44 @@ function runEndsBattle(mode) {
   return mode === '1v1' || mode === 'coop_pvp';
 }
 
+// TryRunningFromBattle's wild odds (engine/battle/core.asm :1508-1567): null
+// for a getaway that draws no byte, else the number a BattleRandom byte must
+// not exceed (`cp b` / `jr nc`). The runner's 16-bit Speed at or over the
+// wild one's gets away (StringCmp); so does a divisor of 0 -- the wild Speed
+// / 4 taken to its low byte, `srl b / rr a` twice and only `a` kept -- and a
+// quotient of the runner's Speed x 32 (the product's low word, hDividend) by
+// it over 255 (hQuotient + 2 nonzero). Each attempt past the first adds 30
+// (`attempts` counts this one), and a sum that carries past 255 gets away too.
+function runOdds(playerSpeed, enemySpeed, attempts) {
+  const p = Math.max(0, int(playerSpeed, 0)) % 65536;
+  const e = Math.max(0, int(enemySpeed, 0)) % 65536;
+  if (p >= e) return null;
+  const divisor = Math.floor(e / 4) % 256;
+  if (divisor === 0) return null;
+  let quotient = Math.floor(((p * 32) % 65536) / divisor);
+  if (quotient > 255) return null;
+  for (let i = 2; i <= Math.max(1, int(attempts, 1)); i += 1) {
+    quotient += 30;
+    if (quotient > 255) return null;
+  }
+  return quotient;
+}
+
 function isPayDay(effectId) {
   return int(effectId, 0) === 16;
+}
+
+// PayDayEffect_ (engine/battle/move_effects/pay_day.asm): the user's level
+// doubled with an 8-bit `add a` (a level over 127 wraps), per use.
+function payDayCoins(level) {
+  return (2 * Math.max(0, int(level, 0))) % 256;
+}
+
+// The cart's move id for COUNTER: HandleCounterMove (core.asm :4547-4610)
+// compares wPlayerSelectedMove / wEnemySelectedMove with COUNTER, so it is
+// the move, not an effect (COUNTER is NO_ADDITIONAL_EFFECT).
+function isCounter(moveOrId) {
+  return moveKey(moveOrId) === 'COUNTER';
 }
 
 function isMirrorMove(effectId) {
@@ -1154,13 +2467,26 @@ module.exports = {
   stageMult,
   applyStage,
   badgeBoost,
+  BATTLE_STATS,
+  ensureBattleStats,
+  applyBadgeBoosts,
+  applyStatusPenalty,
+  recalcBattleStats,
+  loadBattleStats,
+  reloadPartyStats,
+  copyStats,
+  changeStat,
+  MAX_STAT_VALUE,
   isPhase1Primary,
   isPhase5Volatile,
   isPhase6Primary,
   handlesPrimary,
   hasMajorStatus,
+  hasSubstitute,
   applyPrimary,
-  sideChanceProc,
+  SIDE_THRESHOLD,
+  COMPUTER_DROP_MISS,
+  sideThreshold,
   applySide,
   isMultihit,
   hitCount,
@@ -1169,7 +2495,34 @@ module.exports = {
   isRecoil,
   drainAmount,
   recoilAmount,
-  fixedDamage,
+  hitsAtPowerZero,
+  isSetDamage,
+  isOhko,
+  ohkoLands,
+  ohkoDamage,
+  SPECIAL_DAMAGE,
+  psywaveDamage,
+  setDamage,
+  statExpBonus,
+  calcStat,
+  hpDv,
+  PP_UP_BONUS_MAX,
+  PP_BASE_MAX,
+  getMaxPp,
+  basePpOf,
+  restorePp,
+  untransform,
+  restoreMoves,
+  sleepTurns,
+  teleportEscapes,
+  TRANSFORM_PP,
+  DISABLE_PICK_GUARD,
+  REDRAW_GUARD,
+  isPrimaryStatDown,
+  mistBlocks,
+  statusPlan,
+  poisonTurnsAway,
+  startsBeforeHit,
   isCharge,
   isFly,
   moveKey,
@@ -1184,7 +2537,10 @@ module.exports = {
   isThrash,
   thrashTurns,
   isRage,
-  screenDamage,
+  skipsBuildingRage,
+  BASE_PRIORITY,
+  MOVE_PRIORITY,
+  movePriority,
   isSpecialType,
   itemEffect,
   itemFailsOnFainted,
@@ -1201,7 +2557,10 @@ module.exports = {
   isSwitchAndTeleport,
   teleportRunAllowed,
   runEndsBattle,
+  runOdds,
   isPayDay,
+  payDayCoins,
+  isCounter,
   isMirrorMove,
   isMimic,
   isMetronome,

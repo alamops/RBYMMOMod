@@ -4,6 +4,741 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
+## [1.5.0] - 2026-09-30
+
+### Added
+
+- **FireRed, LeafGreen and Emerald.** `manifest.games` now claims `gen3`, and
+  every surface the mod has on Red and Gold works on the three Game Boy
+  Advance carts. `START` gets an `MMO` row above `SAVE`, and every screen
+  behind it — the MMO menu, `PLAYERS`, `FRIENDS`, chat and its log, the
+  trainer cards, `RANK`, `SERVERS`, host / join / code entry, `CHARACTER`,
+  the walk-up menu, the trade picker and every request prompt — is drawn
+  natively on the 240×160 screen in the cart's own font and window frames
+  (`src/Gen3Ui.lua`, on the game3 modal stack). A trade ask, a party invite
+  or a friend ask that arrives while the cart's own menu, text or script owns
+  the screen waits for it to close. Plan:
+  `docs/plans/gen3-firered-emerald-support.md`.
+- **Presence on Gen 3.** Other players are real game3 overworld objects,
+  walking on the cart's own sheets with its step animation and depth sorting,
+  with nameplates that follow the game3 camera and the same corner toasts as
+  the other carts. The pace you walk, run (the carts' own Running Shoes) or
+  ride at reaches everyone. `CHARACTER` offers a Gen 3 wardrobe — the heroes
+  of all three carts, rivals, professors, trainer classes, gym leaders and
+  the Elite Four, every one a walking figure — and a look the viewer's cart
+  lacks is drawn the way that cart's Cable Club draws a partner. `PLAYERS`
+  names places from the cart's own map sections. Your partners' characters
+  stand on FireRed's TOWN MAP and Emerald's PokéNav HOENN MAP, each on the
+  section they are in (`src/RegionMap3.lua`), and a player on a neighbouring
+  map is drawn across a seamless map edge, walking in that map's own pool
+  as its NPCs do.
+- **One hub for all three carts, region-scoped.** A Gen 3 hub seats
+  FireRed, LeafGreen and Emerald together: chat, friends, parties, rank,
+  trades and battles cross carts, while the overworld stays per region
+  (Kanto and the Sevii Islands for FireRed / LeafGreen, Hoenn for Emerald) —
+  a player in the other region is on the roster and never on the map.
+- **Trade on Gen 3** (`src/Trade3.lua`). The engine's own
+  `packMon3` / `unpackMon3`, strict; held items and mail travel; the dex is
+  marked seen and caught; the carts' own trade rules (last healthy mon, the
+  National Dex, eggs, event-only MEW / DEOXYS) and their cross-region
+  progress gate apply; a trade evolution plays the cart's EvolutionScene
+  (an Everstone refuses, a trade item is used up). DEOXYS changes forme with
+  the cart it lands in. The swap is shown in text boxes, not the cart's trade
+  animation.
+- **A full Gen 3 battle referee.** `src/BattleSim3/` and its Node twin
+  `server/lib/battle3/` port the carts' battle code: Gen 3 damage, crits,
+  accuracy and the ordered type chart, all 214 `EFFECT_*` move effects, 77
+  abilities, 66 hold effects, weather, end-of-turn residuals, double-battle
+  targeting and spread damage, catching and running. The two are held
+  together by shared vector and turn-parity fixtures; the sheet, the event
+  vocabulary and the RNG order are specified in
+  `docs/plans/gen3-battle-sheet.md`. The hub holds no ROM tables — every
+  number a formula needs arrives on the client's sheet.
+- **Every battle on Gen 3.** Mediated 1-on-1, co-op 2-on-2 against a wild
+  POKéMON or a trainer, and party against party are refereed by the hub on
+  BattleSim3 (`src/Sheet3.lua` builds the sheet, ruleset and bag from the
+  save). Afterwards EXP and EVs are priced by the cart's own formula
+  (`src/Exp3.lua`, which pays from the referee's roster, Exp. Share
+  included), moves are learned through the cart's LearnMove and evolutions
+  play its EvolutionScene; a catch lands in the party or the PC with the dex
+  marked and a nickname prompt; a won trainer fight pays the cart's prize
+  (class × level, Amulet Coin) and a lost one whites out. A fight between
+  players — 1-on-1 or party against party — is a Cable Club battle: both
+  saves come out of it exactly as they went in (the cart reloads the party
+  after a link battle, `cable_club.c` `LoadPlayerParty`), so no held-item,
+  status, HP or PP change is written home, no EXP or Pay Day is paid and
+  nobody whites out.
+- **Pay Day and Exp. Share holders, the cart's way.** A Gen 3 outcome now
+  carries `payDay` — the coins Pay Day scattered (level × 5 per use, saturating
+  at 65535), reported for a won `wild`, `coop_wild` or `coop_npc` fight only
+  and read identically by both hubs. The 1-on-1 client, co-op and
+  `SOLO BATTLES` pay it into the save through the engine's own
+  `Prize.payDay`, doubled by an Amulet Coin the way the cart counts one (your
+  own holder sent out; on FireRed / LeafGreen a foe's too), and say it in the
+  cart's words after its ending lines. An `exp` event may now say
+  `participants = 0`: a knockout that left none of the fighters standing (an
+  EXPLOSION) still pays the living Exp. Share holders, priced on their own.
+  Gen 1 and Gen 2 outcomes and `exp` readings are unchanged.
+- **SOLO BATTLES on Gen 3.** Wild and trainer fights run on a local
+  BattleSim3 with foes built the way the engine builds them (wild IV and
+  held-item rolls, trainer rows' IVs, moves and items), the cart's prize and
+  defeat lines, and its after-battle order. Trainers play with a Gen 3 brain
+  ported from the carts' trainer AI scripts, enabled per trainer by its AI
+  flags.
+- **Badges count on Gen 3 against the computer, as on the cart.** In solo
+  fights and in co-op against a trainer or a wild POKéMON, your badges boost
+  your POKéMON's stats the cart's way, and a traded POKéMON can disobey.
+  - **Stat boosts.** Badge 1 boosts Attack, badge 3 Speed, badge 5 Defense,
+    and badge 7 Sp. Atk and Sp. Def. Each is x1.1, applied at the cart's
+    point in damage and turn order. They count only for your side, and each
+    player brings their own badges.
+  - **Obedience.** A traded POKéMON above your badges' level cap may loaf
+    around, ignore orders, use a different move, nap or hurt itself, in the
+    cart's own sequence and words. The caps are 10 with no badges, 30, 50 and
+    70 with badges 2, 4 and 6, and none with badge 8. FireRed / LeafGreen
+    keep their Focus Punch exemption, and Emerald doesn't. A MEW or DEOXYS
+    that didn't come from an event never obeys; an event one follows the
+    usual rules.
+  - **Fights between players stay link battles.** In 1-on-1 and party
+    against party there are no boosts and no disobedience. The referee
+    enforces this itself, so a modified client can't change it.
+  - **How it works.** Badges travel in the existing `badges` field as
+    `"1".."8"`, and the Gen 3 sheet gains `traded` / `unfateful` plus an
+    `obey` event (`docs/plans/gen3-battle-sheet.md` §6, §7.2.1). The plan is
+    `docs/plans/gen3-badge-rules.md`.
+- **Red and Gold fights play by more of the carts' rules.** Every fight the
+  mod referees on Red or Gold (solo, co-op, 1-on-1, party against party) gains
+  three of the carts' rules, read from the pret disassemblies.
+  - **Move priority, in every fight.**
+    - **Red:** QUICK ATTACK goes first and COUNTER last.
+    - **Gold:** follows the cart's table. PROTECT, DETECT and ENDURE go
+      first, then QUICK ATTACK, MACH PUNCH and EXTREMESPEED. ROAR, WHIRLWIND,
+      COUNTER, MIRROR COAT and VITAL THROW go last.
+    - **Ties:** within a bracket, the faster POKéMON goes first.
+  - **Obedience against the computer.** A traded POKéMON (its OT ID isn't
+    yours) above your badges' level cap may loaf around, ignore orders, use
+    another move, take a nap or hurt itself. It does so in the cart's own
+    sequence and words.
+    - **Red caps:** 10 with no badges; 30 with CASCADEBADGE, 50 with
+      RAINBOWBADGE, 70 with MARSHBADGE; none with EARTHBADGE.
+    - **Gold caps:** 10 with no badges; 30 with HIVEBADGE, 50 with FOGBADGE,
+      70 with STORMBADGE; none with RISINGBADGE.
+    - **Gold only:** a sleeping traded POKéMON told to SNORE or SLEEP TALK
+      can ignore orders too.
+    - **Between players:** everyone obeys, as in a link battle.
+  - **Held items on Gold.** Items held in a fight now do what they do on the
+    cart:
+    - QUICK CLAW, BRIGHTPOWDER and SCOPE LENS;
+    - the type-boosting items and the PINK and POLKADOT BOWs;
+    - LUCKY PUNCH, STICK, LIGHT BALL, THICK CLUB and METAL POWDER, each for
+      its own POKéMON;
+    - FOCUS BAND and KING'S ROCK;
+    - LEFTOVERS and the healing, status and confusion berries;
+    - MYSTERYBERRY, the stat-up items and BERSERK GENE.
+  - **More items on Gold:**
+    - **THIEF** steals both ways (MAIL can't be stolen), but not through a
+      SUBSTITUTE.
+    - **Wild POKéMON** hold items at the cart's odds, and a catch keeps the
+      item.
+    - **SMOKE BALL** always gets you out of a wild fight.
+    - **AMULET COIN** doubles a trainer's prize.
+  - **What reaches your save.** In fights against the computer, an eaten
+    berry or a stolen item is gone afterwards, and an item you steal is
+    yours. A fight between players leaves every item where it was; the cart
+    reloads the party after a link battle.
+  - **How it works:**
+    - Red and Gold battle sheets carry `traded`, and Gold sheets carry the
+      held item's effect, parameter, name and a MAIL flag.
+    - Gold's referee gains a `held` event.
+    - The hubs tell the referee whether a Gold-family player is on Gold/Silver
+      or Crystal, because the two carts scale large stats differently.
+    - Red now uploads its four obedience badges.
+    - `run-solo-battle-e2e.sh` drives each rule live:
+      - on Red and Gold: `obey-traded`, `obey-capless`, `obey-asleep`
+        and `priority-quick`;
+      - on Gold only: the `held-*` legs (LEFTOVERS, a BERRY, QUICK CLAW,
+        a wild THIEF, SMOKE BALL);
+      - on FireRed and Emerald: `obey-asleep` and `theft-wild`.
+    - `SOLO_LEGS` now picks legs on every cart.
+    - The plan is `docs/plans/gen12-referee-fidelity.md`.
+- **Every Red and Gold move now works the cart's way.** The Red and Gold
+  referees were hand-written approximations; every difference from pokered
+  and pokecrystal found along the way is now closed, in the hub's copy and
+  the LAN host's alike. The Lua and Node copies were fuzzed against each
+  other over tens of thousands of fights with no mismatch.
+  - **Gold's own moves.** About sixty Gold moves now do what they do on the
+    cart, where they used to be a plain hit or nothing at all:
+    - RETURN, FRUSTRATION, HIDDEN POWER, FLAIL, REVERSAL, MAGNITUDE,
+      PRESENT, TRIPLE KICK, FURY CUTTER, ROLLOUT, BEAT UP, PURSUIT, FALSE
+      SWIPE and FUTURE SIGHT;
+    - PROTECT, DETECT, ENDURE, COUNTER and MIRROR COAT;
+    - BATON PASS (you pick who comes in), SPIKES, CURSE, BELLY DRUM, PERISH
+      SONG, DESTINY BOND, ENCORE, ATTRACT, MEAN LOOK, NIGHTMARE, PAIN SPLIT,
+      PSYCH UP, RAPID SPIN, SPITE, SWAGGER, CONVERSION and CONVERSION2,
+      FORESIGHT, HEAL BELL, AMNESIA, TELEPORT, ROAR and WHIRLWIND;
+    - SKETCH, which is written to your save after a fight against the
+      computer;
+    - SLEEP TALK, SNORE, TOXIC, SAFEGUARD, LOCK-ON, MIMIC, TRANSFORM, REST
+      and the time- and weather-based heals.
+  - **Weather on Gold.** RAIN DANCE, SUNNY DAY and SANDSTORM, with their
+    damage changes, THUNDER and SOLARBEAM's rules and sandstorm damage. The
+    battle screens show it.
+  - **The secondary effects of Gold-only moves:** CRUNCH, MUD-SLAP, METAL
+    CLAW, ANCIENTPOWER, FLAME WHEEL, STOMP, TWISTER, THUNDER, TRI ATTACK and
+    the rest.
+  - **Red's remaining rules.** TRANSFORM undone on switch-out, the whole of
+    HAZE, MIMIC (you pick the move to copy), DISABLE, COUNTER's damage,
+    TELEPORT and ROAR's level roll, JUMP KICK's crash, the fixed-damage
+    moves past immunities, OHKO on a Speed tie, multi-hit odds, the trapping
+    moves as the cart runs them, and the cart's quirks (the 0-PP wrap,
+    MIRROR MOVE after a called move, and the Hyper Beam recharge a flinch or
+    freeze clears).
+  - **Turn order and draws.** Both referees draw their random numbers at the
+    carts' points: crit, then the damage roll, then accuracy, with the
+    carts' byte arithmetic for accuracy, crits, full paralysis, sleep length
+    and damage variation. The computer's own items and switches resolve in
+    its turn slot.
+  - **The computer's choices.** A wild POKéMON picks its move as the cart
+    does, and on Gold the computer's status moves miss 25% of the time. The
+    trainer AI is in the next entry.
+  - **The carts' own words.** Every line the Red and Gold referees print is
+    now pokered's or pokecrystal's text, from "It's super effective!" to
+    "The SUBSTITUTE took damage for …!", along with the cart's sleep and
+    confusion animations.
+  - **Outside the fight:**
+    - PAY DAY pays out on Red and Gold (doubled under AMULET COIN on Gold),
+      including Red's escapes that pay on the cart.
+    - A level-up in the middle of a fight reaches the referee's stats.
+    - HEAL BELL's cures are written to your save.
+    - Gold time-of-day evolutions after a refereed fight see the clock
+      again.
+    - A co-op joiner keeps an item it steals or catches when its own game
+      data says that foe can hold it.
+    - The move list shows each cart's PP Up cap.
+  - **Running in co-op.** A wild fight in co-op now rolls the cart's escape
+    odds, so "Can't escape!" can happen.
+  - **Catching.**
+    - Gold uses its own catch formula (pokegold's): the ball table includes
+      Kurt's balls, with the cart's own bugs in them, plus Gold's HP
+      arithmetic and wobble checks.
+    - Red's GREAT BALL and ULTRA BALL no longer catch far more often than
+      they should.
+  - **Items that won't do anything** (a POTION at full HP, a cure with no
+    matching status, an X ACCURACY already in effect) are refused as on
+    the cart: the bag and the turn are kept.
+  - **STRUGGLE** comes up when the only move with PP left is the disabled
+    one.
+  - **Knockouts:** a fight against the computer that ends with both last
+    POKéMON fainting is a loss, as on the cart.
+  - **How it works.**
+    - The referees' random numbers take the generator's high bits.
+    - Sheets carry each mon's base stats, DVs, stat exp, PP Ups and (on Gold)
+      happiness and gender.
+    - Move rows carry Gold's priority; Red rulesets carry the type chart's
+      row order.
+    - A mid-fight level-up rides the existing moveset message; outcomes
+      carry Pay Day coins.
+    - The plan is `docs/plans/gen12-referee-gaps-fix.md`.
+- **The computer plays as the cart, and the battle screens say what the cart
+  says.** The last differences listed for the Red and Gold referees are
+  closed, in the hub's copy and the LAN host's alike, and the Lua and Node
+  copies were fuzzed against each other with no mismatch.
+  - **The trainer AI is the cart's.** On Red, pokered's `TrainerAI` runs in
+    the computer's slot of the turn: each class's item and switch routine,
+    its use budget, and the random byte it draws every turn while uses
+    remain (generic trainers included), with EnemySendOut's party order for
+    a replacement. On Gold, pokecrystal's `AIChooseMove` picks the move with
+    every scoring layer the class has (and the carts' scoring bugs), a wild
+    monster's move is the cart's random pick, `AI_SwitchOrTryItem` uses the
+    trainer's two item slots or switches out (PURSUIT catches it), and the
+    replacement is the cart's matchup pick. The computer carries no bag on
+    either cart; its class data rides the NPC upload.
+  - **Solo fights too.** A Red or Gold opponent in `SOLO BATTLES` is now the
+    referee's cart AI rather than the engine's port, so it plays and draws
+    exactly as in a co-op fight. A mod that registers its own `brain` for a
+    Red trainer still picks that trainer's moves; extra scoring layers a mod
+    registers are no longer run on Red or Gold.
+  - **"Enemy" and "Your", per player.** Each line names the other side's
+    POKéMON as "Enemy X" and your own (or your partner's) as plain "X", as
+    each cart prints for its own player — on Gold in wild fights too, as
+    pokecrystal does. Gold's screen-fade lines say "Your" or "Enemy" per
+    player. "X fainted!" follows the same rule.
+  - **The cart's line breaks.** Battle text breaks where the cart's does, and
+    a three-row line scrolls its third row in as the cart's text box does.
+    A battle line may be up to 80 characters on the wire; chat stays at 60.
+  - **Knockouts after the move.** A POKéMON a move knocks out stays at 0 HP
+    until the move is over: drain, recoil, PAY DAY, THIEF, RAGE and DESTINY
+    BOND come first, then the faint, as on the carts.
+  - **Running from a fight between players** prints the carts' lines: "Got
+    away safely!" for the runner, "Enemy X ran!" (Red) or "Enemy X fled!"
+    (Gold) for the other side.
+  - **Animations.** Red: the cancelled FLY or charge, X items (yours and the
+    computer's), LEECH SEED's drain from the seeder, the trainer's
+    blocked ball, the charge and BIDE turns, THRASH's first turn, the
+    status-effect shakes, and every hit of a multi-hit move. Gold: the
+    cart's status, love, sandstorm, nightmare, curse, confusion-hit and
+    stat-down clips, wrap and berry beats, the blocked ball, and every hit
+    of a multi-hit move or BEAT UP. A move that
+    misses plays no animation, as on the carts, and a residual or charge
+    beat no longer pops a trainer callout. Red's arena adds the slow and
+    light screen shakes that follow THRASH's first turn and the status
+    shakes, and in a fight between players each side sees its own cart's
+    beat when it is the one poisoned, burned, frozen or paralyzed.
+  - **Traded EXP on Red** is decided by the POKéMON's original trainer, as
+    the cart does it, and co-op fights now pay it too: ×1.5 and "a boosted".
+  - **Smaller cart rules found on the way (Gold):** MIRROR MOVE, ENCORE,
+    DISABLE and the rest see no "last move" after a move METRONOME, MIRROR
+    MOVE or SLEEP TALK called; a charge turn prints no "used" line;
+    SELFDESTRUCT clears the user's status and LEECH SEED; PURSUIT on a
+    switching monster faints only that monster; TRIPLE KICK from behind the
+    user's own SUBSTITUTE kicks ×2 / ×3 / ×4, the cart's quirk; a trainer
+    split across two co-op seats has one kit between them.
+  - **LURE BALL and HEAVY BALL** work on Gold: the fight's battle type and
+    the species' weight now reach the referee. LOVE BALL and HEAVY BALL read
+    a transformed wild monster the way the cart does.
+  - The plan is `docs/plans/gen12-referee-remaining-gaps.md`.
+- **SOLO BATTLES fights lone double battles on Gen 3.** A trainer who sends
+  out two at once, on FireRed, LeafGreen or Emerald, is fought on the mod's
+  referee instead of the cart's. That covers the Twins and couples on the
+  routes, and gym doubles like Tate & Liza with their badge.
+  - **Two from one team, as on the cart.** Either slot switches in any bench
+    monster, a fainted slot refills from the whole team, and with one left
+    only one comes out. A REVIVE used while a slot stands empty sends the
+    revived monster into it at the end of the turn. The trainer's side works
+    the same way.
+  - **Two commands a turn.** Each is checked as you make it, so a disabled
+    move, an item that would do nothing or a trapped switch is refused then,
+    in the cart's words. B on the second monster's menu goes back to the
+    first's.
+  - **Aiming.** Single-target moves aim at either foe or your partner. You
+    are asked only when more than one other battler stands, and a Ghost's
+    CURSE is aimed as the cart aims it.
+  - **The trainer AI.** FireRed / LeafGreen aim at a random foe and Emerald
+    scores every target. Emerald runs its double-battle AI script, so it
+    keeps an EARTHQUAKE off its own partner and fires a Fire move into a
+    Flash Fire partner.
+  - **Rewards.** The prize is doubled, EXP is split per participant, and Pay
+    Day, the Amulet Coin, learn-move and evolution all work. Emerald's TV
+    records both monsters.
+  - **Both battle screens.** The arena seats the trainer behind both foes.
+    `CLASSIC BATTLE UI` draws the cart's own double screen: two healthboxes
+    a side, the target blinking while you aim, the move preview, and START
+    for HP figures.
+  - **When it is handed back.** With fewer than two usable POKéMON the fight
+    goes back to the cart, which refuses it in its own words. Two trainers at
+    once and Steven as a partner are the next entry's.
+  - **How it works.** The referee's twins share one team across two seats
+    (`seats = 2`; `docs/plans/gen3-battle-sheet.md` §1.3). One-seat fights
+    replay byte for byte, held by the turn-parity fixture. The plan is in
+    `docs/plans/gen3-solo-doubles.md`.
+- **SOLO BATTLES takes every other Gen 3 fight a player can walk into.**
+  Each family is its own module behind one kind registry
+  (`SoloBattle.registerKind3`, `src/Solo3/`):
+  - two trainers at once, and Steven beside you (Emerald, `Doubles.lua`);
+  - the Safari Zone, on its own screen (`Safari.lua`);
+  - roamers, scripted wilds and legendaries, and the POKéMON TOWER ghosts,
+    veiled and unveiled (`Legend.lua`);
+  - the Battle Frontier's seven halls and three Battle Tents, Trainer Hill
+    and Secret Bases on Emerald, and the Trainer Tower on FireRed /
+    LeafGreen (`Facility.lua`); the Battle Tower multis with a partner and
+    the Battle Pike's two-trainer room (`FacilityMulti.lua`);
+  - the first battles, in Oak's lab and with Birch's ZIGZAGOON
+    (`First.lua`);
+  - the tutorials: the old man, WALLY, and the POKé DUDE through the
+    TEACHY TV (`Tutorial.lua`). What a demonstration lends you, a party or
+    a bag, is given back when it ends. A save while it still holds them is
+    refused, and one left behind by a crash or a hot reload is given back
+    before the next save (`src/Borrow3.lua`).
+
+  Link battles and the e-Reader trainer stay the cart's (see Known). The
+  plan is `docs/plans/gen3-solo-remaining-fights.md`.
+- **The encounter divert on Gen 3.** Step encounters are taken through the
+  public `encounter.roll` hook. Trainers, and the wild fights that never pass
+  that hook (fishing, Rock Smash, Sweet Scent), are taken at one contained
+  wrap of the engine's `BattleBridge.start`, which runs the cart's own
+  post-battle steps and the trainer opcode's own continuation when the mod's
+  fight ends. The proposed upstream seam that would replace it is in
+  `docs/upstream/gen3-spawn-npc.md`.
+- **The arena and a GBA CLASSIC BATTLE UI on Gen 3.** The arena draws the
+  carts' own 64×64 pics seated at their cart elevation, animated 32×32 icons,
+  overworld walkers and trainer pics, a backdrop built at runtime from the
+  cart's own battle background, weather overlays and the Substitute doll.
+  `CLASSIC BATTLE UI` draws a FireRed / Emerald-style battle screen from the
+  cart's own chrome (HP boxes, EXP bar, party balls, action and move menus
+  with PP and TYPE, party / bag / target pickers, 2-on-2 and 3-on-3 focus).
+  Every Gen 3 move and item resolves a particle look.
+- **Gen 3 test runs.** `tests/drivers/run-mmo-e2e-gen3.sh`
+  (`GEN3_GAME=firered|leafgreen|emerald`) — presence, chat, social, trade,
+  then a mediated 1-on-1 on the arena and one under `CLASSIC BATTLE UI`, and
+  inside a party a co-op wild fight (EXP, a level-up), a co-op catch with the
+  nickname grid and a co-op trainer walked into (the divert, a POTION, the
+  flag on both carts); `run-trip-e2e-gen3.sh` (a Node hub on
+  `--generation 3` with FireRed, FireRed and Emerald, including a
+  FireRed-vs-Emerald 1-on-1); `run-mismatch-e2e-gen3.sh`,
+  `run-battlefield-e2e-gen3.sh` and `run-solo-battle-e2e.sh --gen3` (Pay Day,
+  both kinds of draw, overworld weather, and every fight family SOLO
+  BATTLES takes: the field, the Frontier, the Trainer Tower and Hill;
+  `SOLO_LEGS` narrows it). `GEN3_LEGS` narrows a run to some
+  legs. Each leg has a screenshot and an `index.html` contact sheet
+  (`tests/drivers/shots_index.py`); the README's Gen 3 gallery is cropped
+  from them (`docs/screenshots/gen3/`). `.env` takes
+  `FIRE_RED_ROM_PATH`, `LEAF_GREEN_ROM_PATH` and `EMERALD_ROM_PATH`. Headless:
+  `tests/gen3_*.lua`, `tests/trade3.lua`, `tests/battle_sim3_*.lua`,
+  `server/gen3.test.js`, `server/battle3_*.test.js`, and a tri-generation
+  load block in the main suite.
+
+### Changed
+
+- **PROTOCOL is now 30.** `generation` on `mmo.hello` reads 1, 2 or 3, and a
+  generation a hub does not know is **refused** instead of clamped to 1 — a
+  protocol-29 hub admitted a FireRed client into a Red room. A hello with no
+  generation is still read as Gen 1. The hello also carries the cart
+  (`version`: `firered`, `emerald`, `red`, `gold`, …), kept only when it
+  belongs to the admitted generation and carried on every presence, so a
+  viewer maps another cart's sprite through the cart it came from. The Gen 3
+  battle-sheet dialect (abilities, held items, natures, IVs to 31, EVs to
+  255) is part of the same number. An older mod or hub is refused at the door
+  with a sentence naming both versions: **update the hub and the mod
+  together.**
+- **Hubs lock to generation 3.** `--generation 3` on the CLI, `hub.js` and
+  both deploy scripts, `"generation": 3` in `config.json`, or
+  `RBY_MMO_GENERATION=3`; `HOST GAME` on a Gen 3 boot locks the room to 3 by
+  itself. `status.json` and `rby-mmo-hub stats` now report the generation
+  beside the protocol (`3 (Gen 3 / FRLG + Emerald)`). `run-server.sh` and
+  `upgrade-server.sh` refuse — not warn — a Gen 3 lock on a release older
+  than protocol 30, before anything is written or built, since that hub would
+  read 3 as 1 and turn every Gen 3 player away.
+- **No `B TO RUN` row on a Gen 3 boot.** The carts have Running Shoes of their
+  own and never call the hook that row switches. A stored value is kept for
+  a Gen 1 boot of the same copy.
+- The manifest description now names all three generations.
+
+### Fixed
+
+- **Classic party-ball rendering** uses the engine-owned sheet and palette,
+  clips empty slots to the actual party size, and passes the ROM-cache path
+  lint gate. Under a GBC colour palette the engine's own redraw of the row no
+  longer brings the empty slots back over the foe's picture.
+
+- **Gen 3 mid-battle growth reaches the referee.** Single and double battles
+  now send the new level, combat stats and HP maximum, including levels that
+  teach no move. The Lua and Node referees keep existing damage, stages and
+  Transform copies. Protocol **31** refuses older hubs that would drop this
+  growth.
+- **Gen 3 SKETCH updates the move menu and the party.** The copied move and
+  PP persist after NPC battles; link battles update the menu while preserving
+  the saved party. A save that keeps empty move slots (a Smeargle knowing
+  SKETCH alone) takes the copied move too.
+- **Neighbouring maps keep their people.** A player standing on a connected
+  map the engine had not finished preparing left that map without its
+  trainers and townsfolk — not drawn, not blocking — until you changed maps.
+  The mod now waits for the engine's own preparation and drops a holder it
+  made once nobody is standing there.
+- **Gen 3 fights that lose their screen give back what they borrowed at
+  once.** A POKé DUDE quit whose screen stayed up now ends as a draw instead
+  of a black, input-less screen; a fight screen that leaves the stack hands
+  the battle back to the game and returns any borrowed party or bag on the
+  next frame rather than at the next save; and the game's own TEACHY TV
+  (SOLO BATTLES off) settles a leftover borrow before it backs up your bag.
+  The bag and START menus are closed again behind a demonstration.
+- **A knockout draw is only promoted to a win on the save it started on**,
+  so loading another save mid-fight cannot pay a prize into it.
+- **Battle Palace and POKé DUDE turns.** A turn the referee answered during
+  the Palace's short wait no longer files a second pick, and a refused
+  POKé DUDE replacement keeps the replacement picker open.
+- **Steven's multi battle** checks your own half of the party for a monster
+  that can fight, not his.
+- **Cross-region trades on builds without the engine's link check.** A
+  FireRed / LeafGreen save without the National Dex is refused before any
+  pick, as the carts refuse it, and a Ruby / Sapphire partner the engine
+  clears is no longer turned away by the fallback.
+- **Ruby and Sapphire can trade with FireRed / LeafGreen.** A Ruby or
+  Sapphire save refused every FireRed partner for a cross-region unlock those
+  carts never set; it now trades as the carts do, and what it receives is
+  still checked against FireRed's own rule.
+- **The "not saving" line reads as a sentence.** A tutorial and a POKé DUDE
+  demonstration holding your bag at once read "your bag pockets and bag and
+  party"; it now says "your bag and party".
+- **Crystal names its cart to the hub.** Gen 2 hellos now carry the version,
+  so fights against the computer use Crystal's damage rules when appropriate.
+- **Badges no longer boost fights between players on Red or Gold.** A
+  hub-refereed 1-on-1 or party-against-party fight applied each player's
+  badge boosts, so a player with more badges hit harder in ranked play. The
+  carts never do that in a link battle: Gen 1's ApplyBadgeStatBoosts and
+  Gen 2's BadgeStatBoosts return early. The Gen 1 / Gen 2 referees now ignore
+  badges in those modes and on the opponent's side. Fights against the
+  computer keep them.
+- **Gold's badges never counted against the computer.** The Gen 2 referee
+  looked up Red's badge names (BOULDERBADGE …), so a Gold player's badges
+  never matched. Gold clients also never sent their Kanto badges. Now:
+  - **Stat boosts follow Gold's rules:** Zephyr Attack, Mineral Defense,
+    Plain Speed, and Glacier Sp. Atk with the cart's quirky Sp. Def check,
+    capped at 999.
+  - **Type badges are new:** owning a type's badge (Zephyr Flying, Hive Bug,
+    … all sixteen) adds 1/8 to that type's damage, as Gold does.
+  - **Red's boost gets its 999 cap.** It is now capped like pokered's.
+- **Red and Gold damage now follows the carts.** The referees had their own
+  order for several steps; each now follows pokered or pokecrystal,
+  including the carts' known quirks:
+  - **Badges and stat stages.**
+    - **Red** keeps its battle stats the way the cart does, including two
+      glitches. Every stat move re-applies every badge to your stats (the
+      badge-stacking glitch), and a burn or paralysis penalty lands again
+      on the other side.
+    - **Gold** applies stages, then badges, then burn or paralysis.
+    - **Both:** stat stages now reset when a POKéMON switches in or faints.
+  - **Critical hits.**
+    - **Red:** a crit ignores stages, badges, burn and screens. FOCUS ENERGY
+      with a high-crit move follows the cart's arithmetic.
+    - **Gold:** a crit ignores them unless the defender's stage is lower
+      than the attacker's.
+  - **REFLECT and LIGHT SCREEN** double the defending stat instead of halving
+    the damage afterwards. Casting one that is already up fails, and they
+    don't count on a crit.
+    - **Red:** a screen belongs to the POKéMON and leaves with it.
+    - **Gold:** a screen covers the side for five turns.
+  - **Big numbers:**
+    - **Red:** wraps large stats the way the cart does.
+    - **Gold:** halves them as Gold/Silver or Crystal does.
+    - **Both:** the base damage is capped at 997 + 2 before the type and
+      same-type multipliers, as on the cart. Explosion halves the defense at
+      the cart's step.
+  - **Confusion self-hits** use stages, badges and burn.
+    - **Red:** the self-hit uses the opponent's REFLECT.
+    - **Gold:** the self-hit uses your own side's REFLECT. It halves your
+      defense when the chosen move was EXPLOSION or SELFDESTRUCT. Both are
+      cart quirks.
+  - **Gold's STRUGGLE** has no type: no same-type bonus, and it hits GHOSTs.
+  - **METRONOME and MIRROR MOVE on the last PP:** the move they call no
+    longer takes STRUGGLE's recoil.
+  - **Gold flinches:** a flinch no longer carries over to a POKéMON that had
+    already moved. A sleeping or frozen POKéMON checks that first.
+  - **RAGE builds only where the cart builds it:** after an opponent's move
+    hits, including a hit a SUBSTITUTE takes. It no longer builds from
+    poison, burn, LEECH SEED, recoil, a confusion self-hit, or the hit that
+    knocks it out.
+    - **Red:** each build raises Attack.
+    - **Gold:** each build adds to RAGE's own damage, as the cart's counter
+      does, instead of raising Attack. A raging POKéMON is no longer locked
+      into RAGE.
+  - **Gold's turn checks run in the cart's order.** Full paralysis is rolled
+    last, after confusion and a disabled move. A move's secondary effect no
+    longer lands on a POKéMON the hit knocked out.
+  - **Red's multi-hit moves and SUBSTITUTE:** DOUBLE KICK, TWINEEDLE, FURY
+    ATTACK and the rest stop when their first hit breaks a SUBSTITUTE, as on
+    the cart. A break on a later hit still lets the remaining hits land.
+- **Secondary effects never happened in Red and Gold fights the mod
+  referees.** No EMBER ever burned, no BITE flinched, no BODY SLAM
+  paralysed, and no AURORA BEAM lowered Attack, in solo, co-op and PvP
+  alike. The client sent each move's effect chance from a field neither
+  cart's data has:
+  - **Red** keeps the odds per effect, not per move. The referee now uses
+    pokered's own: 26 or 77 in 256 for burn, freeze, paralysis and flinch,
+    52 or 103 for poison, 85 for a stat drop, and 25 for confusion. Each
+    effect also checks what the cart checks first: a SUBSTITUTE, a target
+    that already has a status, and a target of the move's own type.
+    - A FIRE move thaws a frozen target.
+    - MIST doesn't stop a side-effect stat drop.
+    - The computer's side-effect drops miss a further 25% of the time, as
+      on the cart.
+    - Nothing lands on a POKéMON the hit knocked out, or through a
+      SUBSTITUTE the hit broke.
+  - **Gold** keeps them per move as `effectChance`, which the client now
+    reads. THIEF steals live again because of it. Gold's own conditions
+    apply too:
+    - no poisoning a POISON type;
+    - no burning or freezing a POKéMON of the move's own type;
+    - a burn-family hit thaws a frozen target;
+    - no flinch on a sleeping or frozen target;
+    - the computer's stat drops, its GROWL and its AURORA BEAM alike, miss
+      a further 25% of the time.
+- **Gold's high-crit moves were never high-crit in a refereed fight.**
+  Gold's high-crit list is now the cart's: KARATE CHOP, RAZOR WIND, RAZOR
+  LEAF, CRABHAMMER, SLASH, AEROBLAST and CROSS CHOP.
+- **Red's evasion was inverted.** DOUBLE TEAM and MINIMIZE made the user
+  easier to hit. Raised evasion now lowers the hit chance, as on the cart.
+- **Red: confusion survived a switch-out.** Switching now clears it (and a
+  pending recharge), as the cart's send-out does.
+- **Red: poison, burn and LEECH SEED ticked at the end of the turn.** They
+  now hurt right after each POKéMON's own move. A knockout ends the turn
+  before the slower one moves.
+- **Gold: a forged level-up could raise a POKéMON's stats mid-fight in a
+  fight between players.** No cart levels a POKéMON in a link battle; the
+  hubs now ignore those messages in PvP, and the referee checks every
+  level-up it receives.
+- **A LEECH SEED knockout froze Red and Gold fights.** When the drain fainted
+  the seeded POKéMON, the referee read the seed it had just cleared and
+  stopped mid-turn. The fight now goes on.
+- **The Node hub aimed a released BIDE at the wrong POKéMON in co-op.** A
+  BIDE stored against the first seat on the other side was released at the
+  second one, because the hub's copy of the referee read seat 0 as "no
+  target". The hub and the LAN host now agree.
+- **On Gen 3, a wild POKéMON or a trainer could steal your item.** THIEF and
+  COVET used by the computer now steal nothing, and its TRICK fails, as on
+  FireRed and Emerald outside link battles. THIEF used by you still keeps
+  what it takes, and fights between players are unchanged.
+- **Gold: a mediated fight re-sent learned moves with the Gen 1 effect
+  table.** `sheetMoves` dropped the generation, so a move learned mid-fight
+  on Gold went to the referee with Red's effect id. It keeps the generation
+  now (regression test in `tests/mediated_battle_client.lua`).
+- **Gold: co-op item effects came from the Gen 1 table.** Berries and Kurt's
+  balls were looked up among Red's items. Co-op now reads each generation's
+  own item effects.
+- **Gold: the co-op prize went to the wrong wallet.** The synthetic trainer
+  prize was written to `save.money`, which Gold does not read (it keeps
+  `save.player.money`). It goes through `Gen.money` now.
+- **A trade whose apply returned nothing was reported as a success.** A
+  `Trade2` (and now `Trade3`) apply that answers nil is a failed trade: the
+  player is told, and nothing is saved (pinned in `tests/trade2.lua`).
+- **The main suite is green again.** The co-op party block and the NPC RUN
+  block were stale after #87 and #86, and the victories-table scan could
+  reach a helper function first and crash intermittently at the gym-music
+  block; it now skips non-table entries.
+- **A co-op fight given up during setup kept everyone busy for an hour.**
+  When one client could not set a co-op fight up (a team that would not
+  pack, a field it could not read, a trainer that cannot fight two), it gave
+  up without telling the hub. Since #87 that left every player in the fight
+  refused any trade, 1-on-1 or co-op until the hub's hour-long sweep, and a
+  partner still setting up waited for good, their trainer held. Giving up
+  now sends the goodbye a finished fight sends: the hub frees every seat and
+  calls the fight off, and a partner still setting up is told "The battle
+  was called off." and fights their trainer alone. The hubs are unchanged
+  (regression tests in `tests/rby_mmo_test.lua` and `tests/gen3_coop.lua`).
+- **The release archive carried test code.** Thirty-four Gen 1 and Gen 2
+  drivers, suites and parity fixtures, a config backup and a scratch log had
+  no `.modkitignore` line, so the release zip shipped them (the workflow drops
+  only listed paths and `docs/`). Every file under `tests/` is now listed,
+  the new Gen 3 ones included, and so are the unlisted plans and screenshots
+  for a locally built `modkit pack` — among them the review captures under
+  `docs/screenshots/nicknames/`, which were named by a directory line
+  `modkit pack` never matches.
+
+The Gen 3 review round, before release — none of these reached a published
+version, but each was a real failure on a live boot or on the wire:
+
+- **A Gen 3 trade could duplicate a POKéMON.** The peer was shown a snapshot
+  of the party while the pick and the apply went by slot, so reordering the
+  party while the picker waited duplicated a mon. Picks map to the
+  snapshot, the confirm re-checks identity (species, personality, OT, egg,
+  item), the apply swaps by identity, and the field and `START` are held from
+  the pick until the save.
+- **Frozen, doubled avatars across seamless map edges.** The engine's ghost
+  capture copied remote players into the neighbouring map's draw pool; they
+  are now retired and purged from every pool on each map change.
+- **A peer's sprite could be any cart graphic** — a Cut tree or a boulder —
+  and hijack the viewer's A press. A viewer draws only the curated looks and
+  player-trainer graphics; NPC walkers on the arena draw as themselves.
+- **A fight between players changed the saves.** A PvP spar moved held items
+  between saves, left a THUNDER WAVE's paralysis in the save, and a party
+  against party banked EXP and could white out the loser. Every PvP mode,
+  on Red and Gold as well as Gen 3, now leaves both saves as the carts'
+  Cable Club does: no status, HP, PP, EXP or vitamin is written home, and
+  nobody whites out after a spar.
+- **The co-op divert could freeze or loop.** A trainer wait that ended with
+  no partner froze the field (the cart's own fight now starts at once); a
+  wild fight handed back to be fought alone was re-diverted forever; a stand-in
+  from before a soft reset or `CONTINUE` could start a stale fight.
+- **Co-op and solo endings.** A won co-op fight could still white out a
+  partner whose own team had fallen, halting the leader's beaten-trainer
+  script with it; a trainer draw was answered to the script as a win (flag set,
+  beaten script run, a badge possible), and a draw with the team standing let
+  the post-battle bytes run (a gym leader's TM with no badge). A won fight
+  never whites out now, and a standing draw halts the trainer's script with
+  the trainer unbeaten.
+- **A Ghost's CURSE in a double cursed the first foe, whoever was aimed
+  at.** It is now aimed like any single-target move, in solo doubles and in
+  co-op alike: the move menu asks a Ghost where to lay it, as the cart's
+  does. When nobody aims it (a co-op computer seat, a timed-out seat,
+  Encore, Sleep Talk), it curses the battler opposite the user, as the
+  cart's AI and `foeOf` do.
+- **The referee could stall on crafted rows.** Nature Power / Sleep Talk /
+  Assist / Mirror Move rows that called each other recursed until a stack
+  overflow and a timeout draw; calls are capped at depth 3. The same pass
+  brought BattleSim3 and `server/lib/battle3` closer to the carts (end-of-turn
+  berries, Clear Body / Mist, Substitute, multi-hit move ends, Baton Pass,
+  Pursuit, Future Sight, 3-on-3 Intimidate and more, all in both twins; the
+  three cart quirks kept on purpose are in `docs/plans/gen3-battle-sheet.md`
+  §9.1). Solo trainers follow the carts' AI scripts more closely, FireRed's
+  rival and Champion keep their names, and the engine's end-of-battle
+  effects (Emerald's Pokérus and TV, FireRed's quest log, `battle.ended`) run
+  after a `SOLO BATTLES` fight.
+- **Overworld weather and TILT were never seen on Gen 3.** Two reads went
+  through `package.loaded`, which the mod sandbox leaves empty: no wild,
+  co-op or solo fight opened under the overworld's weather, and nameplates
+  never gave way to the corner roster under the TILT pipeline. Both read
+  through the engine adapter now.
+- **Gen 1 / Gen 2 wire reads match 1.4.19 again.** A stray Gen 3 field could
+  change how a Gen 1 or Gen 2 sheet, choice or event was read. Both hubs now
+  read with the generation again: a 39,000-case differential against 1.4.19
+  found 0 mismatches. The two hubs agree on every crafted edge case. This
+  release's own additions are the only Gen 1 / Gen 2 differences: `traded` on
+  Red and Gold sheets, Gold's held-item fields and Gold's `held` event (see
+  Added).
+
+### Known
+
+- **FireRed / LeafGreen ↔ Emerald trades follow the carts' post-game rule.**
+  Both saves must be far enough in: FireRed and LeafGreen once the cart can
+  link with Ruby and Sapphire (the Sevii Islands post-game), Emerald once
+  the player is Champion; a POKéMON from outside a cart's regional dex, or
+  an egg, also needs that cart's National Dex. Same-region trades are free.
+- **SOLO BATTLES leaves two kinds of Gen 3 fight to the cart.** Link
+  battles (the Cable Club, the Union Room, the link multis, a recorded
+  battle's replay), where another cart fights this one in lockstep: taking
+  them would make the mod a party to the link. And the e-Reader trainer,
+  which the engine does not implement on Emerald and which needs a scanned
+  e-Card on FireRed / LeafGreen (`Config.SOLO_REFUSED_GEN3`).
+- **No official Gen 3 server** is on the `SERVERS` list — none is deployed.
+- **LeafGreen has not been run live.** It shares FireRed's engine path and is
+  covered by the headless suites.
+- **Gen 3 reaches into engine internals** (`engine_internals`, declared since
+  before this release) where the game3 mod API has no seam yet: avatars are
+  injected into the engine's object list, and a player on a neighbouring
+  map into that map's ghost pool (`Ghosts._pools`); the worn look wraps
+  `OwSprites.playerGraphicsId`, trainer diversion wraps
+  `BattleBridge.start`, and avatars are shielded from the FireRed quest-log
+  recorder and Emerald's rotating-tile puzzle. Each wrap keeps the engine's
+  original and is re-applied, never stacked, across a hot reload; all of it
+  is written up as one upstream proposal in
+  `docs/upstream/gen3-spawn-npc.md`, together with the seams for a player
+  across a map edge (addendum B), a trainer draw (addendum C) and the
+  TEACHY TV's demonstrations (addendum D). An engine update that renames
+  one of those internals can break that feature on Gen 3 until the mod
+  follows.
+- **A remote player walking nearby can hold the VS Seeker's charge a
+  moment**: the cart waits for every object to stop moving, avatars
+  included.
+- **A trainer drawn with your team still standing stays unbeaten.** The
+  trainerbattle opcode has no answer for that ending, so its script is halted
+  where it waited: no prize, no flag, no TM or badge. An unbeaten trainer who
+  still sees you challenges you again — the cart's own sight check. A draw
+  that leaves your team on nothing is a whiteout, as on the cart. A draw
+  answer for the opcode, so the engine rather than the mod ends the script,
+  is asked for in `docs/upstream/gen3-spawn-npc.md` (addendum C).
+- **The bag works in a fight between players**, as it does on Red and Gold —
+  this mod's rule for every generation; the carts lock the bag in a link
+  battle.
+- **A fight taken over from the cart never raises `battle.started`** (the
+  engine's battle never starts); a `SOLO BATTLES` fight raises `battle.ended`
+  when it is over, as the engine's own does.
+- **What the Red and Gold referees still do differently from the carts** is
+  listed, with where it lives in the code, in
+  `docs/plans/gen12-referee-known-gaps.md`. The main items:
+  - a move's animation plays before its "used" line, where the carts print
+    the line first;
+  - a few screens the client still words its own way (the send-out line by
+    the foe's HP, EXP.ALL's lines, the catch follow-ups, the link result
+    screen);
+  - the referee's random-number generator is its own, though it draws at
+    the carts' points.
+- **Engine, not mod:** on a fresh Emerald save the heal point is still the
+  moving truck, so a whiteout before the first POKéMON CENTER — the cart's
+  or a mod-run fight's — respawns there.
+- **Engine, not mod:** a FireRed / LeafGreen Trainer Tower trainer's line
+  before the fight reads "(missing text)". The cart prints it with `msgbox
+  gStringVar4`, and the engine's script VM reads that buffer only on Ruby
+  and Sapphire.
+
 ## [1.4.19] - 2026-09-29
 
 ### Fixed

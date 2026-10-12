@@ -141,6 +141,18 @@ M.FIELDS = {
   mon          = "number",
   team         = "string",
   confused     = "number",
+  -- Contract K10: a `stat` event's signed stage, -6..6, where the stat now
+  -- sits -- `amount` is unsigned on the wire and could never carry a stage
+  -- below zero.  Wire.battleEvent reads it for the Gen 1 / Gen 2 dialect.
+  stage        = "number",
+  -- Contract K22: an `anim` whose id is a move id but which is not the acting
+  -- monster's own use of its move -- Leech Seed's ABSORB on the seeder's seat
+  -- (HandlePoisonBurnLeechSeed), a FLY's charge-turn TELEPORT (ChargeEffect),
+  -- a trap's later hit (`.MultiturnMoveCheck`) -- is `quiet`: play the look
+  -- only, no callout and no lunge.  Only `true` is ever sent (`coerce`);
+  -- absent is an ordinary move animation.  Wire.battleEvent reads it on the
+  -- Gen 1 / Gen 2 readers.
+  quiet        = "boolean",
 }
 
 -- ------------------------------------------------------------------
@@ -182,7 +194,8 @@ M.FIELDS = {
 M.SHAPES = {
   msg       = { text = true },
   anim      = { slot = true, side = true, text = "move or ball-anim id",
-                amount = "shake count on SHAKE_ANIM (0-3); 1 on a charge/vanish setup beat" },
+                amount = "shake count on SHAKE_ANIM (0-3); 1 on a charge/vanish setup beat",
+                quiet = "true when a move id plays as a look only (K22)" },
   damage    = { slot = true, side = true, amount = true, hp = "hp left",
                 status = "set when a residual dealt it" },
   drain     = { slot = true, side = true, amount = true, hp = true,
@@ -203,7 +216,8 @@ M.SHAPES = {
   status    = { slot = true, side = true, status = "absent means cleared",
                 text = true,
                 confused = "1 inflicted, 0 snapped out; independent of status" },
-  stat      = { slot = true, side = true, amount = true, text = true },
+  stat      = { slot = true, side = true, amount = "the stage, when not below 0",
+                text = true, stage = "the signed stage, -6..6 (K10)" },
   switch    = { slot = true, side = true, text = "the species coming in",
                 speciesId = "registry id for the art, when the sheet named one",
                 level = "the monster's level, for the seat opposite's pill",
@@ -244,6 +258,49 @@ function M.fieldSlot(side, index)
   local n = tonumber(index)
   if not n or n ~= n then n = 1 end
   return base + math.max(0, floor(n) - 1)
+end
+
+-- ------------------------------------------------------------------
+-- a battler's name in a line (contract K17), and the line's breaks (K18)
+-- ------------------------------------------------------------------
+--
+-- The referee is one narrator for two screens; the cart is not.  A line that
+-- names a battler through <USER> / <TARGET> (home/text.asm
+-- PlaceMoveUsersName / PlaceMoveTargetsName: "Enemy @" ahead of
+-- wEnemyMonNick on the enemy's half) or through an "Enemy @" / text_ram
+-- wEnemyMonNick line of its own reads differently on each console.  So the
+-- referee writes the battler's *side* where the cart wrote the word -- `^a` or
+-- `^b` immediately before the name -- and each client prints nothing for its
+-- own side and "Enemy " (Red) for the other.  A name the cart prints bare
+-- carries no mark: "Go! X!", "<TRAINER> sent out X!", the party menu's "X
+-- recovered by N!", the obedience lines over wBattleMonNick, the species a
+-- TRANSFORM copied, a caught monster's "All right! X was caught!".
+--
+-- `\n` is where the cart's two-row box breaks the sentence: its `line`, its
+-- `cont`, and the <SCROLL> in front of "greatly".  A `para` is a separate
+-- `msg`, as it always was.
+--
+-- LINE_MAX mirrors Config.BATTLE_LINE_MAX -- the glyphs Wire keeps of a Red /
+-- Gold `msg`, marks and breaks included -- for the reason in the header; the
+-- suites hold every line the referee says under it.
+M.LINE_MAX = 80
+M.MARK = "^"
+
+-- The one door every marked name goes through, so the audit is a grep.
+function M.named(side, name)
+  return M.MARK .. ((side == "b") and "b" or "a") .. tostring(name)
+end
+
+-- A line read without its marks, each break a space -- or nothing after a
+-- hyphen, the word the cart split over two rows ("with-" / line "drew"): the
+-- sentence the referee said before K17 / K18, word for word.  It is what an
+-- event other than a `msg` carries in its `text` (a `status`'s, a `stat`'s,
+-- which a client reads as a sentence rather than prints), and what a reader
+-- that knows no marks matches lines against.  Mirrors Wire.plainBattleLine
+-- rule for rule (the suite holds the two to the same output).
+function M.plain(text)
+  if type(text) ~= "string" then return text end
+  return (text:gsub("%^[ab]", ""):gsub("%-\n", "-"):gsub("\n", " "))
 end
 
 -- ------------------------------------------------------------------
@@ -325,6 +382,11 @@ local function coerce(key, value)
   if key == "moves" then return nil end
   local want = M.FIELDS[key]
   if want == nil then return nil end                  -- not in the whitelist
+  -- A flag is sent set or not at all (K22's `quiet`).
+  if want == "boolean" then
+    if value == true then return true end
+    return nil
+  end
   if want == "number" then
     local n = tonumber(value)
     if not n or n ~= n then return nil end

@@ -60,6 +60,9 @@ tests/solo_battle.lua
 tests/solo_brain.lua
 tests/drivers/solo_battle_e2e.lua
 tests/drivers/run-solo-battle-e2e.sh
+tests/drivers/solo3_e2e_field.lua
+tests/drivers/solo3_e2e_frontier.lua
+tests/drivers/solo3_e2e_facility.lua
 # README arena-background recapture: warps Route 1 / Red's house / Pewter Gym
 # and shots the mediated idle. Reaches tests/drivers/util.lua.
 tests/drivers/arena_bg_shot.lua
@@ -68,6 +71,90 @@ tests/drivers/arena_bg_shot.lua
 tests/drivers/classic_battle_shot.lua
 tests/drivers/run-classic-battle-e2e.sh
 
+# Every other file under tests/, listed by name for the reason at the top of
+# this file. The Gen 2 port added fifteen drivers, suites and parity fixtures
+# without a line here, and a run of Gen 1 drivers and suites before it added
+# nineteen more, so the release zip -- which drops only what this file names,
+# plus docs/ -- carried all thirty-four. Nothing mechanical catches a missing
+# line, so the rule for tests/ is now simply: every file in it is on this
+# list, and a new one gets its line in the change that adds it.
+#
+# Gen 1 drivers and suites.
+tests/battle_sim_effects.lua
+tests/mod_remap_fs.lua
+tests/drivers/battlefield_shot.lua
+tests/drivers/coop_status_shot.lua
+tests/drivers/hub_protocol_parity.lua
+tests/drivers/hud_status_shot.lua
+tests/drivers/mmo_hex.lua
+tests/drivers/mmo_mismatch.lua
+tests/drivers/mmo_trip.lua
+tests/drivers/portrait_color_probe.py
+tests/drivers/red_yellow_battle_compat.lua
+tests/drivers/run-battlefield-e2e.sh
+tests/drivers/run-hex-e2e.sh
+tests/drivers/run-invite-refuse-e2e.sh
+tests/drivers/run-party-mismatch-e2e.sh
+tests/drivers/run-party-wild-e2e.sh
+tests/drivers/run-red-yellow-battle-compat.sh
+tests/drivers/run-trip-e2e.sh
+tests/fixtures/hub_protocol_parity.json
+# Gen 2 (Gold): BattleSim2's Lua half of its parity pair, the Gold trade
+# suite, and the Gold drivers.
+tests/battle_sim2_turn.lua
+tests/battle_sim2_vectors.lua
+tests/battle_sim2_ai_move.lua
+tests/battle_sim2_ai_switch.lua
+tests/trade2.lua
+tests/fixtures/battle2_turn_parity.json
+tests/fixtures/battle_sim2_vectors.json
+tests/drivers/battle2_turn_parity.lua
+tests/drivers/mmo_gold_smoke.lua
+tests/drivers/mmo_hex_gen2.lua
+tests/drivers/mmo_host_gen2.lua
+tests/drivers/mmo_join_gen2.lua
+tests/drivers/mmo_trip_gen2.lua
+tests/drivers/run-battlefield-e2e-gen2.sh
+tests/drivers/run-hex-e2e-gen2.sh
+tests/drivers/run-mmo-e2e-gen2.sh
+tests/drivers/run-trip-e2e-gen2.sh
+# Gen 3 (FireRed / LeafGreen / Emerald, 1.5.0): the headless suites, the
+# BattleSim3 half of the battle3 parity pair and its fixtures, and the live
+# drivers -- which reach tests/drivers/util.lua like every driver above --
+# plus the contact-sheet generator they write index.html with.
+tests/gen3_battlefield.lua
+tests/gen3_client.lua
+tests/gen3_coop.lua
+tests/gen3_mediated.lua
+tests/gen3_presence.lua
+tests/gen3_solo.lua
+tests/gen3_solo_double.lua
+tests/gen3_solo_brain.lua
+tests/gen3_doors.lua
+tests/gen3_solo_legend.lua
+tests/gen3_solo_facility.lua
+tests/gen3_solo_pairs.lua
+tests/gen3_solo_first.lua
+tests/gen3_solo_safari.lua
+tests/gen3_solo_multi.lua
+tests/gen3_solo_tutorial.lua
+tests/fixtures/gen3_solo_dbl_rig.lua
+tests/gen3_ui.lua
+tests/trade3.lua
+tests/battle_sim3_turn.lua
+tests/battle_sim3_vectors.lua
+tests/fixtures/battle3_turn_parity.json
+tests/fixtures/battle_sim3_vectors.json
+tests/drivers/mmo_host_gen3.lua
+tests/drivers/mmo_join_gen3.lua
+tests/drivers/mmo_mismatch_gen3.lua
+tests/drivers/mmo_trip_gen3.lua
+tests/drivers/run-battlefield-e2e-gen3.sh
+tests/drivers/run-mismatch-e2e-gen3.sh
+tests/drivers/run-mmo-e2e-gen3.sh
+tests/drivers/run-trip-e2e-gen3.sh
+tests/drivers/shots_index.py
+
 # Working notes for whoever picks this up next; not mod content. The two
 # machine-readable ones describe how coding agents are driven in this
 # checkout -- they configure a tool, not a game, and a player who unpacks the
@@ -75,6 +162,10 @@ tests/drivers/run-classic-battle-e2e.sh
 CLAUDE.md
 AGENTS_CONFIG.yml
 skills-lock.json
+# A backup of that config, and one e2e scratch log that predates the
+# tmp/ lines in .gitignore and is still tracked. Neither is mod content.
+AGENTS_CONFIG.yml.bak
+tmp/e2e-battlefield/suite.tail.txt
 
 # server/ is deliberately NOT ignored: hub.js is plain node with no engine
 # imports, and someone who installs the package should be able to host.
@@ -157,6 +248,36 @@ docs/plans/in-game-notifications.md
 docs/plans/classic-battle-ui-option.md
 docs/plans/classic-battle-ui-followup.md
 docs/plans/battle-custom-bg.md
+# The rest of docs/plans/, found unlisted while packing 1.5.0 -- the Gen 2
+# port's two plans among them -- plus the Gen 3 port's two and the index.
+docs/plans/README.md
+docs/plans/3x3-battles-and-3-player-parties.md
+docs/plans/battle-sim-move-effects.md
+docs/plans/better-battle-ui.md
+docs/plans/connected-message.md
+docs/plans/coop-battle-intro-anims.md
+docs/plans/coop-battlefield-layout.md
+docs/plans/default-7788-port.md
+docs/plans/featured-official-server.md
+docs/plans/fix-battle-system-v2-quarkst.md
+docs/plans/fix-dig-fly-two-turn-moves.md
+docs/plans/gen2-compatibility.md
+docs/plans/gen2-new-battle-system.md
+docs/plans/guild-focus-battle-ui.md
+docs/plans/hub-twin-parity.md
+docs/plans/offline-solo-battles.md
+docs/plans/party-wild-encounter.md
+docs/plans/server-authoritative-battle-system.md
+docs/plans/gen3-firered-emerald-support.md
+docs/plans/gen3-battle-sheet.md
+docs/plans/gen3-known-gaps.md
+docs/plans/gen3-solo-doubles.md
+docs/plans/gen3-badge-rules.md
+docs/plans/gen3-solo-remaining-fights.md
+docs/plans/gen3-solo-remaining-fights-research.md
+docs/plans/gen12-referee-fidelity.md
+docs/plans/gen12-referee-known-gaps.md
+docs/plans/gen12-referee-gaps-fix.md
 # The upstream issue behind the mod-sandbox migration: a request for storage
 # scoped to the copy rather than to one playthrough. Same footing as the plans
 # above -- it argues with the engine about Storage.lua, and a player who
@@ -167,6 +288,10 @@ docs/upstream/machine-level-storage.md
 # the mod manager is the one of three call sites that does not skip the engine
 # version check on a 0.0.0-dev build. Same footing as the file above.
 docs/upstream/manager-missing-dev-engine-exemption.md
+# The Gen 3 port's Lane B proposal: runtime objects, the player's look,
+# screen events and battle interception on game3. Same footing as the two
+# above -- an argument with the engine, not something a player installs.
+docs/upstream/gen3-spawn-npc.md
 # The upstream RFC behind co-op battles. It is a proposal against the *engine*,
 # not mod content -- a player unpacking this archive has no use for a document
 # arguing about BattleState's battler slots. Listed by name for the same reason
@@ -229,7 +354,18 @@ docs/screenshots/party-map.png
 docs/screenshots/party-townmap.png
 docs/screenshots/party-members.png
 # Nickname restyle review captures (same ROM-tile rule as party-map above).
-docs/screenshots/nicknames/
+# This used to be a single docs/screenshots/nicknames/ line, which is exactly
+# the bare-directory entry the top of this file warns does nothing: modkit
+# matches files, so `pack` shipped all eight. The release workflow happened to
+# honour the directory (and drops docs/ anyway), which is how nobody noticed.
+docs/screenshots/nicknames/host-guest-moved.png
+docs/screenshots/nicknames/host-sees-guest.png
+docs/screenshots/nicknames/hub-a-party-map.png
+docs/screenshots/nicknames/hub-a-party-townmap.png
+docs/screenshots/nicknames/hub-a-roster.png
+docs/screenshots/nicknames/hub-b-party-map.png
+docs/screenshots/nicknames/hub-b-peer-walked.png
+docs/screenshots/nicknames/join-before-interact.png
 # The rest of the party's shots, from the same driver and under the same rule.
 # party-ask.png and party-battle.png are text boxes and a menu over the
 # overworld, party-spectating.png is a battle frame watched from the outside,
@@ -265,3 +401,51 @@ docs/screenshots/my-profile.png
 # that one is: the rule here is the file's, not the linter's, and a screenshot
 # that is safe today stops being safe the moment somebody recaptures it.
 docs/screenshots/rank.png
+#
+# Five more arrived with friends, the bicycle and AUTOJOIN and missed this list
+# the way my-profile.png and rank.png did: a friends list and a PLAYERS list
+# over ROM chrome, NIRE on a bike on a composited map, and two SERVERS list
+# frames. Found while packing 1.5.0. The Gen 3 shots that land under
+# docs/screenshots/gen3/ get their lines here in the change that adds them.
+docs/screenshots/friends-list.png
+docs/screenshots/players-friend-mark.png
+docs/screenshots/nire-bike.png
+docs/screenshots/servers-autojoin.png
+docs/screenshots/servers-autojoin-switch.png
+#
+# The Gen 3 gallery (1.5.0): FireRed and Emerald frames from the final live
+# e2e runs -- run-mmo-e2e-gen3.sh on each cart, run-trip-e2e-gen3.sh,
+# run-mismatch-e2e-gen3.sh, run-solo-battle-e2e.sh --gen3 and
+# run-battlefield-e2e-gen3.sh -- cropped to the GBA screen or the arena. Every
+# one is the cart's own map, font, window frames or battle pics decoded from
+# the player's ROM, so each is listed by name like every screenshot above; a
+# bare docs/screenshots/gen3/ line would do nothing.
+docs/screenshots/gen3/g3-em-arena-weather.png
+docs/screenshots/gen3/g3-em-chat-log.png
+docs/screenshots/gen3/g3-em-classic-moves.png
+docs/screenshots/gen3/g3-em-coop-catch-nickname.png
+docs/screenshots/gen3/g3-em-coop-trainer-noticed.png
+docs/screenshots/gen3/g3-em-coop-trainer.png
+docs/screenshots/gen3/g3-em-join-code.png
+docs/screenshots/gen3/g3-em-solo-double-classic-hp.png
+docs/screenshots/gen3/g3-em-solo-double-classic-target.png
+docs/screenshots/gen3/g3-em-solo-obey-classic.png
+docs/screenshots/gen3/g3-em-mmo-menu.png
+docs/screenshots/gen3/g3-em-party-pokenav.png
+docs/screenshots/gen3/g3-em-trainer-card.png
+docs/screenshots/gen3/g3-fr-actions.png
+docs/screenshots/gen3/g3-fr-classic-sandstorm.png
+docs/screenshots/gen3/g3-fr-coop-wild-levelup.png
+docs/screenshots/gen3/g3-fr-host-setup.png
+docs/screenshots/gen3/g3-fr-mismatch-refused.png
+docs/screenshots/gen3/g3-fr-party-townmap.png
+docs/screenshots/gen3/g3-fr-players-cross-region.png
+docs/screenshots/gen3/g3-fr-presence-chat.png
+docs/screenshots/gen3/g3-fr-pvp-arena.png
+docs/screenshots/gen3/g3-fr-solo-double-arena.png
+docs/screenshots/gen3/g3-fr-solo-obey-loafing.png
+docs/screenshots/gen3/g3-fr-solo-payday.png
+docs/screenshots/gen3/g3-fr-start-menu.png
+docs/screenshots/gen3/g3-fr-trade-done.png
+docs/screenshots/gen3/g3-fr-trade-picker.png
+docs/screenshots/gen3/g3-xcart-fr-vs-em.png

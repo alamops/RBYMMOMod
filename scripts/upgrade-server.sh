@@ -15,6 +15,7 @@
 #   bash scripts/upgrade-server.sh
 #   bash scripts/upgrade-server.sh --version vX.Y.Z
 #   bash scripts/upgrade-server.sh --generation 2
+#   bash scripts/upgrade-server.sh --generation 3
 #   curl -fsSL .../scripts/upgrade-server.sh | bash -s -- --dir /opt/RBYMMOMod
 #
 # Finds the checkout from, in order: --dir, this script's repo, $RBY_MMO_DIR,
@@ -55,8 +56,10 @@ Options:
   --version, -v <tag>   Target release (vX.Y.Z or X.Y.Z).
                         Default: the newest GitHub release, looked up live.
   --dir <path>          Existing checkout to update.
-  --generation, -g <1|2>
-                        Hub lock: 1 = RBY, 2 = Gold. Default: keep
+  --generation, -g <1|2|3>
+                        Hub lock: 1 = RBY, 2 = Gold, 3 = FireRed /
+                        LeafGreen / Emerald (all three on one hub; needs
+                        a release on protocol 30 or newer). Default: keep
                         whatever this checkout / container already
                         runs. Written into server/.env as
                         RBY_MMO_GENERATION. Compose leaves the var empty
@@ -109,8 +112,35 @@ normalize_generation() {
   case "${1:-}" in
     1) printf '1\n' ;;
     2) printf '2\n' ;;
-    *) fail "--generation: expected 1 (RBY) or 2 (Gold), got $1" ;;
+    3) printf '3\n' ;;
+    *) fail "--generation: expected 1 (RBY), 2 (Gold) or 3 (FireRed/LeafGreen/Emerald), got $1" ;;
   esac
+}
+
+# Whether a release on PROTOCOL `proto` can hold generation lock `gen`.
+# Twin of run-server.sh's. A Gen 3 lock needs PROTOCOL 30: an older hub's
+# config.js reads 3 as "not 1 or 2" and quietly runs a Gen 1 hub, which is
+# the one thing an upgrade must not do to a FireRed / Emerald room. An
+# unreadable protocol is not evidence either way, so it passes.
+gen_lock_supported() {
+  local gen="${1:-}" proto="${2:-}"
+  [ "$gen" = 3 ] || return 0
+  case "$proto" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  [ "$proto" -ge 30 ]
+}
+
+# Stop, naming the fix, when a Gen 3 lock is about to be written for a hub
+# that cannot hold it. A warning was not enough: the rebuild went on, and the
+# room came back a Gen 1 hub refusing every one of its players, the warning
+# long scrolled away above the build log. Called before server/.env is
+# written and before the checkout moves, so a refusal changes nothing.
+# Twin of run-server.sh's.
+refuse_unsupported_gen_lock() {
+  local gen="${1:-}" proto="${2:-}" where="${3:-}"
+  gen_lock_supported "$gen" "$proto" && return 0
+  fail "generation ${gen} needs a hub on protocol 30 or newer; ${where} is on protocol ${proto}, which reads 3 as 1 and would refuse every FireRed / LeafGreen / Emerald player. Nothing was changed. Re-run with --version <a release on protocol 30 or newer>, or pass --generation 1 or 2 to take this hub off Gen 3."
 }
 
 pick_latest_tag() {
@@ -193,6 +223,16 @@ protocol_of() {
   awk '/^M\.PROTOCOL = / { print $3; exit }' "$file"
 }
 
+# PROTOCOL of a ref that is fetched but not checked out, so a release can be
+# refused before the checkout moves the tree. `unknown` when the ref has no
+# src/Config.lua to read.
+protocol_of_ref() {
+  local root="$1" ref="$2" got
+  got="$(cd "$root" && git show "${ref}:src/Config.lua" 2>/dev/null \
+    | awk '/^M\.PROTOCOL = / { print $3; exit }')"
+  printf '%s\n' "${got:-unknown}"
+}
+
 package_version_of() {
   local root="$1"
   local file="${root}/server/package.json"
@@ -270,13 +310,13 @@ env_key() {
 generation_from_config_json() {
   local file="$1"
   [ -f "$file" ] || return 0
-  sed -n 's/.*"generation"[[:space:]]*:[[:space:]]*\([12]\).*/\1/p' "$file" | head -n 1
+  sed -n 's/.*"generation"[[:space:]]*:[[:space:]]*\([123]\).*/\1/p' "$file" | head -n 1
 }
 
 # Generation locked on the volume. Empty if unknown.
 # Prefer config.json on the volume over `config get`: the latter is the
 # effective config (env already applied), so a compose-injected 1 would
-# hide a Gold lock still sitting in the file.
+# hide a Gold or Gen 3 lock still sitting in the file.
 container_generation() {
   local g tmp
   tmp="$(mktemp "${TMPDIR:-/tmp}/rby-mmo-cfg.XXXXXX")"
@@ -284,7 +324,7 @@ container_generation() {
     g="$(generation_from_config_json "$tmp" || true)"
     rm -f "$tmp"
     case "$g" in
-      1|2) printf '%s\n' "$g"; return 0 ;;
+      1|2|3) printf '%s\n' "$g"; return 0 ;;
     esac
   else
     rm -f "$tmp"
@@ -292,7 +332,7 @@ container_generation() {
   g="$("${DOCKER[@]}" exec "$CONTAINER_NAME" rby-mmo-hub config get generation 2>/dev/null || true)"
   g="$(printf '%s' "$g" | tr -d '[:space:]')"
   case "$g" in
-    1|2) printf '%s\n' "$g"; return 0 ;;
+    1|2|3) printf '%s\n' "$g"; return 0 ;;
   esac
 }
 
@@ -323,7 +363,7 @@ persist_lock_env() {
   fi
   write_env_key "${ROOT}/server/.env" RBY_MMO_GENERATION "$GENERATION"
   export RBY_MMO_GENERATION="$GENERATION"
-  note "hub generation ${GENERATION} (1 = RBY, 2 = Gold)"
+  note "hub generation ${GENERATION} (1 = RBY, 2 = Gold, 3 = FireRed / LeafGreen / Emerald)"
 }
 
 container_working_dir() {
@@ -362,7 +402,9 @@ find_checkout() {
   fail "no hub checkout found. Pass --dir /path/to/RBYMMOMod (the folder that contains server/compose.yml)."
 }
 
-checkout_tag() {
+# Fetched and checked out in two steps so what the release is (its PROTOCOL)
+# can be read in between, while the tree is still the one that is running.
+fetch_tag() {
   local root="$1"
   local tag="$2"
   (
@@ -371,6 +413,14 @@ checkout_tag() {
     # Depth-1 clones cannot see other tags until we fetch this one by name.
     # --force updates a local tag left by a previous fetch of the same name.
     git_http fetch --force --depth 1 origin "refs/tags/${tag}:refs/tags/${tag}"
+  )
+}
+
+checkout_tag() {
+  local root="$1"
+  local tag="$2"
+  (
+    cd "$root"
     if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
       fail "${root} has uncommitted changes in tracked files. Commit, stash, or discard them before upgrading. (Untracked files such as server/.env are left alone.)"
     fi
@@ -424,8 +474,59 @@ self_test() {
   [ "$got" = 1 ] || fail "normalize_generation 1 -> $got"
   got="$(normalize_generation 2)"
   [ "$got" = 2 ] || fail "normalize_generation 2 -> $got"
-  if got="$(normalize_generation 3 2>/dev/null)"; then
-    fail "normalize_generation 3 should fail, got $got"
+  got="$(normalize_generation 3)"
+  [ "$got" = 3 ] || fail "normalize_generation 3 -> $got"
+  for bad in 0 4 gen3 ''; do
+    if got="$(normalize_generation "$bad" 2>/dev/null)"; then
+      fail "normalize_generation '$bad' should fail, got $got"
+    fi
+  done
+  gen_lock_supported 1 20 || fail "gen_lock_supported 1 20 should pass"
+  gen_lock_supported 2 29 || fail "gen_lock_supported 2 29 should pass"
+  gen_lock_supported 3 30 || fail "gen_lock_supported 3 30 should pass"
+  gen_lock_supported 3 unknown || fail "gen_lock_supported 3 unknown should pass"
+  if gen_lock_supported 3 29; then
+    fail "gen_lock_supported 3 29 should fail: a protocol-29 hub has no Gen 3"
+  fi
+  # The refusal is a stop, not a warning: it exits non-zero (in a subshell
+  # here, since fail exits) and names the remedy.
+  ( refuse_unsupported_gen_lock 3 30 v9.9.9 ) || fail "refuse_unsupported_gen_lock 3 30 should pass"
+  ( refuse_unsupported_gen_lock 1 29 v9.9.9 ) || fail "refuse_unsupported_gen_lock 1 29 should pass"
+  ( refuse_unsupported_gen_lock 3 unknown v9.9.9 ) 2>/dev/null \
+    || fail "refuse_unsupported_gen_lock 3 unknown should pass"
+  if ( refuse_unsupported_gen_lock 3 29 v9.9.9 ) 2>/dev/null; then
+    fail "refuse_unsupported_gen_lock 3 29 should stop the upgrade"
+  fi
+  got="$( ( refuse_unsupported_gen_lock 3 29 v9.9.9 ) 2>&1 || true)"
+  case "$got" in
+    *"protocol 30 or newer"*"--version"*) ;;
+    *) fail "refuse_unsupported_gen_lock should name the fix, got: $got" ;;
+  esac
+  # PROTOCOL read off a fetched tag without checking it out. Needs git;
+  # skipped (not failed) on a box without it, as the upgrade itself needs it.
+  if command -v git >/dev/null 2>&1; then
+    local repo
+    repo="$(mktemp -d "${TMPDIR:-/tmp}/rby-mmo-self-git.XXXXXX")"
+    (
+      cd "$repo"
+      git init -q .
+      mkdir -p src
+      printf 'local M = {}\nM.PROTOCOL = 29\nreturn M\n' > src/Config.lua
+      git add src/Config.lua
+      git -c user.name=self-test -c user.email=self-test@localhost -c commit.gpgsign=false \
+        commit -q -m old
+      git tag v0.0.29
+      printf 'local M = {}\nM.PROTOCOL = 30\nreturn M\n' > src/Config.lua
+      git -c user.name=self-test -c user.email=self-test@localhost -c commit.gpgsign=false \
+        commit -q -am new
+    ) >/dev/null 2>&1 || { rm -rf "$repo"; fail "self-test could not build a scratch git repo"; }
+    got="$(protocol_of_ref "$repo" refs/tags/v0.0.29)"
+    [ "$got" = 29 ] || { rm -rf "$repo"; fail "protocol_of_ref tag -> $got"; }
+    got="$(protocol_of "$repo")"
+    [ "$got" = 30 ] || { rm -rf "$repo"; fail "protocol_of checkout -> $got"; }
+    got="$(protocol_of_ref "$repo" refs/tags/no-such-tag)"
+    [ "$got" = unknown ] || { rm -rf "$repo"; fail "protocol_of_ref missing -> $got"; }
+    rm -rf "$repo"
   fi
   tmp="$(mktemp "${TMPDIR:-/tmp}/rby-mmo-self.XXXXXX")"
   printf 'FOO=1\nRBY_MMO_HOST_PORT=25565\n' > "$tmp"
@@ -439,6 +540,9 @@ self_test() {
   printf '{"listen":{"port":7788},"generation":2}\n' > "$tmp"
   got="$(generation_from_config_json "$tmp")"
   [ "$got" = 2 ] || fail "generation_from_config_json -> $got"
+  printf '{"listen":{"port":7788},"generation":3}\n' > "$tmp"
+  got="$(generation_from_config_json "$tmp")"
+  [ "$got" = 3 ] || fail "generation_from_config_json gen 3 -> $got"
   rm -f "$tmp"
   printf 'self-test ok\n'
 }
@@ -510,12 +614,12 @@ fi
 # write .env so a later compose up with a leftover shell 1 cannot stick.
 FROM_GEN="$(env_key "${ROOT}/server/.env" RBY_MMO_GENERATION)"
 case "$FROM_GEN" in
-  1|2) ;;
+  1|2|3) ;;
   *) FROM_GEN="$(container_generation || true)" ;;
 esac
 if [ "$EXPLICIT_GEN" -eq 0 ]; then
   case "$FROM_GEN" in
-    1|2) GENERATION="$FROM_GEN" ;;
+    1|2|3) GENERATION="$FROM_GEN" ;;
     *)
       if [ -n "${RBY_MMO_GENERATION:-}" ]; then
         GENERATION="$(normalize_generation "$RBY_MMO_GENERATION")"
@@ -532,12 +636,15 @@ RBY MMO hub — upgrade
   directory  ${ROOT}
   from       ${FROM_REF}  (package ${FROM_PKG}, protocol ${FROM_PROTO})
   to         ${TO_TAG}
-  generation ${GENERATION}   (1 = RBY, 2 = Gold)
+  generation ${GENERATION}   (1 = RBY, 2 = Gold, 3 = FireRed / LeafGreen / Emerald)
   volume     kept (join code, bans, ranking, history)
 EOF
 
 if [ "$FROM_REF" = "$TO_TAG" ]; then
+  # The same-tag path writes the lock too (persist_lock_env), so it is held to
+  # the same check: this tree is the release, and its PROTOCOL is FROM_PROTO.
   if [ "$DRY_RUN" -eq 1 ]; then
+    refuse_unsupported_gen_lock "$GENERATION" "$FROM_PROTO" "$TO_TAG"
     note "already on ${TO_TAG}. Nothing to fetch."
     note "dry-run: not writing server/.env."
     exit 0
@@ -548,9 +655,10 @@ if [ "$FROM_REF" = "$TO_TAG" ]; then
   fi
   if [ "$EXPLICIT_GEN" -eq 0 ]; then
     case "$FROM_GEN" in
-      1|2) GENERATION="$FROM_GEN" ;;
+      1|2|3) GENERATION="$FROM_GEN" ;;
     esac
   fi
+  refuse_unsupported_gen_lock "$GENERATION" "$FROM_PROTO" "$TO_TAG"
   persist_lock_env
   note "already on ${TO_TAG}. Nothing to fetch. Use --version to pick a different release, or \`docker compose up -d --build\` in server/ to rebuild this tag."
   exit 0
@@ -570,7 +678,7 @@ if [ -z "$FROM_GEN" ]; then
 fi
 if [ "$EXPLICIT_GEN" -eq 0 ]; then
   case "$FROM_GEN" in
-    1|2) GENERATION="$FROM_GEN" ;;
+    1|2|3) GENERATION="$FROM_GEN" ;;
   esac
 fi
 
@@ -578,6 +686,13 @@ if [ -n "$FROM_GEN" ] && [ "$FROM_GEN" != "$GENERATION" ]; then
   warn "generation changing ${FROM_GEN} → ${GENERATION}."
   warn "Clients of gen ${FROM_GEN} will be refused. Pass --generation ${FROM_GEN} to keep this hub on that gen."
 fi
+
+# Refused before the checkout moves the tree or the rebuild starts, so the
+# running container is still the one serving and the checkout is where it
+# was: a Gen 3 room moved onto a release that predates Gen 3 would come back
+# as a Gen 1 hub refusing every one of its players.
+fetch_tag "$ROOT" "$TO_TAG"
+refuse_unsupported_gen_lock "$GENERATION" "$(protocol_of_ref "$ROOT" "refs/tags/${TO_TAG}")" "$TO_TAG"
 
 checkout_tag "$ROOT" "$TO_TAG"
 TO_PROTO="$(protocol_of "$ROOT")"

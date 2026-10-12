@@ -37,8 +37,10 @@ local M = {}
 --
 -- mod.game rather than a cached handle or src.core.Game: the loader resolves
 -- it per touch and per generation (the Gen 1 singleton, the Game2 instance
--- Gold injects), and it is nil until the game is wired -- which is exactly
--- when storage would answer not_in_playthrough anyway.
+-- Gold injects, the Game3 instance on FireRed / LeafGreen / Emerald -- whose
+-- `save` snapshot carries the version and playthrough id storage scopes by),
+-- and it is nil until the game is wired -- which is exactly when storage
+-- would answer not_in_playthrough anyway.
 local function gameOf(mod)
   if type(mod) ~= "table" then return nil end
   local ok, game = pcall(function() return mod.game end)

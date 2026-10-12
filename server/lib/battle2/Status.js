@@ -5,22 +5,36 @@
  *
  * Node twin of src/BattleSim2/Status.lua. Differs from Gen1 Status.js:
  *
- *   * Freeze thaws 1/5 (roll % 5 === 0).
- *   * Burn and poison tick 1/8 max HP (not 1/16). Burn still halves physical
- *     Attack via burnAttack — SpA is untouched.
- *   * Toxic still ramps as max(1, floor(maxHp * counter / 16)).
- *   * Paralysis full-stops 1/4 of the time (roll % 4 === 0), not Gen1's 63/256;
- *     speed still quarters.
+ *   * Freeze never thaws before a move (CheckTurn draws nothing for it);
+ *     HandleDefrost thaws between turns under DEFROST_BYTE (`defrosts`).
+ *   * Burn and poison tick 1/8 max HP (not 1/16), GetEighthMaxHP's bytes
+ *     (Items.eighth). Burn still halves physical Attack via burnAttack —
+ *     SpA is untouched.
+ *   * Toxic ramps as GetSixteenthMaxHP (Items.sixteenth) times the count, a
+ *     16-bit sum.
+ *   * Paralysis full-stops on a BattleRandom byte under `25 percent` -- 63,
+ *     so 63/256 (CheckTurn's `cp 25 percent / ret nc`) -- not the 1/4 the
+ *     referee used to roll; speed still quarters.
+ *   * Sleep draws no byte in CheckTurn (the caller draws for paralysis alone).
  *   * Sleep wakes *and acts* on the turn the counter hits zero.
- *   * Confusion self-hit still routes through Damage.compute (now Gen2).
+ *   * Confusion self-hit routes through Damage.compute as HitConfusion runs
+ *     BattleCommand_DamageCalc and nothing after it: power 40, no crit, no
+ *     STAB, no matchup, no variation. The caller hands in the attack /
+ *     defense HitSelfInConfusion builds and, as `itemBoostPercent`, the
+ *     type-boost item DamageCalc finds for the SELECTED move's type -- both
+ *     cart bugs; the Lua twin's header names them.
  */
 
 const Damage = require('./Damage.js');
+// GetEighthMaxHP / GetSixteenthMaxHP, the residuals' HP arithmetic.
+const Items = require('./Items.js');
 
 const idiv = (a, b) => Math.floor(a / b);
 
-const PARALYSIS_SKIP_CHANCE = 4;
-const THAW_CHANCE = 5;
+// CheckTurn's `cp 25 percent`: a byte under 63 is a full paralysis.
+const PARALYSIS_STOP_BYTE = 63;
+// HandleDefrost's `cp 10 percent`: 25 (a byte under it thaws).
+const DEFROST_BYTE = 25;
 const CONFUSION_HIT_ROLL = 128;
 const CONFUSION_POWER = 40;
 const RESIDUAL_DIVISOR = 8;
@@ -52,20 +66,23 @@ function sleepCanMove(turnsRemaining) {
   return sleepTick(turnsRemaining).canMove;
 }
 
-// roll: 0..THAW_CHANCE-1 conceptually; thaw when roll % 5 === 0.
-// Missing roll → 1 (Lua int(roll, 1)): not thawed.
-function freezeTick(roll) {
-  const thawed = int(roll, 1) % THAW_CHANCE === 0;
-  return { thawed, canMove: thawed };
+// CheckTurn's freeze gate: frozen solid, whatever the roll (none is drawn).
+function freezeTick() {
+  return { thawed: false, canMove: false };
+}
+
+// HandleDefrost's roll for one frozen battler.
+function defrosts(byte) {
+  return int(byte, 255) < DEFROST_BYTE;
 }
 
 function freezeCanMove(roll) {
   return freezeTick(roll).canMove;
 }
 
-// Missing roll → 1: 1 % 4 !== 0 → not stopped.
+// roll: the BattleRandom byte; stop under PARALYSIS_STOP_BYTE.
 function paralysisStop(roll) {
-  return int(roll, 1) % PARALYSIS_SKIP_CHANCE === 0;
+  return int(roll, 255) < PARALYSIS_STOP_BYTE;
 }
 
 function paralysisTick(roll) {
@@ -100,6 +117,21 @@ function confusionTick(state, roll) {
     };
   }
 
+  return {
+    turnsRemaining: left,
+    snappedOut: false,
+    selfHit: true,
+    canMove: false,
+    selfDamage: selfHitDamage(s),
+  };
+}
+
+// HitConfusion's damage on its own: the confusion gate's self-hit above, and
+// the disobedient monster's "won't obey!" self-hit (BattleCommand_CheckObedience
+// calls the same HitConfusion). `state` carries level, attack, defense and the
+// optional itemBoostPercent.
+function selfHitDamage(state) {
+  const s = state || {};
   const hit = Damage.compute({
     level: s.level,
     power: CONFUSION_POWER,
@@ -112,21 +144,15 @@ function confusionTick(state, roll) {
     typeEffect: [100],
     roll: Damage.ROLL_MAX,
     physical: true,
+    itemBoostPercent: s.itemBoostPercent,
   });
-
-  return {
-    turnsRemaining: left,
-    snappedOut: false,
-    selfHit: true,
-    canMove: false,
-    selfDamage: hit.damage || 0,
-  };
+  return hit.damage || 0;
 }
 
 // ------- residuals
 
 function eighth(maxHp) {
-  return Math.max(1, idiv(Math.max(0, int(maxHp, 0)), RESIDUAL_DIVISOR));
+  return Items.eighth(maxHp);
 }
 
 function residualBurn(maxHp) {
@@ -139,7 +165,7 @@ function residualPoison(maxHp) {
 
 function residualToxic(maxHp, toxicCounter) {
   const counter = Math.max(1, int(toxicCounter, 1));
-  return Math.max(1, idiv(Math.max(0, int(maxHp, 0)) * counter, TOXIC_DIVISOR));
+  return (Items.sixteenth(maxHp) * counter) % 65536;
 }
 
 function burnAttack(attack) {
@@ -174,6 +200,11 @@ function residual(state) {
 function evaluate(record) {
   const r = record || {};
   switch (r.status) {
+    case 'freeze':
+      if (r.defrostByte !== undefined && r.defrostByte !== null) {
+        return { defrosted: defrosts(r.defrostByte) };
+      }
+      return beforeMove(r, r.roll);
     case 'paralysis':
       if (r.speed !== undefined && r.speed !== null) {
         return { speed: paralysisSpeed(r.speed) };
@@ -201,18 +232,20 @@ module.exports = {
   sleepCanMove,
   freezeTick,
   freezeCanMove,
+  defrosts,
   paralysisStop,
   paralysisTick,
   paralysisSpeed,
   confusionSelfHit,
   confusionTick,
+  selfHitDamage,
   residualBurn,
   residualPoison,
   residualToxic,
   burnAttack,
   int,
-  PARALYSIS_SKIP_CHANCE,
-  THAW_CHANCE,
+  PARALYSIS_STOP_BYTE,
+  DEFROST_BYTE,
   CONFUSION_HIT_ROLL,
   CONFUSION_POWER,
   RESIDUAL_DIVISOR,

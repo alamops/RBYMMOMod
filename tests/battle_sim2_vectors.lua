@@ -67,6 +67,7 @@ end
 local BattleSim = need("BattleSim2/init")
 local Damage, Accuracy = BattleSim.Damage, BattleSim.Accuracy
 local Crit, Status, Rng = BattleSim.Crit, BattleSim.Status, BattleSim.Rng
+local Effects, Items = BattleSim.Effects, BattleSim.Items
 
 -- ------------------------------------------------------------------
 -- a JSON reader, just enough for the fixture
@@ -269,6 +270,7 @@ each("damage", function(input)
       roll = orNil(input.roll),
       physical = input.physical,
       itemBoostPercent = input.itemBoostPercent,
+      badgeTypeBoost = input.badgeTypeBoost,
     })
 end)
 
@@ -280,11 +282,13 @@ each("accuracy", function(input)
   local hit, effective = Accuracy.hit(input.accuracy, input.roll, {
     accuracyStage = input.accuracyStage,
     evasionStage = input.evasionStage,
-    accuracyMod = input.accuracyMod,
-    evasionMod = input.evasionMod,
     alwaysHits = input.alwaysHits,
+    brightPowder = input.brightPowder,
+    identified = input.identified,
   })
-  return { hit = hit, effectiveAccuracy = effective }
+  local draws = nil
+  if effective ~= nil then draws = Accuracy.draws(effective) end
+  return { hit = hit, effectiveAccuracy = effective, draws = draws }
 end)
 
 -- ------------------------------------------------------------------
@@ -317,7 +321,10 @@ function STATUS.sleep(input)
   return Status.sleepTick(input.turnsRemaining)
 end
 
+-- A freeze case is CheckTurn's gate (never a thaw), or -- with `defrostByte`
+-- -- HandleDefrost's roll between turns.
 function STATUS.freeze(input)
+  if input.defrostByte ~= nil then return { defrosted = Status.defrosts(input.defrostByte) } end
   return Status.freezeTick(input.roll)
 end
 
@@ -348,6 +355,232 @@ end
 each("status", function(input)
   local handler = STATUS[input.status]
   if not handler then error("no handler for status " .. tostring(input.status), 0) end
+  return handler(input)
+end)
+
+-- ------------------------------------------------------------------
+-- badges: Crystal's stat boosts (with Glacier's Sp. Def tail and the 999
+-- cap) and the badge type boost's lookup, both checked against the Gold
+-- engine's own Battle.battleStat / badgeTypeBoost before they were written
+-- down here
+-- ------------------------------------------------------------------
+
+each("badgeStats", function(input)
+  return { value = Effects.badgeBoost(input.stat, input.key,
+    orNil(input.badges), orNil(input.spa)) }
+end)
+
+each("badgeTypes", function(input)
+  return { boosted = Effects.badgeTypeBoost(orNil(input.typeId), orNil(input.badges)) }
+end)
+
+-- ------------------------------------------------------------------
+-- the pokecrystal stat pipeline: CalcBattleStats' stage ratio and clamp,
+-- CalcPlayerStats' order (stage, badge, burn / paralysis), and the
+-- TruncateHL_BC fold the damage formula reads -- worked from the cart's own
+-- arithmetic before they were written down here
+-- ------------------------------------------------------------------
+
+each("stages", function(input)
+  return { value = Effects.applyStage(input.stat, input.stage) }
+end)
+
+each("battleStats", function(input)
+  local mon = { stats = input.stats, stages = input.stages, status = orNil(input.status) }
+  return { value = Effects.battleStat(mon, input.key, orNil(input.badges)) }
+end)
+
+each("truncate", function(input)
+  local attack, defense = Damage.truncateStats(input.attack, input.defense, input.link)
+  return { attack = attack, defense = defense }
+end)
+
+-- ------------------------------------------------------------------
+-- Gold held items and the obedience arithmetic (Items.lua): the static rules,
+-- one `kind` per rule, each worked from pokecrystal's routine before it was
+-- written down here
+-- ------------------------------------------------------------------
+
+local function sheet(input)
+  return {
+    heldItem = orNil(input.heldItem), holdEffect = orNil(input.holdEffect),
+    holdParam = orNil(input.holdParam), speciesId = orNil(input.speciesId),
+  }
+end
+
+local ITEMS = {}
+
+function ITEMS.typeBoost(input)
+  return { percent = Items.typeBoostPercent(sheet(input), orNil(input.typeId)) }
+end
+
+function ITEMS.quickClaw(input)
+  return { fires = Items.quickClawFires(input.param, input.byte) }
+end
+
+function ITEMS.brightPowder(input)
+  return { effective = Items.brightPowder(input.effective, input.param) }
+end
+
+function ITEMS.speciesAttack(input)
+  return { attack = Items.speciesAttack(sheet(input), input.special, input.attack) }
+end
+
+function ITEMS.metalPowder(input)
+  local attack, defense = Items.metalPowder(sheet(input), input.attack, input.defense)
+  return { attack = attack, defense = defense }
+end
+
+function ITEMS.focusBand(input)
+  local amount, held = Items.focusBand(input.amount, input.hp)
+  return { amount = amount, held = held }
+end
+
+function ITEMS.sixteenth(input)
+  return { value = Items.sixteenth(input.maxHp) }
+end
+
+-- GetEighthMaxHP, LEECH SEED's sap: the same register walk, halved.
+function ITEMS.eighth(input)
+  return { value = Items.eighth(input.maxHp) }
+end
+
+function ITEMS.berryWants(input)
+  return { wants = Items.berryWants(input.hp, input.maxHp) }
+end
+
+function ITEMS.obedienceCap(input)
+  return { cap = Items.obedienceCap(orNil(input.badges)) }
+end
+
+function ITEMS.swap(input)
+  return { value = Items.swap(input.byte) }
+end
+
+function ITEMS.napTurns(input)
+  return { value = Items.napTurns(input.byte) }
+end
+
+function ITEMS.kingsRockMove(input)
+  return { rolls = Items.kingsRockMove(input.effectId, orNil(input.moveId)) }
+end
+
+function ITEMS.critSpeciesItem(input)
+  return { set = Items.critSpeciesItem(orNil(input.species), orNil(input.itemId)) }
+end
+
+each("items", function(input)
+  local handler = ITEMS[input.kind]
+  if not handler then error("no handler for item rule " .. tostring(input.kind), 0) end
+  return handler(input)
+end)
+
+-- ------------------------------------------------------------------
+-- gold: the wave-3 (R2c) formulas, one `kind` per rule
+-- ------------------------------------------------------------------
+
+-- A byte stream for the rules that draw: the fixture's `bytes`, in order.
+local function byteStream(list)
+  local i = 0
+  return { byte = function()
+    i = i + 1
+    return list[i] or 0
+  end, drawn = function() return i end }
+end
+
+local GOLD = {}
+
+function GOLD.happinessPower(input) return { power = Effects.happinessPower(orNil(input.happiness)) } end
+function GOLD.frustrationPower(input) return { power = Effects.frustrationPower(orNil(input.happiness)) } end
+function GOLD.hiddenPower(input)
+  local power, typeName = Effects.hiddenPower(orNil(input.dvs))
+  return { power = power, type = typeName }
+end
+function GOLD.reversalPower(input) return { power = Effects.reversalPower(input.hp, input.maxHp) } end
+function GOLD.magnitude(input)
+  local power, magnitude = Effects.magnitude(input.byte)
+  return { power = power, magnitude = magnitude }
+end
+function GOLD.presentPower(input) return { power = Effects.presentPower(input.byte) } end
+function GOLD.typeConstant(input) return { value = Effects.typeConstant(orNil(input.name)) } end
+function GOLD.protectChance(input)
+  local r = byteStream(input.bytes)
+  return { ok = Effects.protectChance(r, input.count), drawn = r.drawn() }
+end
+function GOLD.tripleKickCount(input)
+  local r = byteStream(input.bytes)
+  return { hits = Effects.tripleKickCount(r), drawn = r.drawn() }
+end
+function GOLD.psywave(input)
+  local r = byteStream(input.bytes)
+  local damage = Effects.fixedDamage({ effectId = Effects.PSYWAVE, userMon = { level = input.level }, rng = r })
+  return { damage = damage, drawn = r.drawn() }
+end
+function GOLD.levelDamage(input)
+  return { damage = Effects.fixedDamage({ effectId = Effects.LEVEL_DAMAGE, userMon = { level = input.level } }) }
+end
+function GOLD.weatherTenths(input)
+  return { tenths = Effects.weatherTenths(orNil(input.weather), orNil(input.typeName), input.effectId) }
+end
+function GOLD.timeHealAmount(input)
+  return { value = Effects.timeHealAmount(input.maxHp, input.timeMatches, orNil(input.weather)) }
+end
+function GOLD.calc(input)
+  return { damage = Damage.calc(input.level, input.power, input.attack, input.defense, {
+    crit = input.crit, itemBoostPercent = orNil(input.itemBoostPercent), carry = orNil(input.carry),
+  }) }
+end
+function GOLD.stab(input)
+  local d, immune, cReg = Damage.stab(input.damage, {
+    weatherTenths = orNil(input.weatherTenths), badgeTypeBoost = input.badgeTypeBoost,
+    stab = input.stab, typeEffect = orNil(input.typeEffect),
+  })
+  return { damage = d, immune = immune, cReg = cReg }
+end
+function GOLD.multiply(input) return { damage = Damage.multiply(input.damage, input.times) } end
+function GOLD.doubleTimes(input) return { damage = Damage.doubleTimes(input.damage, input.count) } end
+function GOLD.applyRoll(input) return { damage = Damage.applyRoll(input.damage, input.roll), varies = Damage.varies(input.damage) } end
+function GOLD.quarter(input) return { value = Items.quarter(input.maxHp) } end
+function GOLD.half(input) return { value = Items.half(input.maxHp) } end
+function GOLD.sleepCount(input)
+  local r = byteStream(input.bytes)
+  local target = { species = "T", hp = 10, maxHp = 10, stages = {}, types = { 0 }, substitute = 0 }
+  Effects.applyPrimary({ effectId = 32, rng = r, userMon = { species = "U", maxHp = 10, stages = {} },
+    targetMon = target, userFighter = { slot = 0, side = "a" }, targetFighter = { slot = 3, side = "b" } })
+  return { turns = target.statusTurns, drawn = r.drawn() }
+end
+function GOLD.movePriority(input)
+  return { priority = Effects.movePriority({ id = input.id, effect = input.effect, priority = orNil(input.priority) }) }
+end
+-- FX-R2: PokeBallEffect (pokegold engine/items/item_effects.asm), worked
+-- by hand from the routine and cross-checked against a register-level
+-- emulation of it: the ball table, the HP step and status bonus, the wobble
+-- byte, the HEAVY BALL's weight byte, and a whole throw's draws.
+local function sheetOf(raw)
+  if raw == nil or raw == NULL then return nil end
+  local out = {}
+  for k, v in pairs(raw) do out[k] = orNil(v) end
+  return out
+end
+function GOLD.ballRate(input)
+  return { rate = Effects.ballRate(input.ball, input.rate, sheetOf(input.target),
+    { thrower = sheetOf(input.thrower), battleType = orNil(input.battleType) }) }
+end
+function GOLD.catchHpRate(input)
+  return { value = Effects.catchHpRate(input.rate, input.hp, input.maxHp, orNil(input.status)) }
+end
+function GOLD.wobbleByte(input) return { value = Effects.wobbleByte(input.rate) } end
+function GOLD.heavyBallWeightByte(input) return { value = Effects.heavyBallWeightByte(input.weight) } end
+function GOLD.catchAttempt(input)
+  local r = byteStream(input.bytes)
+  local caught, shakes, finalRate = Effects.catchAttempt(input.ball, sheetOf(input.target), r,
+    { thrower = sheetOf(input.thrower), battleType = orNil(input.battleType) })
+  return { caught = caught, shakes = shakes, finalRate = finalRate, drawn = r.drawn() }
+end
+
+each("gold", function(input)
+  local handler = GOLD[input.kind]
+  if not handler then error("no handler for gold rule " .. tostring(input.kind), 0) end
   return handler(input)
 end)
 
@@ -400,6 +633,39 @@ do
   for _ = 1, 10 do live:byte() end
   local restored = Rng.new(0):setState(live:state())
   rngCheck("state_restores", live:byte(), restored:byte())
+
+  -- Contract K12: `below` and `nextInt` read the state's HIGH bits (its high
+  -- 16 bits modulo the span, Gen 1's rule too), so a span of 4 no longer
+  -- reads the LCG's two low bits, which repeat every four draws.  The one
+  -- place raw draws are pinned, because this IS the generator's identity: the
+  -- JS twin asserts the same four streams from the same seed.
+  local function stream(seed, n, draw)
+    local r, out = Rng.new(seed), {}
+    for i = 1, n do out[i] = draw(r) end
+    return table.concat(out, ",")
+  end
+  rngCheck("k12_below_4", "1,0,0,1,3,2,2,0",
+    stream(12345, 8, function(r) return r:below(4) end))
+  rngCheck("k12_below_17", "11,13,15,10,3,9,11,15",
+    stream(12345, 8, function(r) return r:below(17) end))
+  -- R2d: DamageVariation's loop -- a rotated byte, redrawn under 217 -- so
+  -- a roll is 217..255 and takes as many draws as the loop does.
+  rngCheck("k12_damage_roll", "251,237,234,251,253,240,224,220",
+    stream(12345, 8, function(r) return r:damageRoll() end))
+  rngCheck("k12_accuracy_roll", "37,84,96,9,39,70,98,36",
+    stream(12345, 8, function(r) return r:nextInt(0, 99) end))
+  -- The old low-bit draw: the state's two low bits cycle with period four,
+  -- whatever the seed -- the pattern K12 removes.
+  local cycled = true
+  local probe = Rng.new(12345)
+  local first = {}
+  for i = 1, 4 do first[i] = probe:next() % 4 end
+  for _ = 1, 16 do
+    for i = 1, 4 do
+      if probe:next() % 4 ~= first[i] then cycled = false end
+    end
+  end
+  rngCheck("k12_low_bits_cycle", true, cycled)
 end
 
 -- ------------------------------------------------------------------

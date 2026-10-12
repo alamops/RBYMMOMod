@@ -1,6 +1,6 @@
 return {
-  summary = "Play Kanto with friends: see them walk or run, team up, chat, "
-    .. "trade and battle.",
+  summary = "Play Kanto, Johto and Hoenn with friends: see them walk or run, "
+    .. "team up, chat, trade and battle.",
   author = "alamo",
   tags = { "multiplayer", "mmo", "chat", "party", "friends", "trade", "pvp",
            "ranking", "coop", "ui", "battle", "effects" },
@@ -11,9 +11,36 @@ return {
       "Draws nicknames over other players in the overworld, and notifies "
         .. "chat, arrivals and a party member's fights as toasts in the "
         .. "corner of the screen.",
-      "Spawns runtime NPCs for other players on your current map.",
+      "Spawns runtime NPCs for other players on your current map (on "
+        .. "FireRed, LeafGreen and Emerald, real overworld objects injected "
+        .. "into the engine's object list -- see below).",
       "Hooks movement.speed so holding B on foot moves at bike speed; off "
-        .. "the moment you are biking or surfing.",
+        .. "the moment you are biking or surfing. Gen 1 and Gen 2 only: the "
+        .. "Gen 3 carts have Running Shoes of their own and never call that "
+        .. "hook, so their boots have no B TO RUN row.",
+      "On FireRed, LeafGreen and Emerald the game3 mod API has no seam yet "
+        .. "for most of the overworld work, so the mod reaches into engine "
+        .. "internals (the manifest declares engine_internals), each reach "
+        .. "behind a pcall and all of it in a few files: remote players are "
+        .. "event objects written into the engine's object list "
+        .. "(src/Avatars.lua), and one on a neighbouring map into that map's "
+        .. "ghost pool, purged and placed again on every map change; the worn "
+        .. "look wraps OwSprites.playerGraphicsId "
+        .. "(src/Cast.lua); trainers -- and the wild fights that skip "
+        .. "encounter.roll: fishing, Rock Smash, Sweet Scent -- are diverted "
+        .. "by wrapping BattleBridge.start (src/CoopField.lua), which then runs "
+        .. "the cart's own post-battle steps and the trainer opcode's own "
+        .. "continuation; and the FireRed quest-log recorder and Emerald's "
+        .. "rotating-tile puzzle are wrapped so avatars are neither recorded "
+        .. "into the save nor shoved. Every wrap keeps the engine's original "
+        .. "and is re-applied, never stacked, across a hot reload "
+        .. "(Gen3.wrapFn). Menus are ordinary layers on the game3 modal "
+        .. "stack. The public seams that would replace all of it -- with the "
+        .. "ones that would draw a player across a seamless map edge, give a "
+        .. "trainer draw its own answer and start the TEACHY TV's "
+        .. "demonstrations -- are proposed as one request "
+        .. "in docs/upstream/gen3-spawn-npc.md "
+        .. "(https://github.com/alamops/RBYMMOMod/blob/main/docs/upstream/gen3-spawn-npc.md).",
     },
     added = {
       "HOST GAME and JOIN GAME in the MMO menu -- no separate server to "
@@ -155,7 +182,8 @@ return {
         .. "this mod's own battle system instead of the engine's, in a copy "
         .. "with no hub, no partner and no network. The referee runs "
         .. "in-process, so nothing goes on the wire and no protocol changes; "
-        .. "the opponent is driven by the engine's own TrainerAI, so a gym "
+        .. "on Red and Gold the opponent is driven by the cart's own trainer "
+        .. "AI, built into the referee (on Gen 3 by pret's AI scripts), so a gym "
         .. "leader still plays like that gym leader. The Safari Zone, the "
         .. "Marowak ghost and the Viridian old-man demo are left on the "
         .. "vanilla engine, since their mechanics are not modelled.",
@@ -201,6 +229,57 @@ return {
         .. "marked with a down arrow on the list, and anything the hub "
         .. "refuses the dial with comes back as one dismissible box naming "
         .. "the server.",
+      "FireRed, LeafGreen and Emerald, as a peer of Red and Gold: the MMO "
+        .. "row above SAVE, and every screen behind it drawn natively at "
+        .. "240x160 in the cart's own font and window frames; remote players "
+        .. "as real overworld objects walking on the cart's own sheets; a Gen 3 "
+        .. "wardrobe (the heroes of all three carts, rivals, professors, "
+        .. "trainer classes, gym leaders and the Elite Four), drawn on another "
+        .. "cart the way its Cable Club would; your partners' characters on "
+        .. "FireRed's TOWN MAP and Emerald's PokeNav HOENN MAP, and a player "
+        .. "on a neighbouring map drawn across a seamless edge; trades with "
+        .. "held items, mail, the dex and the cart's own trade evolution; and "
+        .. "every battle -- 1v1, co-op 2-on-2 against a wild mon or a trainer, "
+        .. "party against party, SOLO BATTLES -- on a full Gen 3 referee "
+        .. "(src/BattleSim3, mirrored by server/lib/battle3: abilities, held "
+        .. "items, weather, natures and IV/EV stats, all 214 move effects, "
+        .. "doubles), with the cart's own EXP, move learning and evolution "
+        .. "afterwards, the arena drawn from the cart's pics, and a "
+        .. "FireRed/Emerald-style CLASSIC BATTLE UI. One Gen 3 hub "
+        .. "(--generation 3, PROTOCOL 30) seats all three carts together; "
+        .. "presence stays per region (Kanto and Sevii vs Hoenn), everything "
+        .. "else crosses carts.",
+      "SOLO BATTLES on Gen 3 takes every fight a player can walk into, each "
+        .. "family in its own module (src/Solo3/): lone doubles, two trainers "
+        .. "at once and Steven beside you; the Safari Zone; roamers, scripted "
+        .. "legendaries and the POKéMON TOWER ghosts; the Battle Frontier, its "
+        .. "Battle Tents, Trainer Hill and Secret Bases, and FireRed's Trainer "
+        .. "Tower; the first battles; and the tutorials -- the old man, WALLY "
+        .. "and the POKé DUDE through the TEACHY TV. What a demonstration "
+        .. "lends you is given back when it ends, and the game is not saved "
+        .. "while it still holds your party or bag (src/Borrow3.lua).",
+      "Every Red and Gold move the carts' way: about sixty Gold-only "
+        .. "moves (RETURN, HIDDEN POWER, PROTECT, BATON PASS, SPIKES, CURSE, "
+        .. "PERISH SONG, SKETCH, SLEEP TALK and the rest) and weather (RAIN "
+        .. "DANCE, SUNNY DAY, SANDSTORM); Red's TRANSFORM, HAZE, MIMIC, "
+        .. "DISABLE, COUNTER and trapping moves as pokered runs them; the "
+        .. "carts' draw order, byte arithmetic and exact battle text; the "
+        .. "computer picking moves as the carts do; PAY DAY paid; mid-fight "
+        .. "level-ups reaching the referee. The Lua and Node referees are "
+        .. "fuzzed against each other with no mismatch.",
+      "Red and Gold fights on the carts' own rules, read from the pret "
+        .. "disassemblies: move priority (QUICK ATTACK, COUNTER, Gold's "
+        .. "PROTECT / EXTREMESPEED table); badges boosting stats after stat "
+        .. "stages, Red's badge-stacking glitch included; crits, REFLECT and "
+        .. "LIGHT SCREEN, large-stat scaling and confusion self-hits the "
+        .. "carts' way; and, against the computer, a traded POKéMON over its "
+        .. "badge level cap disobeying in the cart's words. On Gold, held "
+        .. "items work in every fight (QUICK CLAW, LEFTOVERS, the berries, "
+        .. "FOCUS BAND, KING'S ROCK, the type boosters and the rest), THIEF "
+        .. "steals both ways, wild POKéMON hold items at the cart's odds, "
+        .. "SMOKE BALL always escapes a wild fight and AMULET COIN doubles a "
+        .. "prize. Items eaten or stolen against the computer are written "
+        .. "home; a fight between players never touches them.",
       "Particles and effects on the battle arena for every move, every "
         .. "attack and every item a bag can open in a fight: twenty-five "
         .. "vector particle styles over eighteen type palettes, drawn as "
@@ -262,10 +341,11 @@ return {
         .. "pinned by twin suites (hub_protocol_parity, twin_parity, "
         .. "battle_turn_parity); see docs/plans/hub-twin-parity.md. Still a "
         .. "real upkeep cost on every protocol bump.",
-      "Nameplates are positioned from the tile offset to your own player, "
-        .. "because the mod API exposes no camera position. At a map edge "
-        .. "smaller than the screen, where the camera stops scrolling but "
-        .. "you keep walking, a label can sit a tile or two off.",
+      "On Gen 1 and Gen 2, nameplates are positioned from the tile offset "
+        .. "to your own player, because the mod API exposes no camera "
+        .. "position. At a map edge smaller than the screen, where the camera "
+        .. "stops scrolling but you keep walking, a label can sit a tile or two "
+        .. "off. (On Gen 3 they follow the game3 camera.)",
       "Interacting with another player's avatar logs 'no text for ...' from "
         .. "the engine before the menu opens: the avatar is a real NPC with "
         .. "no dialogue, and the engine warns on that path.",
@@ -312,7 +392,7 @@ return {
         .. "HOOD in their catalog, so somebody wearing one shows up as RED "
         .. "on their screen -- the same fallback a character their ROM does "
         .. "not carry already gets.",
-      "The protocol is exact-match: this release speaks PROTOCOL 18. An older "
+      "The protocol is exact-match: this release speaks PROTOCOL 30. An older "
         .. "mod or hub is refused at the door with a sentence that names both "
         .. "versions rather than connecting and going quiet. The mod and its "
         .. "hub have to be updated together; there is no degraded mode that "
@@ -338,6 +418,51 @@ return {
         .. "has never chosen one -- and a copy whose MY SPRITE option is "
         .. "still on its default -- is drawn exactly as it was before, so "
         .. "nobody gets a character they did not ask for.",
+      "Gen 3 rests on engine internals (see the changed list): an engine "
+        .. "update that renames one of them can break presence, the worn look "
+        .. "or battle diversion on FireRed, LeafGreen and Emerald until this "
+        .. "mod follows it. Each reach fails soft -- logged, and the vanilla "
+        .. "behaviour kept -- rather than taking the game down.",
+      "FireRed / LeafGreen <-> Emerald trades follow the carts' own "
+        .. "post-game rule: FireRed and LeafGreen once the cart can link with "
+        .. "Ruby and Sapphire (the Sevii Islands post-game), Emerald once the "
+        .. "player is Champion, and a mon from outside a cart's regional dex, "
+        .. "or an egg, needs that cart's National Dex. Trades within one region "
+        .. "are free. The swap is shown in text boxes, not the cart's trade "
+        .. "animation.",
+      "SOLO BATTLES on Gen 3 leaves only link battles (the Cable Club, the "
+        .. "Union Room, the link multis, a recorded battle's replay) and the "
+        .. "e-Reader trainer to the cart: taking a link battle would make the "
+        .. "mod a party to the link, and the engine has no e-Reader trainer "
+        .. "to take.",
+      "On Gen 3 a remote player walking nearby can hold the VS Seeker's "
+        .. "charge a moment, because the cart waits for every object to stop.",
+      "Engine, not mod: a FireRed / LeafGreen Trainer Tower trainer's line "
+        .. "before the fight reads \"(missing text)\" -- the cart prints it "
+        .. "with msgbox gStringVar4, which the engine's script VM reads only "
+        .. "on Ruby and Sapphire.",
+      "What the Red and Gold referees still do differently from the carts "
+        .. "(a move's animation plays before its \"used\" line, a few screens "
+        .. "the client words its own way, the referee's own random numbers) "
+        .. "is listed in docs/plans/gen12-referee-known-gaps.md. On every cart a fight "
+        .. "between players leaves both saves exactly as they were, as the "
+        .. "carts' Cable Club does.",
+      "On Gen 3, badges work the cart's way against the computer (solo, and "
+        .. "co-op against a trainer or a wild mon): stat boosts from badges 1, "
+        .. "3, 5 and 7, and a traded mon over its badge level cap can disobey. "
+        .. "A fight between players is a link battle (no boosts, everyone "
+        .. "obeys), and leaves both saves exactly as they were, as the carts' Cable Club "
+        .. "does (no EXP, no Pay Day, no whiteout), but its bag stays usable "
+        .. "as on Red and Gold -- this mod's rule, where the carts lock it. A "
+        .. "trainer fight drawn with the player's team still standing leaves "
+        .. "the trainer unbeaten and its script halted (no prize, TM or "
+        .. "badge), and that trainer challenges again on sight. A fight taken "
+        .. "over from the cart never raises battle.started; a SOLO BATTLES "
+        .. "fight raises battle.ended as it finishes.",
+      "LeafGreen shares FireRed's engine path end to end and is covered by "
+        .. "the headless suites, but has not been run live. There is no "
+        .. "official Gen 3 server on the SERVERS list; a Gen 3 hub is reached "
+        .. "by address.",
     },
   },
 
@@ -355,6 +480,17 @@ return {
       .. "through the same widescreen seam the game's own battle screen "
       .. "uses, so it sits over the whole window rather than in the 160×144 "
       .. "panel. See docs/plans/gen2-new-battle-system.md.",
+    "Runs on Gen 3 -- FireRed, LeafGreen and Emerald -- as a peer of the "
+      .. "other two: one Gen 3 hub (--generation 3, or HOST GAME on a Gen 3 "
+      .. "boot) seats all three carts together and refuses Gen 1 and Gen 2, "
+      .. "and a Gen 1 or Gen 2 hub refuses Gen 3. Needs an engine build that "
+      .. "boots the game3 carts; developed and tested against upstream dev "
+      .. "@ fdea09dc (2026-09-29) on FireRed Rev1 and Emerald. LeafGreen "
+      .. "shares FireRed's engine path and is covered headless, not by a live "
+      .. "run. The overworld reach-arounds this needs are listed under "
+      .. "differences.changed and proposed upstream in "
+      .. "docs/upstream/gen3-spawn-npc.md. See "
+      .. "docs/plans/gen3-firered-emerald-support.md.",
     "Runs alongside DramaticShapeVoxelMod: both load clean and everything "
       .. "works with the diorama on. Remote players render as voxel "
       .. "characters, since this mod spawns real NPCs rather than drawing "

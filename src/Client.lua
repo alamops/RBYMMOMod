@@ -25,6 +25,13 @@ local Coop = need("Coop")
 -- which is an *instance* and is nil between battles -- which is exactly when
 -- a save is loaded.
 local CoopBattle = need("CoopBattle")
+-- Gen 3's encounter divert: the stand-in for the cart's battle a divert
+-- cancels, and the BattleBridge.start wrap trainers are taken at (see the Gen
+-- 3 section of src/CoopField.lua, and the wiring in M.install below).
+local CoopField = need("CoopField")
+-- What a Gen 3 fight borrows from the save, and the `save.write` link that
+-- keeps a borrow out of the file (installed in M.install, Gen 3 only).
+local Borrow3 = need("Borrow3")
 -- The mod's own battle system for a player with nobody to play with. The one
 -- module in here that *substitutes* for a piece of the game instead of adding
 -- to it, and so the one gated on an option row rather than on a connection --
@@ -38,6 +45,12 @@ local Overlay = need("Overlay")
 local Sessions = need("Sessions")
 local World = need("World")
 local Gen = need("Gen")
+-- The Gen 3 engine adapter.  Every FireRed / LeafGreen / Emerald detail this
+-- file needs -- the live session, the start layer, the player's step -- is
+-- asked of it rather than required here, because a src.core.game3.* require
+-- on a Gen 1 or Gen 2 boot throws (src/Gen3.lua's header has the whole of
+-- why).  Off Gen 3 every function it has answers nil / false.
+local Gen3 = need("Gen3")
 local HostServer = need("HostServer")
 local Chars = need("Chars")
 local Cast = need("Cast")
@@ -84,9 +97,32 @@ local friends = Friends.new(transport, ui, { mod = mod })
 -- inside Friends because "busy" is a fact about the session and the stack,
 -- which is exactly what Sessions is for and what Friends deliberately has no
 -- engine dependency to see.
+--
+-- Gen 3 adds one more way to be busy, and it is about the screen rather than
+-- the session.  Gen 1 and Gen 2 put every menu, text box and script on one
+-- stack, so a box pushed over an NPC's dialogue simply waits on top of it.
+-- Game3 does not: the bag, party, dex and trainer card are module menus drawn
+-- while the modal stack is *empty*, and an NPC's message is drawn after the
+-- stack -- so a yes/no layer pushed over either is a box the cart's own
+-- screen draws across, or one that and the menu under it both answer.
+-- The ask is held, not lost (see above), so it waits for the player to be
+-- back in the field -- or in this mod's own menus, which are layers on that
+-- stack like the box itself.
+local function gen3Occupied()
+  if not Gen3.active() then return false end
+  if Gen3.freeRoam() then return false end
+  local Stack = Gen3.stack()
+  local top = Stack and type(Stack.top) == "function" and Stack.top() or nil
+  local id = type(top) == "table" and top.id or nil
+  local prefix = Config.GEN3_LAYER_PREFIX
+  if type(id) == "string" and id:sub(1, #prefix) == prefix then return false end
+  return true
+end
+
 friends.busy = function(game)
   return sessions:isBusy() or sessions.incoming ~= nil
     or sessions:inFight(game or ctx.game)
+    or gen3Occupied()
 end
 local coop = Coop.new(transport, ui, party, ctx.roster, ctx.chat)
 -- Co-op can be mid-handoff with no screen yet (running/state set, stack
@@ -268,6 +304,38 @@ local autoJoin = {
 local function arg1(a, b)
   if a == M then return b end
   return a
+end
+
+-- Put one of the mod's screens up.
+--
+-- src/Ui.lua's Ui.push is the generation-aware door: on Gen 1 and Gen 2 it is
+-- mod.ui.push, and on a Gen 3 boot -- where mod.ui.push would reach for a
+-- game.stack Game3 does not have -- it is a layer on the game3 modal stack
+-- (src/Gen3Ui.lua).  mod.ui.push is kept behind it only for a Ui build that
+-- predates the door, which is the Gen 1 / Gen 2 path it always was.
+local function pushScreen(game, id, opts)
+  if type(Ui.push) == "function" then return Ui.push(game, id, opts) end
+  return mod.ui.push(game, id, opts)
+end
+
+-- The save the trainer-card fields are read from.
+--
+-- Gen 1 and Gen 2 read game.save, which is the live save.  Gen 3's game.save
+-- is only a snapshot (Schema.toSaveTable, rebuilt when the player saves), so
+-- a card built from it would show the badges and dex of the last SAVE rather
+-- than of the player standing here; the runtime session is the live one, and
+-- the snapshot is only the fallback for a boot whose runtime is not up.
+local function saveOf(game)
+  if Gen3.active() then
+    local session = Gen3.session()
+    if session then return session end
+    if type(game) == "table" then
+      if type(game.session) == "table" then return game.session end
+      return game.save
+    end
+    return nil
+  end
+  return game and game.save
 end
 
 function M.isConnected()
@@ -646,7 +714,7 @@ end
 function M.askJoinCode(game, address, reconnect)
   game = game or ctx.game
   if not game then return false end
-  mod.ui.push(game, Ui.SCREEN.JOINCODE, {
+  pushScreen(game, Ui.SCREEN.JOINCODE, {
     address = address,
     connect = reconnect and true or false,
   })
@@ -668,6 +736,13 @@ function M.playerName(a, b)
     return Wire.name(chosen) or "PLAYER"
   end
   local game = arg1(a, b) or ctx.game
+  -- Gen 3 keeps the trainer's name on the session itself (session.name), not
+  -- under a save.player table -- the snapshot has none, so the Gen 1 read
+  -- below would name every FireRed and Emerald player PLAYER.
+  if Gen3.active() then
+    local who = Gen3.player()
+    return Wire.name(who and who.name) or "PLAYER"
+  end
   local name = game and game.save and game.save.player and game.save.player.name
   return Wire.name(name) or "PLAYER"
 end
@@ -814,10 +889,45 @@ function M.setSpriteChoice(a, b)
   return id
 end
 
+-- Gen 3 play time: session.playtime is { hours, minutes, seconds } (the
+-- engine's own accumulator, src/core/game3/runtime.lua pumpRtc), where the
+-- wire wants the seconds Gen 1's playTime already is.  A number is taken as
+-- it stands, so a snapshot written some other way still reads.
+local function playSeconds(pt)
+  if type(pt) == "number" then return pt end
+  if type(pt) ~= "table" then return 0 end
+  return (tonumber(pt.hours) or 0) * 3600 + (tonumber(pt.minutes) or 0) * 60
+    + (tonumber(pt.seconds) or 0)
+end
+
+-- The same card off a Gen 3 session.
+--
+-- Every number is the engine's own answer through Gen / Gen3: badges are
+-- event flags on these carts (Gen3.badgeCount counts the running cart's own
+-- badge list), the dex is counted in national mode (a Hoenn mon a trade
+-- brought to FireRed has been seen), and the id is session.trainerId -- the
+-- visible sixteen bits the cart's own trainer card prints as five
+-- zero-padded digits, which is the number another player is shown.
+local function profile3(game)
+  local session = saveOf(game)
+  if type(session) ~= "table" then return nil end
+  local seen, owned = Gen.dexCounts(session)
+  local who = Gen3.player()
+  local id = tonumber(who and who.trainerId) or tonumber(session.trainerId)
+  return {
+    idNo = id and (math.floor(id) % 0x10000) or 0,
+    badges = Gen.badgeCount(game, session),
+    seen = seen,
+    owned = owned,
+    playtime = math.floor(playSeconds(session.playtime or session.playTime)),
+  }
+end
+
 -- The trainer-card fields this player shows to others. Read from the save
 -- at hello time, so it is a snapshot of who you were when you joined.
 function M.profile(a, b)
   local game = arg1(a, b) or ctx.game
+  if Gen3.active() then return profile3(game) end
   local save = game and game.save
   if not save then return nil end
   local seen, owned = Gen.dexCounts(save)
@@ -860,7 +970,9 @@ end
 -- field that identifies it as yours is the weaker of the two.
 function M.ownCard(a, b)
   local game = arg1(a, b) or ctx.game
-  local save = game and game.save
+  -- The live session on Gen 3, for the reason profile3 reads it: a wallet read
+  -- off the save snapshot is the money of the last SAVE.
+  local save = saveOf(game)
   return {
     id = ctx.roster.selfId,
     name = M.playerName(game),
@@ -989,6 +1101,93 @@ local function trainerName(battle)
   return "Trainer"
 end
 
+-- ------- the same two readers, for a Gen 3 battle
+--
+-- Gen 3's battle.ended carries the engine's own battle state
+-- (src/core/game3/battle_bridge.lua: { battle = Battle.getState(), result }),
+-- and it is not Gen 1's shape: there is no `kind` -- the state says `wild`
+-- and `link` -- the foe is `enemy.mon` with a *numeric* internal species and
+-- no def, and a trainer is two fields, `trainerClassName` and `trainerName`
+-- (Battle.start copies both off Trainers.info).  Read through Gen3 so the
+-- species is the name the cart shows, not its number.
+
+-- The foe's species name and level.  The species, never the mon's own
+-- nickname, for the reason enemyMon gives on Gen 1 (a nickname is only ever
+-- the display name of the moment -- on Gen 3 the Pokemon Tower ghost's
+-- "GHOST" is one).
+local function enemyMon3(battle)
+  local enemy = type(battle) == "table" and battle.enemy
+  local mon = type(enemy) == "table" and type(enemy.mon) == "table" and enemy.mon or nil
+  if not mon then return nil, nil end
+  local species = tonumber(mon.species or mon.speciesId)
+  return species and Gen3.speciesName(species) or nil, tonumber(mon.level)
+end
+
+-- "LEADER BROCK", the way the cart's own intro line puts the two together,
+-- when that fits the label the hub carries (Wire.label, COOP_LABEL_MAX);
+-- the name alone when it does not ("TEAM ROCKET GRUNT" is one over), then
+-- the class alone for a trainer the cart names by class only.  Sanitised
+-- here with the same rule the hub applies, so what is measured is what
+-- arrives.
+local function trainerName3(battle)
+  local class = type(battle.trainerClassName) == "string"
+    and Wire.text(battle.trainerClassName, 64) or nil
+  local name = type(battle.trainerName) == "string"
+    and Wire.text(battle.trainerName, 64) or nil
+  if class and name then
+    local both = class .. " " .. name
+    if #both <= Config.COOP_LABEL_MAX then return both end
+  end
+  return name or class or "Trainer"
+end
+
+-- narrateBattle on a Gen 3 boot.  The same four sentences and the same three
+-- silences; the only Gen 3 addition is the POKe DUDE's lesson (st.pokedude,
+-- FireRed's scripted tutorial fight), which is a demonstration and not a
+-- fight the player had.
+local function narrateBattle3(battle, result)
+  if battle.link or battle.pokedude then return false end
+  if not (result == "win" or result == "lose") then return false end
+  local won = result == "win"
+  if not battle.wild then
+    return sendPartyEvent({
+      kind = won and "defeat_trainer" or "defeated_by_trainer",
+      trainer = trainerName3(battle),
+    })
+  end
+  local species, level = enemyMon3(battle)
+  if not (species and level) then return false end
+  return sendPartyEvent({
+    kind = won and "defeat_wild" or "defeated_by_wild",
+    species = species,
+    level = level,
+  })
+end
+
+-- narrateCatch on a Gen 3 boot.  pokemon.caught there
+-- (src/core/game3/battle/catching.lua emit_caught) carries the caught mon,
+-- its numeric `speciesId`, and a `species` that is the engine's *key* name
+-- (Pokemon.keyName: MR_MIME rather than MR. MIME) -- so the display name is
+-- looked up from the id first, and the key is only the fallback for a build
+-- whose name table is not there.
+local function narrateCatch3(payload)
+  local battle = payload.battle
+  if type(battle) == "table" and battle.link then return false end
+  local mon = type(payload.mon) == "table" and payload.mon or nil
+  local id = tonumber(payload.speciesId) or (mon and tonumber(mon.species))
+  local species = id and Gen3.speciesName(id) or nil
+  if not species and type(payload.species) == "string" then
+    species = payload.species
+  end
+  local level = mon and tonumber(mon.level)
+  if not level then
+    local _, lv = enemyMon3(battle)
+    level = lv
+  end
+  if not (species and level) then return false end
+  return sendPartyEvent({ kind = "capture", species = species, level = level })
+end
+
 -- Tell your partner how a fight went.
 --
 -- Which of the four sentences is picked comes entirely off the battle the
@@ -1004,6 +1203,7 @@ end
 -- a "wild" fight against another trainer's lead.
 function M.narrateBattle(battle, result)
   if type(battle) ~= "table" then return false end
+  if Gen3.active() then return narrateBattle3(battle, result) end
   if battle.kind == "link" then return false end
   if not (result == "win" or result == "lose") then return false end
   local won = result == "win"
@@ -1038,6 +1238,7 @@ end
 -- build that hands over one without the other.
 function M.narrateCatch(payload)
   if type(payload) ~= "table" then return false end
+  if Gen3.active() then return narrateCatch3(payload) end
   -- Ruled out by name, exactly as narrateBattle rules it out: a link battle
   -- belongs to Sessions, and nothing is caught in one anyway -- a build that
   -- fired pokemon.caught during one would put a sentence about a capture that
@@ -1118,7 +1319,54 @@ local function bikeRenderer(id)
   return nil
 end
 
+-- ------- your own look on a Gen 3 boot
+--
+-- There is no renderer to swap.  The game3 overworld draws the player from an
+-- event-object graphic chosen by number (OwSprites.playerGraphicsId, per
+-- bike / surf / run state), player.sprite never fires there, and
+-- mod.world:overworld() is a Gen3Compat facade whose `player` has no sprite
+-- this file could replace -- so the Gen 1 / Gen 2 path above would write a
+-- renderer onto nothing, and its Gold palette arm would require
+-- src.world.gen2.Palettes, which the loader refuses on Gen 3.
+--
+-- What does the wearing on Gen 3 is src/Cast.lua's wrap of that one
+-- function (Cast.installLook3, installed with the cast at load): it answers
+-- the chosen look wherever the engine would have drawn the plain walking
+-- graphic, and reads the choice itself, frame by frame, under the same rule
+-- M.explicitChoice states -- so a player who never chose anybody is drawn
+-- exactly as the cart draws them.  This file's part is the on / off: wearing
+-- wakes the wrap (Cast.installLook3 is idempotent, and wakes one that
+-- restoreLook retired), and restoring retires it (Cast.restoreLook3), which
+-- puts the engine's own function back.
+--
+-- `lookOwner` is the entity the original was stashed against on Gen 1 and
+-- Gen 2.  Gen 3 has no entity, so it holds this sentinel instead -- which is
+-- what keeps wornLook, refreshLook's "already wearing one" gate and
+-- restoreLook meaning the same thing on all three generations.
+local GEN3_LOOK = {}
+-- A build with no player-graphic seam says so once, from Cast, at load; this
+-- latch stops every later map entry asking again and repeating the warning.
+local look3Missing = false
+
+local function applyLook3()
+  if look3Missing then return false end
+  local ok, installed = pcall(Cast.installLook3)
+  if not (ok and installed) then
+    look3Missing = true
+    if not ok then
+      mod.log:warn("could not put on your character (%s); you keep the "
+        .. "game's own look -- pick another under START > MMO > CHARACTER",
+        tostring(installed))
+    end
+    return false
+  end
+  lookOwner = GEN3_LOOK
+  originalLook, originalBike = nil, nil
+  return true
+end
+
 function M.applyLook(game)
+  if Gen3.active() then return applyLook3() end
   local player = playerEntity()
   if not player then return false end
   local id = M.spriteChoice()
@@ -1198,6 +1446,14 @@ function M.refreshLook()
 end
 
 function M.restoreLook()
+  -- Gen 3: the cart's own look back through the same seam that took it off
+  -- (applyLook3), and only when this file put one on -- a player who never
+  -- wore anything has nothing to hand back.
+  if lookOwner == GEN3_LOOK then
+    pcall(Cast.restoreLook3)
+    originalLook, originalBike, lookOwner = nil, nil, nil
+    return
+  end
   -- Only onto the entity the original was taken from: a player rebuilt
   -- since then is already wearing its own sheet, and writing a stale
   -- renderer over it would be this same bug pointing the other way.
@@ -1264,6 +1520,34 @@ local function connectSay(text)
     return
   end
   ui:say(text)
+end
+
+-- Why this boot may not dial an official hub, in words the player can act on.
+--
+-- Keyed by the generation the refused row is *for* (its gens[1]), so every
+-- official names its own carts -- the old two-way branch described anything
+-- that was not the Gen 1 row as "Gen 2 only", which a Gen 3 row would have
+-- inherited.  The Gen 1 and Gen 2 sentences are the ones those boots have
+-- always read.
+--
+-- A Gen 3 boot is the one case where naming the row's carts is no help:
+-- there is no official FireRed / Emerald hub at all (Config.FEATURED_SERVERS
+-- has no gens = { 3 } row -- the owner's decision), so telling a FireRed
+-- player to go and play Gold is not a remediation.  What they can do is join
+-- a Gen 3 hub by address, and that is what they are told.  Asked of
+-- Config.featuredServerAllowed rather than assumed, so the day a Gen 3 row
+-- lands this falls through to the by-generation sentence on its own.
+local OFFICIAL_ONLY = {
+  [1] = "Official server is\nGen 1 only.\nPlay Red, Blue\nor Yellow.",
+  [2] = "Official server is\nGen 2 only.\nPlay Gold, Silver\nor Crystal.",
+  [3] = "Official server is\nGen 3 only.\nPlay FireRed,\nLeafGreen or\nEmerald.",
+}
+
+local function officialRefusal(generation, want)
+  if generation == 3 and not Config.featuredServerAllowed(3) then
+    return "There is no official\nGen 3 server yet.\nJoin a Gen 3 hub\nby its address."
+  end
+  return OFFICIAL_ONLY[want] or OFFICIAL_ONLY[1]
 end
 
 -- The auto-join dial is over, one way or another.
@@ -1335,15 +1619,12 @@ function M.connect(a, b, c)
   -- the SERVERS row) so a typed / options JOIN to the other generation's
   -- official gets a clear sentence instead of a generation mismatch from
   -- the hub.
+  local generation = Gen.generation(game)
   if Servers.isFeaturedAddress(address)
-      and not Config.featuredServerAllowed(Gen.generation(game), address) then
+      and not Config.featuredServerAllowed(generation, address) then
     local spec = Config.featuredServer(address)
     local want = spec and spec.gens and spec.gens[1] or 1
-    if want == 1 then
-      connectSay("Official server is\nGen 1 only.\nPlay Red, Blue\nor Yellow.")
-    else
-      connectSay("Official server is\nGen 2 only.\nPlay Gold, Silver\nor Crystal.")
-    end
+    connectSay(officialRefusal(generation, want))
     return false
   end
 
@@ -1515,10 +1796,20 @@ function M.sendHello(game)
   -- session by re-pushing a character the hub already has.
   local sprite = M.spriteChoice()
   spriteAcked, spriteClock = sprite, 0
+  local generation = Gen.generation(game)
   transport:send(Wire.HELLO, {
     proto = Config.PROTOCOL,
-    -- Hub generation lock (PROTOCOL 20). 1 = Red/Blue/Yellow, 2 = Gold.
-    generation = Gen.generation(game),
+    -- Hub generation lock (PROTOCOL 20; 3 from PROTOCOL 30). 1 = Red/Blue/
+    -- Yellow, 2 = Gold/Silver/Crystal, 3 = FireRed/LeafGreen/Emerald.
+    generation = generation,
+    -- The cart (PROTOCOL 30): "firered", "leafgreen" or "emerald".  One Gen 3
+    -- hub seats all three, and their overworld graphics share no player name
+    -- -- FireRed's hero is OBJ_EVENT_GFX_RED_NORMAL, Emerald has no such
+    -- graphic -- so everyone else's copy reads our `sprite` against the cart
+    -- it came from (Gen3.viewerGfxFor, contract C3). Gen 2 also names its cart
+    -- so the referee can distinguish Crystal's damage rules from Gold/Silver.
+    -- Gen 1 keeps its existing hello.
+    version = generation >= 2 and Gen.version(game) or nil,
     name = name,
     -- Persistent identity (PROTOCOL 16). Hub uses this as client.id and the
     -- rank-board key. Minted once per install; survives CONTINUE via file.
@@ -1641,6 +1932,15 @@ function M.saveLoaded()
   -- this is true of a single-player copy that never saw a hub, which is
   -- exactly the copy most likely to be in one of these fights.
   pcall(solo.reset, solo)
+  -- Gen 3: what a finished divert still owed the field it was fought on (a
+  -- trainer script's resume, a whiteout's warp) is dropped with the file it
+  -- was owed to -- a Gen 3 CONTINUE raises this *after* the new map is up, and
+  -- the queue would otherwise run the old save's steps in it. The session
+  -- check inside the queue says the same for a return to the title, which
+  -- raises no event; this is the prompt answer. (Any stand-in co-op still
+  -- holds is let go by the leave below, and does nothing to a save it was not
+  -- met in -- CoopField's Stand:fightAlone.)
+  if Gen3.active() then pcall(CoopField.resetDeferred3) end
   M.leave()
   M.restoreLook()
   M.syncLook()
@@ -1752,6 +2052,48 @@ local function runSpeed(frames, moveCtx)
   end
   return math.max(1, math.floor(frames / Config.RUN_DIVISOR)), true
 end
+
+-- ------- running, on a Gen 3 boot
+--
+-- movement.speed never fires on Gen 3, and there is nothing for it to do
+-- there: FireRed, LeafGreen and Emerald have running shoes and a bike of
+-- their own, so the cart already decides the pace.  What the wire still needs
+-- is the *flag* -- remote avatars take 8 frames a tile on a fast step
+-- (Config.FAST_STEP_FRAMES) and 16 otherwise -- so it is read off the step
+-- the game3 player module is taking instead of written by a wrap.
+--
+-- The module's fields (src/core/game3/player.lua beginStep): `running` is
+-- set for a run and for a FireRed bike step (Emerald's bikeStep clears it),
+-- `biking` for the whole ride on either cart, `stepFrames` is this step's
+-- length (16 walk, 8 run, 4 bike, 32 a ledge).
+-- `running` is cleared the moment the step lands, before world.stepped is
+-- raised, so the flag can only be read *during* a step -- which is why this
+-- samples on the fixed step while `moving` is true rather than on the event.
+--
+-- Answers nil while no step is under way, so the last step's pace stands --
+-- the same "the last step, not the button" rule the Gen 1 wrap keeps.  A
+-- ledge hop and a surf mount / dismount are neither fast nor worth a pace
+-- change (the 32-frame jump is the engine's, and an avatar replaying it as a
+-- walk is the honest approximation); surfing is a 16-frame step like
+-- walking, exactly as on Gen 1.
+local GEN3_WALK_FRAMES = 16
+
+function M.gen3StepPace(player)
+  if type(player) ~= "table" or player.moving ~= true then return nil end
+  if player.jumping or player.surfHopping or player.dismounting then return false end
+  if player.surfing then return false end
+  if player.biking == true or player.running == true then return true end
+  local frames = tonumber(player.stepFrames)
+  return frames ~= nil and frames < GEN3_WALK_FRAMES
+end
+
+local function sampleGen3Pace()
+  if not Gen3.inField() then return end
+  local fast = M.gen3StepPace(Gen3.engine("src.core.game3.player"))
+  if fast ~= nil then M.fastNow = fast end
+end
+-- For the suite, which drives it against the engine's own player module.
+M.sampleGen3Pace = sampleGen3Pace
 
 -- ------- presence
 
@@ -2283,6 +2625,271 @@ local function stirEntropy(dt)
     loveRandom and loveRandom() or delta)
 end
 
+-- ------- Gen 3: taking the cart's fights over
+--
+-- A Gen 1 / Gen 2 boot diverts on `screen.pushed` (see the listener in
+-- M.install): the engine pushes its battle and co-op / solo stand in for it.
+-- A Gen 3 boot raises no screen events and runs its battles as modules, so the
+-- divert happens where the fight is *started* instead, one step earlier:
+--
+--   * a wild at `encounter.roll` (the public hook the step encounter goes
+--     through, src/core/game3/encounters.lua): the hook answers nil and the
+--     cart never starts the fight;
+--   * a trainer at BattleBridge.start (the trainerbattle opcode's fight
+--     entry, wrapped by CoopField.installStart3 -- see its header for why the
+--     `script.command` hook cannot do this alone): the wrapper takes the
+--     fight and hands the opcode's own `done(result)` the mod's result.
+--
+-- Both build CoopField's stand-in (kind, enemyParty, trainer, onFinish,
+-- fightAlone -- the buried BattleState's shape) and offer it exactly as the
+-- Gen 1 / Gen 2 listener offers a pushed battle: co-op first, solo over what
+-- co-op handed back. The stand-in goes up as a cover layer first, so co-op's
+-- wait for the partner has a frozen field and the cart's own "Wild X
+-- appeared!" in front of it, as the engine's intro is on Gen 1 / Gen 2.
+-- Declined by both, the cover comes down and the cart's fight runs untouched:
+-- the hook returns the encounter it rolled, the wrapper calls the original.
+local gen3Divert = { on = false, installed = false, tried = 0, rolled = false }
+
+-- Would anybody take a fight of this kind, met on `mapId`, right now?  Asked
+-- before anything is built, so a player nobody would divert for never has a
+-- foe rolled twice: a wild asks co-op's own gates (Coop:wouldTakeWild -- every
+-- partner here and free), because a partied player whose partner is on
+-- another map is exactly the one co-op declines after the monster is built.
+-- A trainer is still offered to co-op whenever NPC is on: a partner who is
+-- away is *told* so ("was too far to join!"), and building a trainer's team
+-- takes nothing from the RNG (the cart's name-hash personalities, the row's
+-- own IVs).
+--
+-- The answer says who is listening (CoopField's doors read it): "solo" when
+-- SOLO BATTLES is on -- every kind solo takes is built, and co-op is still
+-- offered first the plain ones it fights -- and `true` when only co-op is, so
+-- a Safari wild, a legend, a facility or a lesson (Config.COOP_REFUSED_GEN3)
+-- is refused before its monster is rolled and stays the cart's.
+local function wantsDivert3(kind, mapId)
+  if solo:isOn() then return "solo" end
+  if not (transport:isReady() and party:has()) then return false end
+  if coop.running then return false end
+  if kind == "wild" then
+    if mapId == nil then
+      local current = World.current()
+      mapId = current and current.mapId
+    end
+    return coop:wouldTakeWild(mapId)
+  end
+  return coop:wantsNpc()
+end
+
+-- The Gen 3 twin of offerFight (M.install): true when co-op or solo took the
+-- fight, which is then theirs to finish (or hand back).
+--
+-- Co-op is offered the stand-in itself (the buried-battle shape its whole
+-- flow is written against) -- and only a stand-in of a kind it fights: one
+-- CoopField marked `coopRefused3` (a Safari wild, a roamer, a legend, a
+-- facility, a lesson, a pair, Steven) goes straight to solo, with no cover
+-- and no wait, because nothing would come of either.  Solo is offered what
+-- src/SoloBattle.lua's Gen 3 entries take -- the rolled encounter, or the
+-- trainer's foe record and the engine's battle opts -- with `done` (the
+-- engine's own continuation: the trainer script's resume, which it calls
+-- once, after its rewards and whiteout), `fallback` (the stand-in's
+-- fightAlone, the one way it hands a fight back) and `stand3` (the stand-in
+-- itself: `kind3`, `facility3`, `tutorial3` and each kind's fields -- see
+-- CoopField's door builders). The cover is down before solo is asked: its
+-- screen is its own.
+local function offerFight3(stand, kind, soloArgs)
+  local game = ctx.game
+  local coopMay = not stand.coopRefused3
+  if coopMay and not stand:push(game) then
+    mod.log:warn("could not hold the field for a %s divert; this one is fought "
+      .. "the ordinary way", kind)
+    return false
+  end
+  local current = World.current()
+  local mapId = stand.mapId or (current and current.mapId)
+  local connected = transport:isReady()
+  local taken = false
+  if connected and coopMay then
+    local ok, err = pcall(function()
+      if kind == "trainer" then
+        taken = coop:onTrainerBattle(game, stand, mapId) == true
+      else
+        taken = coop:onWildEncounter(game, stand, mapId) == true
+      end
+    end)
+    if not ok then
+      -- Not read as a refusal when co-op had already claimed the stand-in
+      -- (its wait is out, and its own clock hands the fight back through
+      -- Coop:release) -- the listener's posture on Gen 1 / Gen 2, for the
+      -- same reason: a second owner is worse than the ordinary fight.
+      local claimed = coop.encounter ~= nil and coop.encounter.engine == stand
+      mod.log:warn("the co-op divert failed (%s); this %s is fought the "
+        .. "ordinary way -- the battle itself is unaffected", tostring(err),
+        kind == "trainer" and "trainer" or "encounter")
+      if claimed then return true end
+      taken = false
+    end
+  end
+  if taken then return true end
+  if coopMay then stand:takeDown() end
+  if not solo:isOn() then return false end
+  local ok, err = pcall(function()
+    local opts = {}
+    for k, v in pairs(soloArgs.opts or {}) do opts[k] = v end
+    opts.mapId = mapId
+    opts.done = soloArgs.done or function() end
+    opts.fallback = function() stand:fightAlone() end
+    -- The monsters the stand-in already built (`opts.party`, and a wild's
+    -- `enc.mon`), so solo fights the very ones the cover announced and the
+    -- RNG is rolled for them once -- not once here and again in SoloBattle.
+    opts.party = stand.enemyParty
+    -- What kind of fight it is, and everything the kind carries
+    -- (docs/plans/gen3-solo-remaining-fights.md C1).
+    opts.stand3 = stand
+    -- The Safari Zone puts no key on a step encounter (battle_bridge derives
+    -- it from the session): the stand-in says so, and solo is told in the
+    -- words the engine's own start would have used.
+    if stand.safari then opts.safari = true end
+    if kind == "trainer" then
+      taken = solo:fromGen3Trainer(game, soloArgs.foe, opts) == true
+    else
+      local enc = soloArgs.enc
+      local lead = stand.enemyParty and stand.enemyParty[1]
+      if type(enc) == "table" and lead then
+        local withMon = {}
+        for k, v in pairs(enc) do withMon[k] = v end
+        withMon.mon = lead
+        if stand.safari then withMon.safari = true end
+        enc = withMon
+      end
+      taken = solo:fromGen3Encounter(game, enc, opts) == true
+    end
+  end)
+  if not ok then
+    mod.log:warn("the solo battle divert failed (%s); this %s is fought on "
+      .. "the game's own battle screen instead -- the battle itself is "
+      .. "unaffected; turn SOLO BATTLES off in the mod manager (F10) if it "
+      .. "keeps happening", tostring(err),
+      kind == "trainer" and "trainer" or "encounter")
+    taken = false
+  end
+  -- Solo's fight begins as it is taken; co-op's begins when the join lands
+  -- (Coop:startBattle). Either way the start's bookkeeping runs once, for a
+  -- fight the mod is actually fighting (CoopField's Stand:begin3).
+  if taken then pcall(stand.begin3, stand) end
+  return taken
+end
+
+-- The wild door: `encounter.roll`'s own result, and whether to cancel it.
+-- `want` is wantsDivert3's answer ("solo": SOLO BATTLES is listening).
+local function divertWild3(enc, rollCtx, want)
+  local game = ctx.game
+  local stand
+  stand = CoopField.wildStand3(enc, {
+    game = game,
+    mapId = rollCtx and rollCtx.mapId,
+    solo = want == "solo",
+    -- Handing the encounter back is starting the cart's fight with the very
+    -- monster the cover announced, the way the step that rolled it would
+    -- have: its personality, IVs, nature, held item and moves ride on the foe
+    -- row (SoloBattle.gen3HandedFoe, the row solo's own hand-back builds) --
+    -- the engine re-rolls whatever the row leaves out, and a monster the
+    -- player may already have fought would come back a different one.
+    --
+    -- Marked as a hand-back (CoopField.HANDBACK3): startWild calls the
+    -- module's `start`, which is CoopField's own wrapper, and the wrapper
+    -- would otherwise offer the fight to a divert again -- a co-op wait that
+    -- timed out opened the same wait, and timed out, and opened it again.
+    fightAlone = function()
+      local BB = Gen3.engine("src.core.game3.battle_bridge")
+      local Runtime = Gen3.engine("src.core.game3.runtime")
+      if not (BB and type(BB.startWild) == "function") then
+        error("no BattleBridge.startWild on this build")
+      end
+      local lead = stand and stand.enemyParty and stand.enemyParty[1]
+      local foe = SoloBattle.gen3HandedFoe({
+        species = tonumber(enc.speciesId) or tonumber(enc.species),
+        level = enc.level, item = enc.item,
+        personality = enc.personality, moves = enc.moves,
+      }, lead)
+      -- A roamer goes back as one (LEG §3.4): the engine's finish banks its
+      -- HP and moves it on only for a start that says `roamer`
+      -- (battle_bridge.lua Roamer.onBattleEnd), with the save's descriptor
+      -- as the encounter carried it -- and the HP and status the monster the
+      -- cover announced was built with.
+      if enc.roamer and lead then
+        foe.roamer, foe.foe = true, enc.foe
+        foe.hp, foe.status, foe.sleep = lead.hp, lead.status, lead.sleep
+      end
+      return BB.startWild(Runtime and Runtime._mod, (Runtime and Runtime._game) or game,
+        foe, { [CoopField.HANDBACK3] = true })
+    end,
+  })
+  if not stand then return false end
+  -- The cart resets its encounter rate modifiers whenever a battle starts; a
+  -- fight the hook cancelled never reaches that line.
+  local Encounters = Gen3.engine("src.core.game3.encounters")
+  if Encounters and type(Encounters.resetRateModifiers) == "function" then
+    pcall(Encounters.resetRateModifiers)
+  end
+  return offerFight3(stand, "wild", { enc = enc })
+end
+
+-- The trainer door, handed to CoopField.installStart3.
+local startHandler3 = {
+  wants = function(kind, mapId) return wantsDivert3(kind, mapId) end,
+  -- A step encounter `encounter.roll` just offered and handed back reaches
+  -- BattleBridge.startWild next, in the same call: it is not offered twice.
+  skipWild = function()
+    local rolled = gen3Divert.rolled
+    gen3Divert.rolled = false
+    return rolled
+  end,
+  take = function(stand, foe, opts, kind)
+    if kind == "wild" then
+      return offerFight3(stand, "wild", { enc = foe, opts = opts, done = opts and opts.done })
+    end
+    return offerFight3(stand, "trainer", { foe = foe, opts = opts, done = opts and opts.done })
+  end,
+}
+
+-- The TEACHY TV's door (CoopField.installPokedude3): the POKe DUDE's
+-- demonstrations start through battle/pokedude.lua, never BattleBridge.start,
+-- so they have a door of their own.  Solo's alone -- nobody joins a cutscene
+-- -- and only with SOLO BATTLES on; otherwise the TEACHY TV plays its own.
+local pokedudeHandler3 = {
+  wants = function() return solo:isOn() end,
+  game = function() return ctx.game end,
+  -- The screen solo is fighting this stand on, while it is (CoopField's
+  -- Stand:fightLive3 asks whether that screen is still on the modal stack):
+  -- what tells src/Borrow3.lua's save guard a borrowed party is really in a
+  -- fight, rather than left behind by one whose screen died.
+  holds = function(stand)
+    local g = solo.gen3
+    if type(g) == "table" and g.stand == stand and solo.fight ~= nil then return solo.fight end
+    return nil
+  end,
+  take = function(stand)
+    local enc = {}
+    for k, v in pairs(stand.encounter or {}) do enc[k] = v end
+    return offerFight3(stand, "wild", { enc = enc, opts = stand.opts, done = stand.doneFn })
+  end,
+}
+
+-- Per tick on Gen 3: the stand-ins' deferred work, and the BattleBridge wrap
+-- -- installed from the field rather than at load, because a headless load or
+-- a boot still on its menus has no battle bridge to reach (and Gen3.engine
+-- remembers a miss for the rest of the session).  The TEACHY TV wrap goes on
+-- in the same tick; a build without the TEACHY TV answers no, and nothing is
+-- lost.
+local function tickDivert3(game, dt)
+  pcall(CoopField.pump3, dt)
+  if gen3Divert.installed or gen3Divert.tried >= 3 then return end
+  if not (Gen3.inField() and type(game) == "table" and game.phase == "field") then return end
+  gen3Divert.tried = gen3Divert.tried + 1
+  local ok, installed = pcall(CoopField.installStart3, startHandler3)
+  gen3Divert.installed = ok and installed == true
+  if gen3Divert.installed then pcall(CoopField.installPokedude3, pokedudeHandler3) end
+end
+
 local function tick(game, dt)
   ctx.game = game
   dt = dt or 0
@@ -2336,6 +2943,12 @@ local function tick(game, dt)
     pcall(solo.reset, solo)
   end
 
+  -- Gen 3's half of the same exception, for the same reason: what a divert
+  -- owes the cart after the mod's fight (the trainer's script carried on, the
+  -- whiteout's warp) waits for the screen to be the field's again, and that
+  -- wait is not a hub's business. One table read on an empty queue.
+  if gen3Divert.on then tickDivert3(game, dt) end
+
   if not transport:isOpen() then return end
 
   for _, msg in ipairs(transport:update(dt)) do
@@ -2385,6 +2998,12 @@ local function tick(game, dt)
 
   if not transport:isReady() then return end
 
+  -- Gen 3's pace flag, read off the step in flight (see sampleGen3Pace).
+  -- Behind the ready gate like everything else here: nobody is told how fast
+  -- an offline player walks, and an installed-but-offline copy should cost
+  -- nothing.  One flag read on Gen 1 and Gen 2.
+  if Gen3.active() then sampleGen3Pace() end
+
   -- Ageing the corner, where the bubbles used to be aged.  Toasts expire on
   -- the fixed step rather than on drawn frames, so a line stays up for the
   -- five seconds Config says and not for however many frames the machine
@@ -2428,6 +3047,135 @@ local function tick(game, dt)
   ctx.avatars:sync(ctx.roster, World.current())
 end
 
+-- ------- Gen 3's window-space battle pass
+--
+-- src/Gen3Ui.lua owns the widescreen battle states on a Gen 3 boot and draws
+-- them in window space from render.hud (see the wrap below).  Resolved on the
+-- first Gen 3 frame rather than at the top of this file, so a Gen 1 or Gen 2
+-- boot never has to load the Gen 3 toolkit to install the mod, and resolved
+-- once: a toolkit that is missing or has no drawWidescreen is remembered as
+-- such instead of being looked for sixty times a second.
+local gen3Ui, gen3UiTried = nil, false
+local widescreenWarned = false
+
+local function drawWidescreen3(viewport)
+  if not gen3UiTried then
+    gen3UiTried = true
+    local ok, toolkit = pcall(need, "Gen3Ui")
+    if ok and type(toolkit) == "table" and type(toolkit.drawWidescreen) == "function" then
+      gen3Ui = toolkit
+    end
+  end
+  if not gen3Ui then return end
+  local ok, err = pcall(gen3Ui.drawWidescreen, viewport)
+  if not ok and not widescreenWarned then
+    -- Once: a draw that throws throws every frame, and the arena it would
+    -- have drawn is the whole of the damage -- the battle underneath is
+    -- still being fought and still takes input.
+    widescreenWarned = true
+    mod.log:warn("could not draw the widescreen battle view (%s); the battle "
+      .. "carries on underneath -- turn CLASSIC BATTLE UI on in the mod "
+      .. "manager (F10) to fight on the cart's own screen", tostring(err))
+  end
+end
+
+-- ------- the MMO row on a Gen 3 START menu
+--
+-- src/ui/game3/start_menu.lua runs ui.start_menu.items over its freshly
+-- built rows on every open and dispatches a row's own onSelect(game,
+-- session) when it has one.  Its rows are { id, label } where the label is
+-- the cart's own text (RomText), so the MMO row is anchored on the SAVE row's
+-- *id* (Config.GEN3_START_ANCHOR_ID) -- a label anchor would miss on every
+-- language the cart ships in.
+--
+-- Only where that anchor exists.  The normal field menu has SAVE on both
+-- carts; the cable club, the Union Room, the Safari Zone and Emerald's
+-- Battle Pike / Pyramid / multi-partner rooms do not, and they are either the
+-- cart's own link session or a challenge the cart deliberately trims the menu
+-- for -- no place to open a second online session from.  Never on a
+-- *tutorial* menu (StartMenu.show{ tutorial = true }, the script-driven
+-- "which item?" menu -- Emerald builds it from tutorialEntries, FireRed from
+-- its ordinary rows, SAVE included): that one hands the script the cursor
+-- index, and a row slipped into it would shift every answer after it.
+local function gen3StartRows(rows)
+  local StartMenu = Gen3.engine("src.ui.game3.start_menu")
+  if StartMenu and (StartMenu._tutorial == true or StartMenu._kind == "tutorial") then
+    return rows
+  end
+  local anchor
+  for i, row in ipairs(rows) do
+    if type(row) == "table" then
+      -- already there (another pass of this hook over the same list)
+      if row.id == Config.GEN3_START_ROW_ID then return rows end
+      if anchor == nil and row.id == Config.GEN3_START_ANCHOR_ID then anchor = i end
+    end
+  end
+  if not anchor then return rows end
+  table.insert(rows, anchor, {
+    id = Config.GEN3_START_ROW_ID,
+    label = "MMO",
+    onSelect = function(game) M.openFromStartMenu(game) end,
+  })
+  return rows
+end
+
+-- The row's action: take START down, put MAIN up.
+--
+-- The start menu stays open under a row that has its own onSelect (it only
+-- closes itself for the rows it handles), so it is closed here -- silently,
+-- because confirm() already played the select sound -- and then MAIN goes up
+-- as the top layer.  Leaving START under it would put two menus on the stack
+-- with only the top one answering, and MAIN's own B (Ui.reopenStartMenu)
+-- would then find a START that is already "open" and leave the player with
+-- nothing to press.  The layer is popped by id as well, for a start menu
+-- module that answered close() without taking its layer down.
+function M.openFromStartMenu(a, b)
+  local game = arg1(a, b) or ctx.game
+  local StartMenu = Gen3.engine("src.ui.game3.start_menu")
+  if StartMenu and type(StartMenu.close) == "function" then
+    local ok, err = pcall(StartMenu.close, true)
+    if not ok then
+      mod.log:warn("could not close the START menu (%s); the MMO menu opens "
+        .. "over it -- press B twice to get back to the field", tostring(err))
+    end
+  end
+  local Stack = Gen3.stack()
+  local startId = Gen.startMenuId(game)
+  if Stack and type(Stack.has) == "function" and Stack.has(startId) then
+    Stack.pop(startId)
+  end
+  local ok, err = pcall(pushScreen, game, Ui.SCREEN.MAIN)
+  if not ok then
+    mod.log:warn("could not open the MMO menu (%s) -- reinstall the mod "
+      .. "folder so src/Gen3Ui.lua is present, then open START > MMO again",
+      tostring(err))
+    return false
+  end
+  return true
+end
+
+-- ------- Gen 3 map entry, and the order Game3 raises it in
+--
+-- On Gen 1 and Gen 2 a CONTINUE says save.loaded and *then* map.entered, so
+-- everything that tears the last world down runs before anything that wears
+-- the new one.  Game3 says them the other way round: _enterField loads the
+-- map (map.entered) and only then emits save.loaded (Game3.lua continue path)
+-- -- unless FireRed's quest-log recap plays first, which puts them back in
+-- the Gen 1 order.  So on Gen 3 the map-entry work is run again after the
+-- save's teardown whenever the field is already up by then; with the recap,
+-- the field is not up yet (phase "quest_log"), World.current() answers nil,
+-- and the ordinary map.entered that follows does the work instead.
+local function enteredMap()
+  pushPresence(true)
+  M.refreshLook()
+  -- A partner's NPC invite that arrived while we were off-map (or that we
+  -- walked onto) becomes the same confirm a same-map offer raises on sight.
+  local current = World.current()
+  if current and ctx.game then
+    coop:considerOffer(ctx.game, current.mapId)
+  end
+end
+
 -- ------- install
 
 function M.install()
@@ -2457,7 +3205,7 @@ function M.install()
   -- can see and change it, not so this read works.
   Config.applyPort(mod.options:get("port"))
 
-  mod.options:define({
+  local rows = {
     -- The cap the host picks. min/max make the row itself refuse anything
     -- outside 2..64, so the clamp in Config is a backstop against a hand
     -- edited options file rather than the only guard.
@@ -2530,9 +3278,57 @@ function M.install()
     -- that read it cannot drift.
     { key = ClassicBattle.OPTION, label = ClassicBattle.OPTION_LABEL,
       type = "toggle", default = Config.CLASSIC_BATTLE_UI_DEFAULT },
-  })
+  }
+  -- No B TO RUN row on a Gen 3 boot.  The row is the switch for the
+  -- movement.speed wrap below, which FireRed, LeafGreen and Emerald never
+  -- call -- those carts have Running Shoes of their own, so the row would be
+  -- a switch wired to nothing, offered to exactly the players whose B already
+  -- runs.  A stored value is left alone: dropping a row from the schema drops
+  -- nothing from the player's options, and a Gen 1 boot of the same copy
+  -- reads it back.
+  if Gen3.active() then
+    for i = #rows, 1, -1 do
+      if rows[i].key == "run" then table.remove(rows, i) end
+    end
+  end
+  mod.options:define(rows)
 
   ui:install()
+
+  -- Gen 3's solo fight families (src/Solo3/*.lua: the legends, the
+  -- facilities, the pairs, the first battles...) read now, at boot, rather
+  -- than the first time a Safari wild or a Frontier hall is met -- so a
+  -- family that does not load is said once here, naming its file and what to
+  -- do, not in the middle of the fight it was meant for.  A family whose
+  -- file is not there is skipped silently (SoloBattle reads a file through
+  -- mod:read before it asks the resolver for it), and one that fails is
+  -- skipped with its warning: its fights are the cart's.  Guarded twice over,
+  -- because nothing about an optional family may stop the mod installing.
+  if Gen3.active() and type(SoloBattle.loadKinds3) == "function" then
+    local ok, err = pcall(SoloBattle.loadKinds3)
+    if not ok then
+      mod.log:warn("the solo battle families could not be read at start-up (%s); those "
+        .. "fights are fought the ordinary way -- reinstall the mod folder so every file "
+        .. "under src/Solo3/ is present", tostring(err))
+    end
+  end
+
+  -- Gen 3: the save backstop for what a fight borrowed from the save (the
+  -- TEACHY TV's party and bag, the tutorials' bags -- src/Borrow3.lua).  A
+  -- `save.write` link that gives back a borrow whose fight is gone before the
+  -- file is written, and refuses the write while one is really still running.
+  -- Once, at load: a hot reload is a new load, whose link replaces this one
+  -- and whose ledger epoch makes every record of this load stale.  Gen 3 only:
+  -- Red and Gold borrow nothing from the save, and their saves stay off the
+  -- hooked path.
+  if Gen3.active() then
+    local ok, err = pcall(Borrow3.install)
+    if not ok then
+      mod.log:warn("the save guard for battles could not be installed (%s); do not save "
+        .. "during a TEACHY TV demonstration or a tutorial battle -- reinstall the mod "
+        .. "folder so src/Borrow3.lua is present", tostring(err))
+    end
+  end
 
   -- One game-logic tick.  This runs before queued button edges are
   -- promoted, which is the documented place for a tool that has to act once
@@ -2674,6 +3470,34 @@ function M.install()
     end
   end
 
+  -- Gen 3: the step encounter's own hook (see "Gen 3: taking the cart's
+  -- fights over" above). Registered on a Gen 3 boot only: on Gen 1 / Gen 2 a
+  -- wrap here would put the encounter path onto the hooked branch for a hook
+  -- that has nothing to do there.
+  if Gen3.active() then
+    gen3Divert.on = true
+    mod.hooks:wrap("encounter.roll", function(next, tbl, rollCtx)
+      local enc = next(tbl, rollCtx)
+      if enc == nil then return nil end
+      gen3Divert.rolled = false
+      local want = wantsDivert3("wild", rollCtx and rollCtx.mapId)
+      if want then
+        local ok, taken = pcall(divertWild3, enc, rollCtx, want)
+        if not ok then
+          mod.log:warn("the wild divert failed (%s); this encounter is fought "
+            .. "the ordinary way", tostring(taken))
+        elseif taken then
+          return nil
+        end
+      end
+      -- Handed back: the step starts the cart's fight with it in a moment,
+      -- through BattleBridge.startWild -- which the start wrap must not offer
+      -- a second time.
+      gen3Divert.rolled = true
+      return enc
+    end)
+  end
+
   mod.events:on("screen.pushed", function(payload)
     local state = payload and payload.state
     if not state then return end
@@ -2760,8 +3584,27 @@ function M.install()
   -- Toasts last, so a line the player is meant to read is never underneath a
   -- nameplate: they share the top-left corner in the fallback layout, and the
   -- transient one has to win.
+  --
+  -- Gen 3 hands this hook a thinner viewport and one extra job.  Game3's
+  -- _drawHud builds it from Display.fit with no dpiX / dpiY (Gen 1 and
+  -- Gen 2 carry both), so they are filled with 1 -- the letterbox scale is
+  -- already the whole of the pixel ratio there -- before anything reads them.
+  -- And the widescreen battle states Gold draws through its own seam are
+  -- drawn from here on Gen 3 (Gen3Ui.drawWidescreen): render.hud is the one
+  -- window-space surface a Game3 frame offers, and it runs after the 240x160
+  -- UI pass, so an arena drawn here sits over the stack layer that is
+  -- holding the field still underneath it.  Nameplates and toasts come after
+  -- it, as they come after Gold's arena.  It also fires on the title screen
+  -- there, which every draw below already answers with nothing.
   mod.hooks:wrap("render.hud", function(next, game, viewport)
     local result = next(game, viewport)
+    if Gen3.active() then
+      if type(viewport) == "table" then
+        if viewport.dpiX == nil then viewport.dpiX = 1 end
+        if viewport.dpiY == nil then viewport.dpiY = 1 end
+      end
+      drawWidescreen3(viewport)
+    end
     overlay:draw(game, viewport)
     toast:draw(viewport)
     return result
@@ -2786,6 +3629,9 @@ function M.install()
   mod.hooks:wrap("ui.start_menu.items", function(next, game, items)
     local out = next(game, items)
     if type(out) ~= "table" then return out end
+    -- Gen 3 rows are { id, label, onSelect(game, session) } with ROM-text
+    -- labels; see gen3StartRows for the anchor and where the row is left out.
+    if Gen3.active() then return gen3StartRows(out) end
     return mod.ui.insertBefore(out, "SAVE", {
       label = "MMO",
       -- Gen 2 Menu Account draws desc for the highlighted row; without it the
@@ -2804,7 +3650,7 @@ function M.install()
             pcall(function() top:close() end)
           end
         end
-        mod.ui.push(game, Ui.SCREEN.MAIN)
+        pushScreen(game, Ui.SCREEN.MAIN)
       end,
     })
   end)
@@ -2813,16 +3659,7 @@ function M.install()
   -- describe, so it is announced the moment it lands instead of waiting for
   -- the next interval.
   mod.events:on("player.warped", function() pushPresence(true) end)
-  mod.events:on("map.entered", function()
-    pushPresence(true)
-    M.refreshLook()
-    -- A partner's NPC invite that arrived while we were off-map (or that we
-    -- walked onto) becomes the same confirm a same-map offer raises on sight.
-    local current = World.current()
-    if current and ctx.game then
-      coop:considerOffer(ctx.game, current.mapId)
-    end
-  end)
+  mod.events:on("map.entered", function() enteredMap() end)
 
   -- Facing a remote player and pressing A opens the same menu the roster
   -- does.  The engine's talkTo has already run by this point and found
@@ -2833,6 +3670,11 @@ function M.install()
   -- has a scriptKey. Avatar NPCs are scriptless, so Gold falls through to
   -- kind="none" after freezing them -- still the face-cell coords. Accept
   -- both; roster:at decides whether a remote player is there.
+  --
+  -- Gen 3 reaches here with kind="npc" at the avatar's own cell
+  -- (src/core/game3/field.lua raises it after world.talk for an object that
+  -- has a script; src/Avatars.lua gives every avatar one and answers that
+  -- talk itself, so the cart runs nothing), which is the same lookup.
   mod.events:on("world.interacted", function(payload)
     -- An A-press is a human deciding to press A, which is the least
     -- predictable timing this process ever sees; it goes into the pool
@@ -2843,7 +3685,7 @@ function M.install()
     if not transport:isReady() then return end
     local player = ctx.roster:at(payload.mapId, payload.x, payload.y)
     if player and ctx.game then
-      mod.ui.push(ctx.game, Ui.SCREEN.ACTIONS, { playerId = player.id })
+      pushScreen(ctx.game, Ui.SCREEN.ACTIONS, { playerId = player.id })
     end
   end)
 
@@ -2885,7 +3727,14 @@ function M.install()
   -- hosting, the listener has to come down with it rather than serving a
   -- world nobody is standing in. The character goes with the save too: the
   -- one being loaded may have chosen somebody else, or nobody.
-  mod.events:on("save.loaded", function() M.saveLoaded() end)
+  --
+  -- Gen 3 raises save.loaded *after* the continue's map.entered (see
+  -- enteredMap), so the map-entry work that teardown just undid -- the look
+  -- above all -- is done again once it has run, if the field is already up.
+  mod.events:on("save.loaded", function()
+    M.saveLoaded()
+    if Gen3.active() and World.current() then enteredMap() end
+  end)
 
   -- NEW GAME needs the very same resync, and it does not announce itself the
   -- same way: starting a fresh file emits save.created, never save.loaded, so

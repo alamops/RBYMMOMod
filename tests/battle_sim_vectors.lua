@@ -256,6 +256,9 @@ each("damage", function(input)
       stab = input.stab,
       typeEffect = input.typeEffect,
       roll = orNil(input.roll),
+      -- Absent on most cases, and an absent key decodes to nil: Explosion's
+      -- after-scaling halving is a step only the explode cases take.
+      explode = orNil(input.explode),
     })
 end)
 
@@ -331,6 +334,166 @@ end
 each("status", function(input)
   local handler = STATUS[input.status]
   if not handler then error("no handler for status " .. tostring(input.status), 0) end
+  return handler(input)
+end)
+
+-- ------------------------------------------------------------------
+-- obedience
+-- ------------------------------------------------------------------
+--
+-- CheckForDisobedience's pieces, each fed the exact BattleRandom sequence the
+-- case names: a scripted generator that hands the bytes out in order and
+-- throws past the end, so a piece that draws one byte too many fails rather
+-- than reading a default -- and `draws` says how many it actually took, which
+-- is the half of the contract a verdict alone cannot show.
+
+local function scripted(bytes)
+  local used = 0
+  return {
+    byte = function()
+      used = used + 1
+      local b = bytes[used]
+      if b == nil then error("drew past the scripted bytes", 0) end
+      return b
+    end,
+    used = function() return used end,
+  }
+end
+
+local OBEDIENCE = {}
+
+function OBEDIENCE.cap(input)
+  local set = {}
+  for _, id in ipairs(input.badges) do set[id] = true end
+  return { cap = Status.obedienceCap(set) }
+end
+
+function OBEDIENCE.roll(input)
+  local rng = scripted(input.bytes)
+  local verdict = Status.obedienceRoll(input.level, input.cap, rng)
+  return { verdict = verdict, draws = rng.used() }
+end
+
+function OBEDIENCE.nap(input)
+  local rng = scripted(input.bytes)
+  local turns = Status.napTurns(rng)
+  return { turns = turns, draws = rng.used() }
+end
+
+function OBEDIENCE.loaf(input)
+  local rng = scripted(input.bytes)
+  local line = Status.loafLine(rng)
+  return { line = line, draws = rng.used() }
+end
+
+function OBEDIENCE.random(input)
+  local moves = {}
+  for i, pp in ipairs(input.pp) do
+    moves[i] = { pp = pp, ppUps = type(input.ppUps) == "table" and input.ppUps[i] or nil }
+  end
+  local rng = scripted(input.bytes)
+  local slot = Status.disobedientMove(moves, input.selected, input.disabled,
+    input.struggling, rng)
+  return { slot = slot, draws = rng.used() }
+end
+
+each("obedience", function(input)
+  local handler = OBEDIENCE[input.step]
+  if not handler then error("no handler for obedience step " .. tostring(input.step), 0) end
+  return handler(input)
+end)
+
+-- The nibble swap behind two of the rolls, over every byte: a bijection, and
+-- its own inverse.
+do
+  local seen, involution = {}, true
+  for b = 0, 255 do
+    local s = Status.swapNibbles(b)
+    seen[s] = true
+    if Status.swapNibbles(s) ~= b then involution = false end
+  end
+  local count = 0
+  for _ in pairs(seen) do count = count + 1 end
+  if count ~= 256 or not involution then
+    fail("obedience_swap", "swapNibbles is a self-inverse bijection", true, false)
+  else
+    passed = passed + 1
+  end
+end
+
+-- ------------------------------------------------------------------
+-- side effects
+-- ------------------------------------------------------------------
+--
+-- Red's side-effect odds (pokered engine/battle/effects.asm): the threshold
+-- table and its explicit override, the computer's extra stat-drop miss, and
+-- each routine run on one target with the exact bytes the case names -- the
+-- scripted generator above, so `draws` pins what a routine checks before it
+-- rolls as firmly as what it does after.
+
+local Effects = BattleSim.Effects
+
+-- W's reader for a K17 / K18 line, when Wire loads here; its mirror otherwise.
+local plainLine = BattleSim.Events.plain
+do
+  local loaded, Wire = pcall(need, "Wire")
+  if loaded and type(Wire) == "table" and type(Wire.plainBattleLine) == "function" then
+    plainLine = Wire.plainBattleLine
+  end
+end
+
+local SIDE = {}
+
+function SIDE.threshold(input)
+  local threshold = Effects.sideThreshold(input.effectId, input.chance)
+  return { threshold = threshold, proc = input.roll < threshold }
+end
+
+function SIDE.computerMiss(input)
+  return { miss = input.roll < Effects.COMPUTER_DROP_MISS }
+end
+
+-- TryRunningFromBattle's wild odds (Effects.runOdds; the referee's `_tryRun`):
+-- nil for a getaway that draws no byte, else a byte at or under them escapes.
+function SIDE.runOdds(input)
+  local odds = Effects.runOdds(input.playerSpeed, input.enemySpeed, input.attempts)
+  return { odds = odds, escaped = odds == nil or input.roll <= odds }
+end
+
+function SIDE.apply(input)
+  local t = input.target
+  local mon = {
+    species = "Beta", status = orNil(t.status), types = t.types,
+    substitute = orNil(t.substitute), confusion = orNil(t.confusion),
+    mist = orNil(t.mist) == true,
+    stats = { atk = 40, def = 40, spd = 40, spc = 40 },
+  }
+  Effects.ensureBattleStats(mon)
+  for key, value in pairs(type(t.stages) == "table" and t.stages or {}) do
+    mon.stages[key] = value
+  end
+  local rng = scripted(input.bytes)
+  local out = Effects.applySide({
+    effectId = input.effectId, chance = input.chance, rng = rng,
+    targetMon = mon, targetFighter = { slot = 3, side = "b" },
+    userFighter = { slot = 0, side = "a" },
+    moveType = orNil(input.moveType), poisonType = orNil(input.poisonType),
+    fireType = orNil(input.fireType), computerMover = orNil(input.computerMover) == true,
+  })
+  return {
+    proc = out.proc, draws = rng.used(), status = mon.status,
+    flinch = mon.flinch == true, confused = (mon.confusion or 0) > 0,
+    stage = input.stat and mon.stages[input.stat] or nil,
+    -- The line as a reader without K17's marks reads it (Wire.plainBattleLine,
+    -- or its mirror Events.plain where Wire does not load: no `^a` / `^b`,
+    -- each K18 break a space) -- the fixture's sentence.
+    said = plainLine(out.messages[1]),
+  }
+end
+
+each("side", function(input)
+  local handler = SIDE[input.step]
+  if not handler then error("no handler for side step " .. tostring(input.step), 0) end
   return handler(input)
 end)
 

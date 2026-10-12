@@ -134,6 +134,58 @@ function testLegacyEnvVars(tmp) {
   ok(result.config.maxPlayers === 12, 'RBY_MMO_MAX still sets maxPlayers');
 }
 
+// ------------------------------------------------------------ generation lock
+
+/*
+ * Hub generation is the closed set 1, 2, 3 (3 from PROTOCOL 30: FireRed,
+ * LeafGreen and Emerald on one hub). The failure this pins is the one it
+ * replaced: a `--generation 3` that config.js used to pull to 1 with a
+ * warning, so a host who asked for a Gen 3 hub ran a Gen 1 one that then
+ * admitted Red players and refused every one of their own.
+ */
+function testGeneration(tmp) {
+  for (const n of [1, 2, 3]) {
+    const checked = config.validate({ generation: n });
+    ok(checked.config.generation === n, `generation ${n} is kept as given`);
+    ok(!checked.warnings.some((w) => w.startsWith('generation')),
+      `generation ${n} draws no warning`);
+    const asText = config.validate({ generation: String(n) });
+    ok(asText.config.generation === n,
+      `generation "${n}" (an env var or a flag is a string) reads as ${n}`);
+  }
+
+  for (const bad of [0, 4, -3, 'gen3', 'three', true]) {
+    const checked = config.validate({ generation: bad });
+    ok(checked.config.generation === 1, `generation ${JSON.stringify(bad)} is pulled to 1`);
+    ok(checked.warnings.includes(`generation: "${bad}" is not 1, 2 or 3, using 1`),
+      `and named in a warning that lists all three (${JSON.stringify(bad)})`);
+  }
+
+  const omitted = config.validate({});
+  ok(omitted.config.generation === 1, 'an omitted generation is the Gen 1 compat default');
+  ok(omitted.warnings.includes(config.GENERATION_DEFAULT_WARNING),
+    'and says so once');
+  ok(/--generation 2/.test(config.GENERATION_DEFAULT_WARNING)
+    && /--generation 3/.test(config.GENERATION_DEFAULT_WARNING),
+    'the default warning names the Gen 2 and the Gen 3 flag');
+
+  // Every source can lock a Gen 3 hub: flag, env, file.
+  const missing = path.join(tmp, 'gen3-does-not-exist.json');
+  const byFlag = config.load({ path: missing, env: {}, flags: { generation: '3' } });
+  ok(byFlag.config.generation === 3, '--generation 3 locks a Gen 3 hub');
+  ok(!byFlag.warnings.includes(config.GENERATION_DEFAULT_WARNING),
+    'with no default-generation warning');
+  const byEnv = config.load({ path: missing, env: { RBY_MMO_GENERATION: '3' }, flags: {} });
+  ok(byEnv.config.generation === 3, 'RBY_MMO_GENERATION=3 locks a Gen 3 hub');
+  ok(byEnv.sources.generation === 'env', 'and is reported as coming from env');
+  const file = path.join(tmp, 'gen3.json');
+  writeConfig(file, { version: 1, generation: 3 });
+  const byFile = config.load({ path: file, env: {}, flags: {} });
+  ok(byFile.config.generation === 3, '"generation": 3 in config.json locks a Gen 3 hub');
+  const flagOverFile = config.load({ path: file, env: {}, flags: { generation: '1' } });
+  ok(flagOverFile.config.generation === 1, 'and a flag still beats the file');
+}
+
 // ------------------------------------------------------------------ clamping
 
 function testClamping() {
@@ -615,6 +667,7 @@ function main() {
   try {
     testPrecedence(tmp);
     testLegacyEnvVars(tmp);
+    testGeneration(tmp);
     testClamping();
     testBoundsNesting();
     testAuthThrottleKeys(tmp);

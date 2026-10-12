@@ -75,11 +75,16 @@ local floor = math.floor
 --                 brought and which are healthy / statused / down.  Ball
 --                 states and nothing else -- no species, no level, no moves --
 --                 which is exactly what the classic ball row reveals.
+--   held       -- a held item acted (Gold's one kind of its own, contract K3 of
+--                 docs/plans/gen12-referee-fidelity.md; Wire.BATTLE_EVENTS2):
+--                 whose, the item id, and whether the mon still holds it.  The
+--                 referee's own `msg` sentence follows it.
 M.KINDS = {
   msg = true, anim = true, damage = true, drain = true, faint = true,
   send = true, status = true, stat = true, switch = true, item = true,
   run = true, turn = true, over = true, wait = true, reconnect = true,
   chose = true, unchose = true, moves = true, exp = true, team = true,
+  held = true,
 }
 
 -- Every key an event may carry, and the type it carries.  `battle` and `seq`
@@ -100,6 +105,11 @@ M.KINDS = {
 -- `confused` is the fight-local volatile (not a Wire.STATUSES token): 1 on
 -- send when the newcomer is already confused, and 1/0 on a status event for
 -- inflict / snap-out. It never occupies `status`, so PSN and confusion coexist.
+--
+-- `stage` is a `stat` event's signed stat stage after the change, -6..6
+-- (contract K10 of docs/plans/gen12-referee-gaps-fix.md): `amount` rides
+-- beside it as it always did, but the wire's `amount` is unsigned, so a
+-- lowered stat reached the screen with no stage at all.
 M.FIELDS = {
   battle       = "string",
   seq          = "number",
@@ -118,6 +128,13 @@ M.FIELDS = {
   mon          = "number",
   team         = "string",
   confused     = "number",
+  stage        = "number",
+  -- Contract K22 of docs/plans/gen12-referee-remaining-gaps.md: an `anim`
+  -- that plays a move's clip for a beat that is not its user's own use of the
+  -- move (HandleWrap's trap move, ItemRecoveryAnim's RECOVER, DESTINY BOND's
+  -- and FUTURE SIGHT's hit, a charge's first turn) says `true` -- the screen
+  -- plays the look alone, no callout and no lunge.  Absent otherwise.
+  quiet        = "boolean",
 }
 
 -- ------------------------------------------------------------------
@@ -144,8 +161,10 @@ M.FIELDS = {
 -- field it has and is compared rather than sized, so a long fight is fine.
 M.SHAPES = {
   msg       = { text = true },
-  anim      = { slot = true, side = true, text = "move or ball-anim id",
-                amount = "shake count on SHAKE_ANIM (0-3)" },
+  anim      = { slot = true, side = true,
+                text = "move id, ball-anim id, or a cart status clip (`<X>_ANIM`, K20)",
+                amount = "shake count on SHAKE_ANIM (0-3); 1 on a charge's first turn",
+                quiet = "true when the clip is not the monster using its move (K22)" },
   damage    = { slot = true, side = true, amount = true, hp = "hp left",
                 status = "set when a residual dealt it" },
   drain     = { slot = true, side = true, amount = true, hp = true,
@@ -189,6 +208,10 @@ M.SHAPES = {
                 mon = "party index (0-5) of the mon banking this share; absent means the active one" },
   team      = { slot = "the seat whose roster this is", side = true,
                 team = "one token per party member, in party order: o / s / x" },
+  held      = { slot = true, side = true,
+                mon = "party index (0-5) of the mon whose item acted",
+                text = "the item id (not prose: a client matches it against its own save)",
+                amount = "1 the mon still holds `text` (or now does: Thief), 0 it holds nothing" },
 }
 
 -- ------------------------------------------------------------------
@@ -269,6 +292,29 @@ local function checkMoves(value)
 end
 
 -- ------------------------------------------------------------------
+-- battle lines (docs/plans/gen12-referee-remaining-gaps.md K17 / K18)
+-- ------------------------------------------------------------------
+--
+-- A `msg` line names a battler the cart prints through `<USER>` / `<TARGET>`
+-- with its side's mark before it -- `^a` or `^b`, never a glyph of a name --
+-- and carries the cart's `line` / `cont` as `\n`; each client prints the
+-- mark as its own cart would ("Enemy ", or nothing on its own side).
+-- Mirrored from Config.BATTLE_LINE_MAX / Wire.BATTLE_MARK rather than
+-- required, for the reason in the header: the cap a line is held to, marks
+-- (two glyphs) and breaks (one) included.
+M.BATTLE_LINE_MAX = 80
+
+-- The same line as one plain sentence: each mark gone -- a name mark (`^a`
+-- / `^b`) and a side-word mark (`^A` / `^B`, K17's wave-2 bullet: HandleScreens'
+-- "Your" / "Enemy") alike -- each break a space, none after a hyphen the cart
+-- split a word on.  Twin of Wire.plainBattleLine.
+function M.plainLine(text)
+  if type(text) ~= "string" then return text end
+  local plain = text:gsub("%^[abAB]", ""):gsub("%-\n", "-"):gsub("\n", " ")
+  return plain
+end
+
+-- ------------------------------------------------------------------
 -- construction
 -- ------------------------------------------------------------------
 
@@ -280,6 +326,11 @@ local function coerce(key, value)
     local n = tonumber(value)
     if not n or n ~= n then return nil end
     return floor(n)
+  end
+  -- A flag is kept only as `true`: `false` is the absence it would mean.
+  if want == "boolean" then
+    if value == true then return true end
+    return nil
   end
   if type(value) ~= "string" or value == "" then return nil end
   return value
@@ -305,6 +356,10 @@ function M.build(kind, fields)
       end
     end
   end
+  -- K17 / K18 ride the `msg` line alone: the sentence a `status` / `stat`
+  -- event carries beside it (a client's matcher reads it -- MediatedBattle
+  -- statFell) is the plain one, as Wire reads every kind but `msg`.
+  if kind ~= "msg" and type(out.text) == "string" then out.text = M.plainLine(out.text) end
   return out
 end
 

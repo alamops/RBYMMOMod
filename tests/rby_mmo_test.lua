@@ -148,24 +148,133 @@ for _, name in ipairs({ "save.loaded", "save.created" }) do
         .. "like a loaded one")
 end
 
--- ------- Dual-gen headless load (TT0)
+-- ------- Tri-gen headless load (TT0, extended by TT1)
 --
--- Wave 0 claimed games:["gen1","gen2"]. Both boots must reach loaded with
--- an empty error list through the real loader (generation opt selects the
--- Gen2Compat facade without a Gold ROM).
+-- The manifest claims games:["gen1","gen2","gen3"], so every boot it claims
+-- has to reach `loaded` with an EMPTY error list through the real loader:
+-- generation=1 (Red), generation=2 (selects the Gen2Compat facade without a
+-- Gold ROM), and generation=3 twice over -- FireRed and Emerald, which share
+-- one loader generation and differ by the cart GameVersion names (the
+-- launcher sets it before any mod loads) and by the layout the mod reads
+-- from it (frlg / rse).  The Gen 3 boots use the SDK's own synthetic Gen 3
+-- dataset; nothing here is read from a ROM.
+--
+-- The three gated-registry notes a Gen 3 boot used to carry ("registry has no
+-- Gen 3 target" for screens / sprites / battle_sprite_scales) were removed in
+-- wave 2, so on every generation an error is a regression rather than an
+-- expected note -- which is why the assertion is zero, not "only gated".
+--
+-- "loaded" is the weak half: a mod whose entry chunk installed nothing would
+-- still say so.  So each boot is also asked for what it claims to have put in
+-- the game -- the three seams every generation's client wires (the per-tick
+-- pump, the HUD overlay, the START menu row) -- and, on Gen 3, for what only a
+-- Gen 3 load can answer: the mod's own Gen module reads the boot as 3 and
+-- names the cart, the START row lands before SAVE on the cart's own menu, and
+-- the battlefield theatre opens for a Gen 3 table on a Gen 3 boot yet stays
+-- refused for the same table on a Red or Gold boot (Battlefield.enabled's
+-- gate; tests/gen3_battlefield.lua drives the theatre itself).
 do
-  for _, gen in ipairs({ 1, 2 }) do
-    local dual = T.sdk.loadMod("mods/rby_mmo", {
-      fs = enabledFs(),
-      generation = gen,
-    })
-    eq(#dual.errors, 0,
-       "generation=" .. gen .. " loads with no errors")
-    check(dual.mod ~= nil, "generation=" .. gen .. " finds the mod")
-    eq(dual.mod.state, "loaded",
-       "generation=" .. gen .. " reaches loaded")
-    dual.release()
+  local GameVersion = require("src.core.GameVersion")
+
+  -- The mod's modules through its own sandbox env and the real facade, the
+  -- way main.lua resolves them, so a cross-generation require would throw
+  -- exactly as it does in game.  A graph of its own: nothing is installed
+  -- twice and the loader's captured hook links stay the ones under test.
+  local function sandboxNeed(run)
+    local api = run.loader:_api(run.mod)
+    local env = run.loader:_modEnv(run.mod)
+    local cache = {}
+    local function sandboxed(name)
+      if cache[name] ~= nil then return cache[name] end
+      local body = api:read("src/" .. name .. ".lua")
+      local chunk = assert(env.loadstring(body, "@rby_mmo/src/" .. name .. ".lua"))
+      local value = chunk(sandboxed, api)
+      cache[name] = value == nil and true or value
+      return cache[name]
+    end
+    return sandboxed
   end
+
+  local cases = {
+    { label = "generation=1", gen = 1 },
+    { label = "generation=2", gen = 2 },
+    { label = "generation=3 (FireRed)", gen = 3, version = "firered", family = "frlg",
+      map = "FR_PALLET_TOWN" },
+    { label = "generation=3 (Emerald)", gen = 3, version = "emerald", family = "rse",
+      map = "EM_LITTLEROOT_TOWN" },
+  }
+
+  for _, case in ipairs(cases) do
+    local label, gen = case.label, case.gen
+    if case.version then GameVersion.set(case.version) end
+    local opts = { fs = enabledFs(), generation = gen }
+    if gen == 3 then opts.data = T.sdk.gen3Data() end
+    local tri = T.sdk.loadMod("mods/rby_mmo", opts)
+
+    eq(#tri.errors, 0, label .. " loads with no errors")
+    check(tri.mod ~= nil, label .. " finds the mod")
+    eq(tri.mod and tri.mod.state, "loaded", label .. " reaches loaded")
+
+    for _, hook in ipairs({ "input.step", "render.hud", "ui.start_menu.items" }) do
+      local chain = tri.loader.hooks.chains[hook]
+      check(chain ~= nil and #chain > 0, label .. " wraps " .. hook)
+    end
+
+    local sandbox = sandboxNeed(tri)
+    local Gen, Config, Battlefield = sandbox("Gen"), sandbox("Config"), sandbox("Battlefield")
+    local session = {
+      engine = "game3", generation = 3, version = case.version,
+      name = "ALEX", gender = 0, trainerId = 4321, secretId = 999, money = 3000,
+      dex = { seen = {}, owned = {}, caught = {} }, party = {},
+      flags = {}, vars = {}, map = case.map, x = 5, y = 6, facing = "down",
+    }
+    local game = { generation = gen, phase = "field", data = tri.data }
+    if gen == 3 then game.session = session end
+
+    -- The Gen 1 / Gen 2 answer for "no game yet" is 1 by design (a Gen 2
+    -- loader with no game has always read as Red and the Gold suites are
+    -- written against that), so only a Gen 3 load is asked to answer without
+    -- a game: the loader's word is the boot's truth there.
+    if gen == 3 then
+      eq(Gen.generation(), 3, label .. ": Gen.generation() answers 3 on a Gen 3 load with no game yet")
+    end
+    tri.loader.game = game
+    eq(Gen.generation(), gen, label .. ": Gen.generation() answers " .. gen .. " with a game in the loader")
+    eq(Gen.isGen3(), gen == 3, label .. ": Gen.isGen3() agrees")
+    check(Battlefield.enabled({ generation = 3 }) == (gen == 3),
+          label .. ": the theatre opens for a Gen 3 table only on a Gen 3 boot")
+    check(Battlefield.enabled({ data = {} }),
+          label .. ": ...and a Gen 1-shaped game enables it on every boot")
+
+    if gen == 3 then
+      eq(Gen.version(), case.version, label .. ": Gen.version() names the cart")
+      eq(Gen.family(), case.family, label .. ": Gen.family() names its layout")
+
+      local startLink = tri.loader.hooks.chains["ui.start_menu.items"][1].callback
+      local function passthrough(_, items) return items end
+      local items = {}
+      for _, id in ipairs({ "bag", "trainer", "save", "option", "exit" }) do
+        items[#items + 1] = { id = id, label = id:upper() }
+      end
+      local out = startLink(passthrough, game, items)
+      eq(#out, 6, label .. ": the START link adds one row to the cart's field menu")
+      eq(out[3] and out[3].id, Config.GEN3_START_ROW_ID, label .. ": ...the MMO row")
+      eq(out[4] and out[4].id, Config.GEN3_START_ANCHOR_ID, label .. ": ...directly before SAVE")
+      check(type(out[3] and out[3].onSelect) == "function",
+            label .. ": ...carrying its own onSelect for the cart's menu to dispatch")
+
+      local hudLink = tri.loader.hooks.chains["render.hud"][1].callback
+      local viewport = { width = 800, height = 600, gameX = 40, gameY = 60,
+                         gameWidth = 720, gameHeight = 480, scale = 3 }
+      eq(hudLink(function() return "drawn" end, game, viewport), "drawn",
+         label .. ": the render.hud link hands back what the chain drew")
+      eq(viewport.dpiX, 1, label .. ": ...having filled in the dpi Game3's viewport lacks")
+    end
+
+    tri.loader.game = nil
+    tri.release()
+  end
+  GameVersion.set("red")
 end
 
 -- ------- movement.speed: holding B on foot halves the step
@@ -696,6 +805,476 @@ local badTeam = Wire.battleEvent(
   { battle = "b1", seq = 5, t = "team", slot = 3, side = "b", team = "oo!" })
 check(badTeam ~= nil, "a malformed roster does not put a hole in the stream")
 eq(badTeam.team, nil, "...it just arrives with nothing to draw")
+end)()
+
+-- ------- Wire: the battle line's name marks and breaks (K17 / K18 of
+-- docs/plans/gen12-referee-remaining-gaps.md)
+--
+-- A Red / Gold referee writes `^a` / `^b` before a battler's name where the
+-- cart prints it through a prefixing macro, and `\n` where the cart's text has
+-- `line` / `cont`.  Wire.battleLine is the one reader that keeps them, cut at
+-- Config.BATTLE_LINE_MAX; chat keeps MESSAGE_MAX, Gen 3 lines and every name
+-- keep their old readers, and `^` reaches no name field.
+;(function()
+  eq(Config.BATTLE_LINE_MAX, 80, "a battle line is 80 glyphs, marks and breaks included")
+  eq(Config.MESSAGE_MAX, 60, "chat keeps its sixty")
+  eq(Wire.BATTLE_MARK, "^", "one mark glyph")
+  check(Wire.BATTLE_MARK_SIDES.a and Wire.BATTLE_MARK_SIDES.b and not Wire.BATTLE_MARK_SIDES.c,
+        "a mark names side a or side b, nothing else")
+  check(Wire.BATTLE_MARK_SIDES.A and Wire.BATTLE_MARK_SIDES.B and not Wire.BATTLE_MARK_SIDES.C,
+        "...and a side-word mark (K17, wave 2) side A or side B")
+
+  local line = Wire.battleLine
+  eq(line("^bRATTATA used\nTACKLE!"), "^bRATTATA used\nTACKLE!", "a mark and a break survive")
+  eq(line("  ^bX \n  used \n\n Y ! \n "), "^bX\nused\nY !",
+     "a space beside a break collapses into it; never leading, trailing or doubled")
+  eq(line("\n\nX\n"), "X", "a break alone at either end is dropped")
+  eq(line("^cX ^^aY ^"), "cX ^aY", "a ^ without its side letter is dropped, alone")
+  eq(line("^AX"), "^AX", "a side-word mark is kept as a name mark is")
+  eq(line("^BPOK\195\169MON's\nLIGHT SCREEN fell!"), "^BPOK\195\169MON's\nLIGHT SCREEN fell!",
+     "...either side (HandleScreens' `.Your` / `.Enemy`)")
+  eq(line("^C ^^BY"), "C ^BY", "...and a ^ before any other capital is dropped, alone")
+  eq(line(string.rep("A", 78) .. "^BXY"), string.rep("A", 78), "...cut as a name mark is")
+  eq(line("A\r\nB\tC"), "A\nBC", "a CR or a tab is no break")
+  eq(line(string.rep("A", 78) .. "^bXY"), string.rep("A", 78), "a cut leaving a nameless mark drops it")
+  eq(line(string.rep("A", 79) .. "^bXY"), string.rep("A", 79), "...and a letterless ^")
+  eq(line(string.rep("A", 79) .. " B"), string.rep("A", 79), "...and the gap it cut before")
+  eq(line(string.rep("A", 79) .. "\nB"), string.rep("A", 79), "...a break included")
+  eq(line(string.rep("X", 81)), string.rep("X", 80), "cut at BATTLE_LINE_MAX")
+  eq(line(string.rep("\195\169", 90)), string.rep("\195\169", 80), "counted in glyphs, not bytes")
+  eq(line("^aXY", 2), nil, "a line that is only a cut mark is no line")
+  eq(line(42), nil, "a non-string is no line")
+  eq(Wire.battleText("^aX\nY"), "aXY", "Wire.battleText keeps no mark and no break, as before")
+  eq(Wire.plainBattleLine("^aPIKA used\nTHUNDER on ^bONIX!"), "PIKA used THUNDER on ONIX!",
+     "the plain reading: marks gone, breaks spaces")
+  eq(Wire.plainBattleLine("It's super-\neffective!"), "It's super-effective!",
+     "a word split over two rows after a hyphen joins with no space")
+  eq(Wire.plainBattleLine(nil), nil, "not a string: back as it came")
+  eq(Wire.plainBattleLine("^APOK\195\169MON's\nLIGHT SCREEN fell!"), "POK\195\169MON's LIGHT SCREEN fell!",
+     "the plain reading drops a side-word mark too")
+  eq(Wire.plainBattleLine("^B^bX"), "X", "...all four of them")
+
+  local function msg(text, gen, t)
+    local e = Wire.battleEvent({ battle = "b1", seq = 1, t = t or "msg", text = text }, gen)
+    return e and e.text
+  end
+  for _, gen in ipairs({ 1, 2 }) do
+    eq(msg("^aPIKA's\nattack missed!", gen), "^aPIKA's\nattack missed!",
+       "a Gen " .. gen .. " msg keeps its marks and breaks")
+    eq(msg(string.rep("A", 70), gen), string.rep("A", 70), "...past MESSAGE_MAX, on Gen " .. gen)
+    for _, t in ipairs({ "run", "send", "chose" }) do
+      eq(msg("^aANN\nX", gen, t), "aANNX", "a " .. t .. "'s text is a name: no mark, no break")
+    end
+  end
+  eq(msg("^bRATTATA used\nTACKLE!", 3), "bRATTATA usedTACKLE!", "a Gen 3 msg reads as before")
+  eq(msg("^bRATTATA used\nTACKLE!"), "bRATTATA usedTACKLE!", "...and so does an unnamed reader's")
+  eq(msg(string.rep("A", 70), 3), string.rep("A", Config.MESSAGE_MAX), "...under MESSAGE_MAX")
+
+  -- `^` is never a name glyph.
+  local caret = "^aANN^b"
+  eq(Wire.name(caret), "aANNb", "a player name drops ^")
+  eq(Wire.text(caret), "aANNb", "so does chat")
+  eq(Wire.npcName(caret), "aANNb", "and an NPC trainer's name")
+  eq(Wire.moveName(caret), "aANNb", "and a move or item name")
+  eq(Wire.label(caret), "aANNb", "and a fight label")
+  eq(Wire.presence({ id = "p1", name = caret }).name, "aANNb", "and a presence's name")
+  local sheet1 = { species = caret, level = 5, hp = 10, maxHp = 10,
+                   stats = { atk = 9, def = 9, spd = 9, spc = 9 },
+                   moves = { { id = "T", pp = 5, power = 40, accuracy = 255, type = 0, effect = 0, chance = 0 } } }
+  eq(Wire.battleMon(sheet1).species, "aANNb", "and a monster's name")
+  eq(Wire.battleParty({ battle = "b1", mons = { sheet1 }, name = caret }, 1).name, "aANNb",
+     "and the party's trainer name")
+  for _, gen in ipairs({ 1, 2, 3 }) do
+    eq(Wire.battleEvent({ battle = "b1", seq = 1, t = "exp", species = caret, level = 5,
+                          participants = 1 }, gen).species, "aANNb",
+       "and an exp event's species, generation " .. gen)
+  end
+end)()
+
+-- ------- Wire: the computer's item / switch facts on an NPC party (K16) and
+-- Gold's LURE / HEAVY BALL inputs (K21)
+;(function()
+  local move = { id = "T", pp = 5, power = 40, accuracy = 255, type = 0, effect = 0, chance = 0 }
+  local sheet1 = { species = "A", level = 5, hp = 10, maxHp = 10,
+                   stats = { atk = 9, def = 9, spd = 9, spc = 9 }, moves = { move } }
+  local sheet2 = { species = "A", level = 5, hp = 10, maxHp = 10,
+                   stats = { atk = 9, def = 9, spe = 9, spa = 9, spd = 9 }, moves = { move } }
+  local function party(extra, gen)
+    local raw = { battle = "b1", mons = { gen == 2 and sheet2 or sheet1 } }
+    for k, v in pairs(extra) do raw[k] = v end
+    return Wire.battleParty(raw, gen)
+  end
+  local function same(a, b)
+    if type(a) ~= "table" or type(b) ~= "table" then return a == b end
+    for k, v in pairs(a) do if not same(v, b[k]) then return false end end
+    for k in pairs(b) do if a[k] == nil then return false end end
+    return true
+  end
+
+  -- Red's aiClass: the engine's ai_classes record, field by field.
+  check(same(party({ aiClass = { uses = 2, chance = 64, item = "X_ATTACK", bogus = 1 } }, 1).aiClass,
+             { uses = 2, chance = 64, item = "X_ATTACK" }), "a BLACKBELT-shaped record, an unknown key dropped")
+  check(same(party({ aiClass = { uses = 2, switchChance = 20, chance = 128, item = "SUPER_POTION",
+                                 hpBelow = 4 } }, 1).aiClass,
+             { uses = 2, switchChance = 20, chance = 128, item = "SUPER_POTION", hpBelow = 4 }),
+        "an AGATHA-shaped record")
+  check(same(party({ aiClass = { uses = 1, item = "HYPER_POTION", hpBelow = 10, switchBelow = 5,
+                                 switch = false } }, 1).aiClass,
+             { uses = 1, item = "HYPER_POTION", hpBelow = 10, switchBelow = 5 }),
+        "a COOLTRAINER_F-shaped record, a false flag absent")
+  check(same(party({ aiClass = { uses = "5", onStatus = true, item = "FULL_HEAL" } }, 1).aiClass,
+             { uses = 5, onStatus = true, item = "FULL_HEAL" }), "a BROCK-shaped record, read as Wire.int")
+  check(same(party({ aiClass = { uses = 3, chance = 256, switch = true } }, 1).aiClass,
+             { uses = 3, chance = 256, switch = true }), "a JUGGLER-shaped record, chance at its 256")
+  local bads = {
+    {}, { chance = 64 }, { uses = 0 }, { uses = 256 }, { uses = true }, { uses = 1, chance = 257 },
+    { uses = 1, chance = -1 }, { uses = 1, switchChance = 300 }, { uses = 1, hpBelow = 0 },
+    { uses = 1, switchBelow = 256 }, { uses = 1, item = "X ATTACK" }, { uses = 1, item = 7 },
+    { uses = 1, switch = 1 }, { uses = 1, onStatus = "yes" }, { 3 }, "GenericAI", 3,
+  }
+  for i, bad in ipairs(bads) do
+    eq(party({ aiClass = bad }, 1), nil, "an unreadable record refuses the Red party (" .. i .. ")")
+  end
+  for _, gen in ipairs({ 2, false }) do
+    local got = party({ aiClass = { uses = 0 } }, gen or nil)
+    check(got ~= nil and got.aiClass == nil,
+          "a party read for generation " .. tostring(gen or nil) .. " neither keeps nor refuses an aiClass")
+  end
+
+  -- Gold's four TrainerClassAttributes bytes.
+  local gold = party({ trainerItems = { "FULL_HEAL", "POTION" }, aiFlags = 0, itemSwitch = 513,
+                       baseReward = 25 }, 2)
+  check(same(gold.trainerItems, { "FULL_HEAL", "POTION" }), "Gold's item slots, in order")
+  eq(gold.aiFlags, 0, "an aiFlags of 0 kept")
+  eq(gold.itemSwitch, 513, "itemSwitch kept")
+  eq(gold.baseReward, 25, "baseReward kept")
+  check(same(party({ trainerItems = {} }, 2).trainerItems, {}), "no item at all is a list")
+  local tops = party({ aiFlags = 65535, itemSwitch = "4", baseReward = 255 }, 2)
+  check(tops.aiFlags == 65535 and tops.itemSwitch == 4 and tops.baseReward == 255, "at their bounds")
+  local goldBads = {
+    { trainerItems = { "A", "B", "C" } }, { trainerItems = { "FULL HEAL" } }, { trainerItems = { 7 } },
+    { trainerItems = { a = "POTION" } }, { trainerItems = "POTION" }, { aiFlags = 65536 }, { aiFlags = -1 },
+    { aiFlags = true }, { itemSwitch = { 1 } }, { itemSwitch = "" }, { baseReward = 256 }, { baseReward = "x" },
+  }
+  for i, bad in ipairs(goldBads) do
+    eq(party(bad, 2), nil, "an unreadable Gold fact refuses the party (" .. i .. ")")
+  end
+  for _, gen in ipairs({ 1, false }) do
+    local got = party({ trainerItems = { "A", "B", "C" }, aiFlags = -1, itemSwitch = -1, baseReward = -1 },
+                      gen or nil)
+    check(got ~= nil and got.trainerItems == nil and got.aiFlags == nil and got.itemSwitch == nil
+          and got.baseReward == nil,
+          "a party read for generation " .. tostring(gen or nil) .. " neither keeps nor refuses Gold's four")
+  end
+
+  -- K21: Gold's sheet weight and ruleset battleType.
+  local function mon(base, weight)
+    local raw = {}
+    for k, v in pairs(base) do raw[k] = v end
+    raw.weight = weight
+    return Wire.battleMon(raw)
+  end
+  local g2 = {}
+  for k, v in pairs(sheet2) do g2[k] = v end
+  g2.generation = 2
+  for _, w in ipairs({ 0, 4600, 65535 }) do
+    eq(mon(g2, w).weight, w, "a Gold sheet carries weight " .. w)
+  end
+  eq(mon(g2, "300").weight, 300, "read as Wire.int reads it")
+  for _, w in ipairs({ 65536, -1, true, "heavy" }) do
+    eq(mon(g2, w), nil, "an unreadable weight refuses the Gold sheet (" .. tostring(w) .. ")")
+  end
+  for _, w in ipairs({ 300, 70000, "heavy" }) do
+    local got = mon(sheet1, w)
+    check(got ~= nil and got.weight == nil, "a Red sheet ignores weight " .. tostring(w))
+  end
+  -- CL2: the player's own Gen 2 party keeps it too -- a wild monster that
+  -- TRANSFORMed into one is weighed as the copy (BattleSim2
+  -- `transformWeight`). Twin of server/twin_parity.test.js's K21 party pins.
+  local function raw2(weight)
+    local raw = {}
+    for k, v in pairs(g2) do raw[k] = v end
+    raw.weight = weight
+    return raw
+  end
+  for _, side in ipairs({ "a", false }) do
+    local got = Wire.battleParty({ battle = "k21a", side = side or nil, generation = 2,
+      mons = { raw2(850) } }, 2)
+    eq(got and got.mons[1].weight, 850, "a Gold party read for side " .. tostring(side) .. " keeps its weight")
+  end
+  eq(Wire.battleParty({ battle = "k21a", side = "a", generation = 2, mons = { raw2(70000) } }, 2), nil,
+     "an unreadable side-a weight refuses the party")
+  local chart = { { 100, 100 }, { 100, 100 } }
+  for _, bt in ipairs({ 0, 4, 255 }) do
+    eq(Wire.battleRuleset({ chart = chart, battleType = bt }, 2).battleType, bt,
+       "a Gold ruleset carries battleType " .. bt)
+  end
+  for _, bt in ipairs({ 256, -1, true, "FISH" }) do
+    eq(Wire.battleRuleset({ chart = chart, battleType = bt }, 2), nil,
+       "an unreadable battleType refuses the Gold ruleset (" .. tostring(bt) .. ")")
+  end
+  for _, gen in ipairs({ 1, false }) do
+    local got = Wire.battleRuleset({ chart = chart, battleType = "FISH" }, gen or nil)
+    check(got ~= nil and got.battleType == nil,
+          "a ruleset read for generation " .. tostring(gen or nil) .. " neither keeps nor refuses one")
+  end
+
+  -- K23: Gold's count-as-species types (pokegold FindEnemyMonsThatResistPlayer
+  -- reads BaseData[wOTPartyCount] on its first pass).
+  eq(Wire.COUNT_SPECIES_TYPES2_MAX, 2, "a species has two type bytes")
+  check(same(party({ countSpeciesTypes = { 3, 7 } }, 2).countSpeciesTypes, { 3, 7 }), "K23: two type bytes")
+  check(same(party({ countSpeciesTypes = { 0, 0 } }, 2).countSpeciesTypes, { 0, 0 }),
+        "K23: a mono-typed species states its byte twice, as BaseData does")
+  check(same(party({ countSpeciesTypes = { "19" } }, 2).countSpeciesTypes, { 19 }),
+        "K23: one, at BATTLE_TYPE_MAX - 1, read as Wire.int")
+  local k23Bads = { {}, { 1, 2, 3 }, { 20 }, { -1 }, { true }, { "x" }, { { 1 } }, { a = 1 }, "FIRE", 7 }
+  for i, bad in ipairs(k23Bads) do
+    eq(party({ countSpeciesTypes = bad }, 2), nil, "K23: an unreadable list refuses the Gold party (" .. i .. ")")
+  end
+  for _, gen in ipairs({ 1, false }) do
+    local got = party({ countSpeciesTypes = { 1, 2, 3 } }, gen or nil)
+    check(got ~= nil and got.countSpeciesTypes == nil,
+          "K23: a party read for generation " .. tostring(gen or nil) .. " neither keeps nor refuses one")
+  end
+end)()
+
+-- ------- Wire: K22's quiet animations (docs/plans/gen12-referee-remaining-gaps.md)
+--
+-- An `anim` whose move id is not its user's own use of the move (the seeder's
+-- ABSORB, FLY's charge TELEPORT, a trap's tick) carries `quiet = true`; a
+-- Red / Gold reader keeps exactly `true`, on `anim` alone, and drops anything
+-- else without refusing the event.
+;(function()
+  local function anim(extra, gen)
+    local raw = { battle = "b1", seq = 1, t = "anim", slot = 3, side = "b", text = "ABSORB" }
+    for k, v in pairs(extra) do raw[k] = v end
+    return Wire.battleEvent(raw, gen)
+  end
+  for _, gen in ipairs({ 1, 2 }) do
+    eq(anim({ quiet = true }, gen).quiet, true, "K22: a Gen " .. gen .. " quiet anim says so")
+    for i, bad in ipairs({ false, 1, "true", { true }, 0 }) do
+      local got = anim({ quiet = bad }, gen)
+      check(got ~= nil and got.quiet == nil,
+            "K22: a quiet that is not true is dropped, never refused (" .. gen .. "/" .. i .. ")")
+    end
+    for _, t in ipairs({ "msg", "item", "stat" }) do
+      local got = anim({ t = t, quiet = true }, gen)
+      check(got ~= nil and got.quiet == nil, "K22: a " .. t .. " carries no quiet (Gen " .. gen .. ")")
+    end
+  end
+  for _, gen in ipairs({ 3, false }) do
+    local got = anim({ quiet = true }, gen or nil)
+    check(got ~= nil and got.quiet == nil, "K22: a reader for generation " .. tostring(gen or nil)
+          .. " reads no quiet")
+  end
+end)()
+
+-- ------- Wire: Gen 3 solo's `lesson` event and `safari` choice (contract C6 of
+-- docs/plans/gen3-solo-remaining-fights.md)
+--
+-- Oak's lab says when one of his lessons came true (`lesson`, text = the
+-- lesson's id), and a Safari Zone turn is one `safari` action with a required
+-- `throw` (pret B_ACTION_SAFARI_*), a `block` throw naming its POKéBLOCK case
+-- slot.  Both are Gen 3 words: a Red / Gold reader refuses them whole, and so
+-- does a choice reader naming no generation (the five shared actions are
+-- every generation's; BATTLE_ACTIONS3 is read for 3 alone).  No hub emits or
+-- seats either, so neither moves PROTOCOL.
+;(function()
+  -- The event: one more Gen 3 kind, its text an id.
+  check(Wire.BATTLE_EVENTS3.lesson == true, "C6: lesson is a Gen 3 event kind")
+  check(Wire.BATTLE_EVENTS.lesson == nil and Wire.BATTLE_EVENTS2.lesson == nil,
+        "C6: ...and in neither older vocabulary")
+  local function lesson(extra, gen)
+    local raw = { battle = "b1", seq = 7, t = "lesson", side = "a", slot = 0, text = "damage" }
+    for k, v in pairs(extra or {}) do raw[k] = v end
+    return Wire.battleEvent(raw, gen)
+  end
+  for _, gen in ipairs({ 3, false }) do
+    local got = lesson(nil, gen or nil)
+    check(got ~= nil, "C6: a lesson reads for generation " .. tostring(gen or nil))
+    eq(got and got.text, "damage", "C6: ...its text the lesson's id")
+    eq(got and got.side, "a", "C6: ...its side kept")
+    eq(got and got.slot, 0, "C6: ...and its slot")
+    eq(lesson({ text = "stat" }, gen or nil).text, "stat", "C6: the stat lesson reads too")
+  end
+  for _, gen in ipairs({ 1, 2 }) do
+    eq(lesson(nil, gen), nil, "C6: a Gen " .. gen .. " reader refuses a lesson whole")
+  end
+  for i, bad in ipairs({ "Oak's page", "dam age", string.rep("d", 41), 7, { "damage" }, "" }) do
+    local got = lesson({ text = bad }, 3)
+    check(got ~= nil and got.text == nil,
+          "C6: a lesson's text that is no id is dropped, the event kept (" .. i .. ")")
+  end
+  local plain = lesson({ text = "DAMAGE_1" }, 3)
+  eq(plain and plain.text, "DAMAGE_1", "C6: read as an item's id is: _ and case kept, never prose-cleaned")
+
+  -- The choice: one Gen 3 action, `throw` required and closed.
+  eq(Wire.BATTLE_ACTIONS3.safari, "throw", "C6: safari needs its throw")
+  eq(Wire.BATTLE_ACTIONS.safari, nil, "C6: ...and is no shared action")
+  eq(Wire.POKEBLOCK3_MAX, 40, "C6: the case holds pokeemerald POKEBLOCKS_COUNT blocks")
+  local throws = {}
+  for k in pairs(Wire.SAFARI_THROWS3) do throws[#throws + 1] = k end
+  table.sort(throws)
+  eq(table.concat(throws, " "), "bait ball block near rock", "C6: the five throws, both carts'")
+  local function safari(extra, gen)
+    local raw = { battle = "b1", action = "safari", throw = "ball" }
+    for k, v in pairs(extra or {}) do raw[k] = v end
+    return Wire.battleChoice(raw, gen)
+  end
+  for _, throw in ipairs(throws) do
+    local got = safari({ throw = throw }, 3)
+    check(got ~= nil and got.action == "safari" and got.throw == throw,
+          "C6: a Gen 3 reader takes the " .. throw .. " throw")
+  end
+  for _, gen in ipairs({ 1, 2, false }) do
+    eq(safari(nil, gen or nil), nil,
+       "C6: a reader for generation " .. tostring(gen or nil) .. " refuses a safari choice whole")
+  end
+  eq(safari(nil, "3") and safari(nil, "3").throw, "ball", "C6: the generation is read as Wire.int reads it")
+  for i, bad in ipairs({ "BALL", "watch", "run", "", 5, true, { "ball" } }) do
+    eq(safari({ throw = bad }, 3), nil, "C6: an unknown throw refuses the choice (" .. i .. ")")
+  end
+  eq(Wire.battleChoice({ battle = "b1", action = "safari" }, 3), nil, "C6: ...and so does none")
+  -- `block`: optional on a block throw, 1..POKEBLOCK3_MAX, refused out of range.
+  eq(safari({ throw = "block", block = 1 }, 3).block, 1, "C6: the case's first slot")
+  eq(safari({ throw = "block", block = 40 }, 3).block, 40, "C6: ...and its last")
+  eq(safari({ throw = "block", block = "12" }, 3).block, 12, "C6: a numeric string reads as Wire.int reads it")
+  eq(safari({ throw = "block", block = 7.9 }, 3).block, 7, "C6: ...floored as Wire.int floors")
+  local bare = safari({ throw = "block" }, 3)
+  check(bare ~= nil and bare.block == nil, "C6: a block throw with no slot is a choice; the referee decides")
+  for i, bad in ipairs({ 0, 41, -1, "x", true, { 1 } }) do
+    eq(safari({ throw = "block", block = bad }, 3), nil,
+       "C6: a block slot out of range or unreadable refuses the choice (" .. i .. ")")
+  end
+  local stray = safari({ throw = "rock", block = 99 }, 3)
+  check(stray ~= nil and stray.block == nil, "C6: block on any other throw is a stray field, ignored")
+  -- Nothing of the safari dialect leaks onto the shared actions.
+  local run = Wire.battleChoice({ battle = "b1", action = "run", throw = "ball", block = 3 }, 3)
+  check(run ~= nil and run.throw == nil and run.block == nil,
+        "C6: the menu's RUN is the ordinary run; throw and block are not read on it")
+  local fight = Wire.battleChoice({ battle = "b1", action = "fight", move = 0, throw = "rock" }, 3)
+  check(fight ~= nil and fight.throw == nil, "C6: ...nor on a fight")
+  -- The shared actions read exactly as before on every reader.
+  for _, gen in ipairs({ 1, 2, 3, false }) do
+    check(Wire.battleChoice({ battle = "b1", action = "run" }, gen or nil) ~= nil,
+          "C6: run still reads for generation " .. tostring(gen or nil))
+  end
+end)()
+
+-- ------- Wire: the Battle Palace's `palace` event and the Battle Arena
+-- referee's `arena` event (wave 3 of docs/plans/gen3-solo-remaining-fights.md,
+-- contract C6)
+--
+-- Solo's Frontier halls: the Palace says a pick could not be used (`unable`)
+-- and speaks the half-HP line (`flavor`, amount = the line), the Arena's
+-- referee walks the judgment (`start`, `judge`, a `mind` / `skill` / `body`
+-- award per side, `win` or `draw`).  Both Gen 3 words, both texts tokens from
+-- closed sets; no hub seats a hall, so neither moves PROTOCOL.
+;(function()
+  for _, kind in ipairs({ "palace", "arena" }) do
+    check(Wire.BATTLE_EVENTS3[kind] == true, "wave 3: " .. kind .. " is a Gen 3 event kind")
+    check(Wire.BATTLE_EVENTS[kind] == nil and Wire.BATTLE_EVENTS2[kind] == nil,
+          "wave 3: ...and " .. kind .. " is in neither older vocabulary")
+  end
+  local function tokens(set)
+    local out = {}
+    for k in pairs(set) do out[#out + 1] = k end
+    table.sort(out)
+    return table.concat(out, " ")
+  end
+  eq(tokens(Wire.PALACE_TOKENS3), "flavor unable", "wave 3: the Palace's two tokens")
+  eq(tokens(Wire.ARENA_TOKENS3), "body draw judge mind skill start win", "wave 3: the Arena referee's seven steps")
+  local function ev(t, extra, gen)
+    local raw = { battle = "b1", seq = 9, t = t, side = "a", slot = 0 }
+    for k, v in pairs(extra or {}) do raw[k] = v end
+    return Wire.battleEvent(raw, gen)
+  end
+  for _, gen in ipairs({ 3, false }) do
+    local got = ev("palace", { text = "flavor", amount = 3 }, gen or nil)
+    check(got ~= nil, "wave 3: a palace flavor line reads for generation " .. tostring(gen or nil))
+    eq(got and got.text, "flavor", "wave 3: ...its token kept")
+    eq(got and got.amount, 3, "wave 3: ...and its line")
+    eq(ev("palace", { text = "unable" }, gen or nil).text, "unable", "wave 3: the unable line reads")
+    for _, step in ipairs({ "start", "judge", "mind", "skill", "body", "win", "draw" }) do
+      eq(ev("arena", { text = step, amount = 2 }, gen or nil).text, step, "wave 3: the arena step " .. step .. " reads")
+    end
+    eq(ev("arena", { text = "mind", amount = 2 }, gen or nil).amount, 2, "wave 3: ...an award kept")
+  end
+  for _, gen in ipairs({ 1, 2 }) do
+    eq(ev("palace", { text = "unable" }, gen), nil, "wave 3: a Gen " .. gen .. " reader refuses a palace event")
+    eq(ev("arena", { text = "start" }, gen), nil, "wave 3: a Gen " .. gen .. " reader refuses an arena event")
+  end
+  for i, bad in ipairs({ "UNABLE", "start", "glint", "", 7, { "unable" } }) do
+    local got = ev("palace", { text = bad }, 3)
+    check(got ~= nil and got.text == nil, "wave 3: a palace text that is no token is dropped, the event kept (" .. i .. ")")
+  end
+  for i, bad in ipairs({ "WIN", "unable", "judgment", "", 2 }) do
+    local got = ev("arena", { text = bad }, 3)
+    check(got ~= nil and got.text == nil, "wave 3: an arena text that is no step is dropped, the event kept (" .. i .. ")")
+  end
+  eq(ev("arena", { text = "judge", amount = -1 }, 3).amount, nil, "wave 3: an amount is unsigned on every kind")
+end)()
+
+-- ------- Wire: WALLY's `wallyThrow` action and event (wave 4b of
+-- docs/plans/gen3-solo-remaining-fights.md, contract C-W)
+--
+-- Emerald's catching tutorial: WALLY's turn-3 command is B_ACTION_WALLY_THROW
+-- (pret src/battle_controller_wally.c WallyHandleActions), filed with no data
+-- -- an action that needs nothing, as RUN needs nothing -- and the referee
+-- says it ran with a `wallyThrow` event naming WALLY's `slot` / `side` (only
+-- side a's first seat may throw, so no seat id rides -- a stray one drops).
+-- Both Gen 3 words: a Red / Gold reader (and a choice reader naming no
+-- generation) refuses them whole.  No hub seats a tutorial, so neither moves PROTOCOL.
+;(function()
+  eq(Wire.BATTLE_ACTIONS3.wallyThrow, true, "C-W: wallyThrow is a Gen 3 action that needs nothing")
+  eq(Wire.BATTLE_ACTIONS.wallyThrow, nil, "C-W: ...and no shared action")
+  local function throw(extra, gen)
+    local raw = { battle = "b1", action = "wallyThrow" }
+    for k, v in pairs(extra or {}) do raw[k] = v end
+    return Wire.battleChoice(raw, gen)
+  end
+  for _, gen in ipairs({ 3, "3" }) do
+    local got = throw(nil, gen)
+    check(got ~= nil and got.action == "wallyThrow" and got.battle == "b1",
+          "C-W: a generation " .. tostring(gen) .. " reader takes a wallyThrow")
+    local n = 0
+    for _ in pairs(got or {}) do n = n + 1 end
+    eq(n, 2, "C-W: ...and it carries nothing but the battle and the action")
+  end
+  for _, gen in ipairs({ 1, 2, false, 4 }) do
+    eq(throw(nil, gen or nil), nil,
+       "C-W: a reader for generation " .. tostring(gen or nil) .. " refuses a wallyThrow whole")
+  end
+  for i, bad in ipairs({ "WALLYTHROW", "wallythrow", "wally", "throw", "wallyThrow " }) do
+    eq(Wire.battleChoice({ battle = "b1", action = bad }, 3), nil, "C-W: no such action (" .. i .. ")")
+  end
+  local stray = throw({ throw = "ball", block = 3 }, 3)
+  check(stray ~= nil and stray.throw == nil and stray.block == nil,
+        "C-W: the Safari dialect is not read on a wallyThrow")
+
+  check(Wire.BATTLE_EVENTS3.wallyThrow == true, "C-W: wallyThrow is a Gen 3 event kind")
+  check(Wire.BATTLE_EVENTS.wallyThrow == nil and Wire.BATTLE_EVENTS2.wallyThrow == nil,
+        "C-W: ...and in neither older vocabulary")
+  local function ev(extra, gen)
+    local raw = { battle = "b1", seq = 5, t = "wallyThrow", side = "a", slot = 0 }
+    for k, v in pairs(extra or {}) do raw[k] = v end
+    return Wire.battleEvent(raw, gen)
+  end
+  for _, gen in ipairs({ 3, false }) do
+    local got = ev(nil, gen or nil)
+    check(got ~= nil, "C-W: a wallyThrow reads for generation " .. tostring(gen or nil))
+    eq(got and got.side, "a", "C-W: ...its side")
+    eq(got and got.slot, 0, "C-W: ...and its slot")
+  end
+  for _, gen in ipairs({ 1, 2 }) do
+    eq(ev(nil, gen), nil, "C-W: a Gen " .. gen .. " reader refuses a wallyThrow whole")
+  end
+  for i, stray in ipairs({ "solo_player", "p1", "p1#2", "", 7, { "p1" } }) do
+    local got = ev({ seat = stray }, 3)
+    check(got ~= nil and got.seat == nil, "C-W: a seat is a stray field: dropped, the event kept (" .. i .. ")")
+  end
+  local older = Wire.battleEvent({ battle = "b1", seq = 5, t = "run", seat = "p1", side = "a", slot = 0 }, 2)
+  check(older ~= nil and older.seat == nil, "C-W: an older reader reads no seat on any kind")
 end)()
 
 -- ------- Wire.partyEvent: what your partner just did, off the wire
@@ -3887,11 +4466,25 @@ end)()
   })
   eq(locked.generation, 2, "HostServer-shaped Hub.new locks to generation 2")
 
+  -- The same lock for a FireRed / LeafGreen / Emerald host: a Gen 3-shaped game
+  -- (T3's stub shape, no live boot needed -- Gen.generation reads the dataset)
+  -- must lock generation 3, or the host's own hello would be refused by the
+  -- hub it just started.
+  local gen3Game = { data = { type_chart = { generation = 3 } } }
+  eq(Gen.generation(gen3Game), 3, "a Gen 3-shaped game is generation 3")
+  local locked3 = Hub.new({
+    maxPlayers = 2,
+    generation = Gen.generation(gen3Game),
+  })
+  eq(locked3.generation, 3, "HostServer-shaped Hub.new locks to generation 3")
+
   -- Explicit game wins over a Gen1-shaped _G.Game (the Gold boot hazard).
   local savedGame = rawget(_G, "Game")
   rawset(_G, "Game", { data = {} })
   eq(Gen.generation(goldGame), 2,
      "explicit Gold game wins over a Gen1 _G.Game singleton")
+  eq(Gen.generation({ data = { type_chart = { generation = 3 } } }), 3,
+     "and so does an explicit Gen 3 game")
   if savedGame ~= nil then
     rawset(_G, "Game", savedGame)
   else
@@ -4095,6 +4688,51 @@ do
   eq(Gen.resolveSprite(goldGame, "SPRITE_NIRE"),
      Gen.defaultSprite(goldGame),
      "and a peer wearing NIRE draws as the Gold default")
+
+  -- Gen 3 is the third answer to the same gate.  NIRE's art is a Game Boy
+  -- overworld sheet (gens = { 1 }), and a FireRed / Emerald boot draws its
+  -- people from the cart's own object-event graphics, so it is no more
+  -- offered there than on Gold.  A Gen 3-shaped stub is enough for the
+  -- helpers: which sprite is worn is a function of the game's shape.
+  local gen3Game = { data = { type_chart = { generation = 3 } } }
+  eq(Gen.generation(gen3Game), 3, "a Gen 3-shaped stub is generation 3")
+  local gen3Offered = {}
+  for _, id in ipairs(Chars.list(gen3Game)) do gen3Offered[id] = true end
+  eq(gen3Offered.SPRITE_NIRE, nil, "NIRE is not offered on Gen 3")
+  eq(gen3Offered.SPRITE_NIRE_HOOD, nil, "nor is NIRE HOOD")
+  eq(Chars.available("SPRITE_NIRE", gen3Game), false,
+     "and cannot be worn on Gen 3")
+  eq(Chars.resolve("SPRITE_NIRE", gen3Game),
+     Gen.defaultSprite(gen3Game),
+     "a saved NIRE choice falls back on Gen 3")
+  eq(Gen.resolveSprite(gen3Game, "SPRITE_NIRE"),
+     Gen.defaultSprite(gen3Game),
+     "and a peer wearing NIRE draws as the Gen 3 default")
+  eq(Gen.defaultSprite(gen3Game), Config.DEFAULT_SPRITE_GEN3,
+     "which, with no cart to ask, is the token each viewer resolves on its own")
+
+  -- The dials underneath: one default per generation, and a gate that admits
+  -- only what a row names.  Unknown is unknown -- it never reads as Gen 1.
+  eq(Config.defaultSpriteFor(1), Config.DEFAULT_SPRITE, "Gen 1's fallback is Red")
+  eq(Config.defaultSpriteFor(2), Config.DEFAULT_SPRITE_GEN2, "Gen 2's is Chris")
+  eq(Config.defaultSpriteFor(3), Config.DEFAULT_SPRITE_GEN3,
+     "Gen 3's is the cart-resolved token, not any one engine's player name")
+  eq(Config.defaultSpriteFor("3"), Config.DEFAULT_SPRITE_GEN3, "read from a string too")
+  check(Config.DEFAULT_SPRITE_GEN3 ~= Config.DEFAULT_SPRITE
+        and Config.DEFAULT_SPRITE_GEN3 ~= Config.DEFAULT_SPRITE_GEN2,
+        "and the three fallbacks are three different ids")
+  local nire = Config.ownCharId("SPRITE_NIRE")
+  eq(Config.ownCharAllowed(nire, 1), true, "NIRE is allowed on Gen 1")
+  eq(Config.ownCharAllowed(nire, 2), false, "refused on Gen 2")
+  eq(Config.ownCharAllowed(nire, 3), false, "refused on Gen 3")
+  eq(Config.ownCharAllowed(nire, "gen3"), false,
+     "including under the manifest's own \"gen3\" spelling")
+  eq(Config.ownCharAllowed(nire, 4), false,
+     "and on a generation nothing knows, rather than guessing Gen 1")
+  eq(Config.ownCharAllowed(nire, nil), false, "or on no generation at all")
+  eq(Config.knownGeneration("gen3"), 3, "a manifest-style token names its generation")
+  eq(Config.knownGeneration(3), 3, "as does the number")
+  eq(Config.knownGeneration(4), nil, "and a generation past Gen 3 is unknown")
 end
 
 -- ------- the pics the catalog does not cover
@@ -5212,6 +5850,53 @@ end)()
         "six balls stay left of the foe pic (x=88)")
   check(ClassicBattle.FOE_BALL_Y + 8 <= CoopBattle.STAGE_ALLY.y,
         "...and finish at the ally back-pic, not on it")
+  -- Engine-owned ball art: trim empty slots in window coordinates and
+  -- restore the caller's clip even if the engine draw fails.
+  do
+    local savedLove = love
+    local clip = {}
+    _G.love = { graphics = {
+      getScissor = function() return unpack(clip) end,
+      setScissor = function(...) clip = { ... } end,
+      setColor = function() end,
+      transformPoint = function(x, y) return 10 + x * 2, 20 + y * 2 end,
+    } }
+    local bs = {}
+    function bs:drawBallRow(team, x, y, dx)
+      eq(team, party, "engine receives the real party and its status")
+      eq(table.concat(clip, ","), "58,84,64,16", "only four balls survive the scaled clip")
+      eq(dx, 8, "engine receives row direction")
+    end
+    check(ClassicBattle.drawBallRow(bs, party, 24, 32, 8), "engine draws the ball row")
+    eq(#clip, 0, "unclipped caller stays unclipped")
+    clip = { 60, 80, 20, 20 }
+    function bs:drawBallRow()
+      eq(table.concat(clip, ","), "60,84,20,16", "row respects the enclosing clip")
+      error("missing sheet")
+    end
+    eq(ClassicBattle.drawBallRow(bs, party, 24, 32, 8), false, "engine failure is contained")
+    eq(table.concat(clip, ","), "60,80,20,20", "engine failure restores the enclosing clip")
+    clip = {}
+    function bs:drawBallRow()
+      eq(table.concat(clip, ","), "10,84,64,16", "negative spacing clips the leftward row")
+    end
+    check(ClassicBattle.drawBallRow(bs, party, 24, 32, -8), "leftward row draws")
+    -- A sprite-OBP palette files all six tiles for the Renderer's unclipped
+    -- replay; the empty slots come back off that list.
+    local savedFx = package.loaded["src.render.PaletteFX"]
+    local redraws = { { tag = "earlier" } }
+    package.loaded["src.render.PaletteFX"] = { uiSpriteRedraws = function() return redraws end }
+    function bs:drawBallRow()
+      for i = 1, 6 do redraws[#redraws + 1] = { tag = "ball" .. i } end
+    end
+    check(ClassicBattle.drawBallRow(bs, party, 24, 32, 8), "OBP row draws")
+    eq(#redraws, 5, "only the four real balls stay on the replay list")
+    eq(redraws[1].tag, "earlier", "an earlier sprite's redraw is kept")
+    eq(redraws[5].tag, "ball4", "...and the last kept is the party's last ball")
+    package.loaded["src.render.PaletteFX"] = savedFx
+    _G.love = savedLove
+  end
+
   local merged = ClassicBattle.appendRoster(nil, "oo")
   merged = ClassicBattle.appendRoster(merged, "oxs")
   eq(#merged, 5, "two trainer parties flatten onto one row")
@@ -5478,8 +6163,10 @@ end)()
       game = { data = {}, save = { inventory = { POTION = 1, REVIVE = 1, ETHER = 1 } } },
       battle = "b-potion-faint", role = "host",
     })
+    -- PIKACHU hurt: a POTION at full HP is ItemUseNoEffect and is not sent
+    -- at all now (FX-C2, MediatedBattle `itemWontHaveEffect`).
     fight.mine = {
-      { species = "PIKACHU", hp = 35, maxHp = 35,
+      { species = "PIKACHU", hp = 20, maxHp = 35,
         moves = { { id = "THUNDERSHOCK", pp = 5, maxPp = 30 } } },
       { species = "RATTATA", hp = 0, maxHp = 22,
         moves = { { id = "TACKLE", pp = 5, maxPp = 35 } } },
@@ -8254,6 +8941,9 @@ local coopDispatch = {
   [Wire.COOP_ASK] = function(s, m) s.coop:onAsk({}, m) end,
   [Wire.COOP_DECLINE] = function(s, m) s.coop:onDecline(m) end,
   [Wire.COOP_BATTLE] = function(s, m) s.coop:onBattle({}, m) end,
+  -- Client.lua hands every outcome to Coop as well as to Sessions: one that
+  -- lands before a battle screen is up is the hub calling an assembly off.
+  [Wire.BATTLE_OUTCOME] = function(s, m) s.coop:onBattleOutcome(m) end,
   [Wire.JOIN] = function(s, m) s.roster:put(Wire.presence(m.player)) end,
   [Wire.MOVE] = function(s, m)
     local id = Wire.id(m.id)
@@ -8437,6 +9127,27 @@ local function settle(side)
   side.sayDone = nil
   if done then done() end
   return done ~= nil
+end
+
+-- End a co-op fight on the hub, the way a finished one ends it.
+--
+-- Every handoff in this harness stops at M:begin: the dispatch hands it a bare
+-- `{}` game, so there is no party to pack and it abandons ("2-on-2 needs the
+-- link modules."), which `settle` then drains. Abandoning says goodbye now
+-- (M:abandon), so a side that got that far already let the whole group go.
+-- A seat a scenario never let reach M:begin -- its COOP_BATTLE taken off the
+-- peer to be read, never dispatched -- is still bound, though, and since #87
+-- the hub refuses to seat a player bound to a different unsettled fight
+-- (openCoopBattle / openMediatedBattle), so every later join on the same hub
+-- would be answered COOP_OFFER_END{alone} and every later four-way
+-- COOP_DECLINE{gone}. Called between scenarios that share a hub, and sent from
+-- every side named: one goodbye closes the whole group, so the rest are
+-- no-ops, exactly as on a real hub.
+local function endFight(...)
+  for i = 1, select("#", ...) do
+    local side = select(i, ...)
+    side.transport.send(nil, Wire.COOP_LEAVE, {})
+  end
 end
 
 -- Drive M:update in fixed steps -- the clock every standing offer, wait and
@@ -8735,6 +9446,11 @@ eq(ann.coop.lastPlan.kind, "npc", "as a co-op fight against an NPC")
 eq(#ann.coop.lastPlan.allies, 2, "with both of them on the same side")
 settle(ann); settle(bob)
 eq(ann.coop.running, false, "neither is left marked as mid-battle")
+-- ...and the hub lets both of them go, or the next join below is refused
+-- (see endFight).
+endFight(ann, bob)
+eq(ann.client.battleId, nil, "the hub no longer holds ANN in that fight")
+eq(bob.client.battleId, nil, "nor BOB")
 
 -- Joiner who also walked into the trainer still carries it for unwind
 -- (the ACTIONS / same-trainer door into the same wait). Round 13's same-map
@@ -8759,6 +9475,7 @@ check(bob.coop.lastPlan ~= nil, "joiner reaches the handoff")
 check(bob.coop.lastPlan.engine == bob.engine,
       "and BOB's own trainer battle rides along on his plan too, for the unwind")
 settle(ann); settle(bob)
+endFight(ann, bob)
 
 -- ------- rule 3: nobody joins once it has started
 
@@ -8782,6 +9499,7 @@ eq(joins, 1, "a second join finds nothing left to accept")
 pump(ann); pump(bob)
 -- both are mid-handoff again; hand their encounters back before moving on
 settle(ann); settle(bob)
+endFight(ann, bob)
 
 -- ------- R9-A2: the retry, mid-fight and mid-trade
 --
@@ -8816,6 +9534,11 @@ settle(ann); settle(bob)
   pump(rAnn); pump(rBob)
   check(rAnn.coop.lastPlan ~= nil, "the fight opens for both")
   settle(rAnn); settle(rBob)
+  endFight(rAnn, rBob)
+  -- Cleared so "opens again" below is about the second fight, not a leftover
+  -- of this one -- which is how that check stayed green while the hub was
+  -- refusing the second fight outright.
+  rAnn.coop.lastPlan, rBob.coop.lastPlan = nil, nil
 
   -- the offer lands mid-trade: the same deferral, through Sessions:isBusy()
   rBob.busy = true
@@ -9314,6 +10037,7 @@ check(take(wAnn.peer, Wire.COOP_JOINED) ~= nil,
       "a free on-map partner auto-joins without a confirm box")
 
 resetCoopWild(wAnn); resetCoopWild(wBob)
+endFight(wAnn, wBob) -- every join below opens a fresh hub fight
 pump(wAnn); pump(wBob)
 
 -- Mutual coop_wild waits: lexicographically smaller playerId's wait wins.
@@ -9334,6 +10058,7 @@ eq(winner.coop:isWaiting(), false,
    "the smaller-id waiter is told their partner joined")
 
 resetCoopWild(wAnn); resetCoopWild(wBob)
+endFight(wAnn, wBob)
 pump(wAnn); pump(wBob)
 
 -- Partner already waiting on coop_wild: a second local wild joins instead of
@@ -9358,6 +10083,7 @@ eq(wAnn.coop:isWaiting(), false,
    "the standing waiter is joined from the second wild")
 
 resetCoopWild(wAnn); resetCoopWild(wBob)
+endFight(wAnn, wBob)
 eq(wBob.coop:joinFromMenu(wBob.game), false,
    "joinFromMenu with no offer is a no-op")
 wBob.coop.offer = { from = wAnn.id, battle = WILD_KEY, mode = "coop_wild" }
@@ -9512,6 +10238,7 @@ pump(wAnn)
 eq(wAnn.coop:isWaiting(), false, "the waiter is told they joined")
 
 resetCoopWild(wAnn); resetCoopWild(wBob)
+endFight(wAnn, wBob)
 pump(wAnn); pump(wBob)
 wAnn.coop.wildCoop, wAnn.coop.npcCoop = true, true
 wBob.coop.wildCoop, wBob.coop.npcCoop = true, true
@@ -9534,6 +10261,7 @@ pump(wAnn)
 eq(wAnn.coop:isWaiting(), false, "the trainer waiter is told they joined")
 
 resetCoopWild(wAnn); resetCoopWild(wBob)
+endFight(wAnn, wBob)
 pump(wAnn); pump(wBob)
 wAnn.coop.wildCoop, wAnn.coop.npcCoop = true, true
 wBob.coop.wildCoop, wBob.coop.npcCoop = true, true
@@ -9579,12 +10307,14 @@ pump(wAnn)
 eq(wAnn.coop:isWaiting(), false, "the waiter is told they joined")
 
 resetCoopWild(wAnn); resetCoopWild(wBob); resetCoopWild(wCal)
+-- Ended through the hub rather than by nilling coopBattleId by hand: since
+-- #87 the seats are also bound through battleId to the unsettled mediated
+-- record, and a hand-cleared group left that binding behind (see endFight).
+endFight(wAnn, wBob, wCal)
 pump(wAnn); pump(wBob); pump(wCal)
 wAnn.coop.wildCoop, wAnn.coop.npcCoop = true, true
 wBob.coop.wildCoop, wBob.coop.npcCoop = true, true
 wCal.coop.wildCoop, wCal.coop.npcCoop = true, true
-wCal.client.coopBattleId, wBob.client.coopBattleId = nil, nil
-wAnn.client.coopBattleId = nil
 
 -- All-ON trio: first JOIN still fans COOP_BATTLE to the third (nobody skipped).
 eq(wildEngage(wAnn), true, "all-ON host posts the wait")
@@ -9594,6 +10324,7 @@ check(take(wCal.peer, Wire.COOP_BATTLE) ~= nil,
 check(wCal.client.coopBattleId ~= nil, "and is seated")
 
 resetCoopWild(wAnn); resetCoopWild(wBob); resetCoopWild(wCal)
+endFight(wAnn, wBob, wCal)
 pump(wAnn); pump(wBob); pump(wCal)
 wAnn.coop.wildCoop, wAnn.coop.npcCoop = true, true
 wBob.coop.wildCoop, wBob.coop.npcCoop = true, true
@@ -9662,14 +10393,25 @@ end)()
 -- in it.
 
 ;(function()
-  -- The four-way above left a live group behind it -- and so did the earlier
-  -- NPC join, which opens a group of two. Selected by shape rather than by
-  -- whichever `pairs` happened to yield first, or this passes or fails
-  -- depending on a hash order.
-  local liveId
-  for id, group in pairs(hub.coopBattles or {}) do
-    if #(group.members or {}) == 4 then liveId = id end
+  -- The four-way above never got past M:begin -- this harness has no link
+  -- modules to pack a party with -- and giving up there is a goodbye too
+  -- (M:abandon). It used to be silent: the group of four sat on the hub with
+  -- every seat still bound to its unsettled record, refusing each of them any
+  -- other fight until the age sweep below, an hour later on a real hub.
+  for _, group in pairs(hub.coopBattles or {}) do
+    check(#(group.members or {}) ~= 4,
+          "an assembly given up at the handoff does not leave its group behind")
   end
+  for _, side in ipairs({ ann, bob, cal, dee }) do
+    eq(side.client.coopBattleId, nil,
+       side.name .. " is not left filed under the fight that was given up")
+    eq(hub:unsettledBattle(side.client), nil,
+       side.name .. " is not left bound to its record either")
+  end
+
+  -- So the goodbye itself is driven on a group of four opened directly.
+  local liveId = hub:openCoopBattle("live4", {
+    ann.client.id, bob.client.id, cal.client.id, dee.client.id })
   check(liveId ~= nil, "agreeing on a party battle opens a relay group")
   local group = hub.coopBattles[liveId]
   eq(#group.members, 4, "with all four in it")
@@ -9700,6 +10442,84 @@ end)()
   eq(hub.coopBattles[staleId], nil,
      "a group whose battle never ended is reclaimed on age")
   eq(ann.client.coopBattleId, nil, "and its members are let out of it too")
+end)()
+
+-- ------- a co-op fight given up during assembly lets everybody go
+--
+-- The bug this pins: M:abandon never said goodbye. The hub seats every member
+-- the moment a co-op fight is agreed, and since #87 it refuses to seat a
+-- player still bound to an unfinished one -- so when one client could not
+-- assemble (a party that would not pack, a field it could not read) the
+-- whole group stayed hub-busy until the age sweep, an hour on a real hub,
+-- and the partner sat in M:begin waiting for a party that was never coming,
+-- with the trainer they had walked into still held. Driven on a fresh hub:
+-- ANN walks into a trainer and genuinely assembles, BOB joins and gives up.
+
+;(function()
+  local CoopBattle = need("CoopBattle")
+  local gHub = Hub.new({ maxPlayers = 8 })
+  local gAnn = coopSide(gHub, "GANN")
+  local gBob = coopSide(gHub, "GBOB")
+  pump(gAnn); pump(gBob)
+  gAnn.party:invite({ id = gBob.client.id, name = "GBOB" })
+  pump(gBob); answerConfirm(gBob, true)
+  pump(gAnn); pump(gBob)
+  eq(gAnn.party:count(), 2, "sanity: ANN and BOB are a pair")
+
+  eq(engage(gAnn), true, "ANN holds her trainer for BOB")
+  pump(gBob) -- the offer lands and BOB, free, takes it on the spot
+  local fightId = gAnn.client.coopBattleId
+  check(fightId ~= nil, "the hub seats the pair the moment BOB joins")
+  eq(gBob.client.coopBattleId, fightId, "both of them, in one fight")
+
+  -- ANN's half assembles the way it does in game: her party packs and goes
+  -- out, and as the one standing at the trainer she hosts, waiting on BOB's.
+  local realPack = CoopBattle.packParty
+  CoopBattle.packParty = function()
+    return { { species = "FIXMON_A", level = 5, hp = 20 } }
+  end
+  local ok, err = pcall(pump, gAnn)
+  CoopBattle.packParty = realPack
+  check(ok, "ANN's handoff runs (" .. tostring(err) .. ")")
+  local pending = gAnn.coop.battle
+  check(pending ~= nil and not pending.ready, "ANN is assembling, waiting on BOB")
+  eq(pending and pending.plan.id, fightId, "under the fight the hub named")
+  check(gAnn.coop.encounter ~= nil, "with her trainer still held")
+
+  -- BOB's half cannot assemble -- this harness has no link modules to pack a
+  -- party with -- so he gives up at the handoff.
+  gAnn.said, gBob.said = {}, {}
+  pump(gBob)
+  check(said(gBob, "link modules"), "BOB gives up at the handoff")
+  eq(gBob.client.coopBattleId, nil, "and the hub lets BOB go")
+  eq(gAnn.client.coopBattleId, nil,
+     "and ANN with him -- one goodbye closes the whole group")
+  eq(gHub.coopBattles[fightId], nil, "the group is gone")
+  eq(gHub:unsettledBattle(gBob.client), nil, "BOB is not bound to its record")
+  eq(gHub:unsettledBattle(gAnn.client), nil, "and neither is ANN")
+
+  -- ANN is told, instead of waiting on a party that is never coming.
+  pump(gAnn)
+  eq(gAnn.coop.battle, nil, "ANN's assembly ends when the hub calls it off")
+  eq(gAnn.coop.running, false, "and she is no longer marked mid-battle")
+  check(said(gAnn, "called off"), "in the sentence the battle screens use")
+  settle(gAnn)
+  eq(gAnn.coop.encounter, nil, "her trainer is handed back -- rule 2")
+  check(fightsAlone(gAnn), "to be fought alone")
+  eq(gAnn.finished, nil, "not finished off as if a fight had happened")
+
+  -- And the pair is free for the next fight straight away, not in an hour.
+  settle(gBob)
+  resetCoopWild(gAnn)
+  pump(gAnn); pump(gBob)
+  eq(engage(gAnn), true, "ANN walks into another trainer")
+  pump(gBob)
+  local nextId = gBob.client.coopBattleId
+  check(nextId ~= nil and nextId ~= fightId,
+        "BOB is seated in the next fight, not refused as still busy")
+  eq(gAnn.client.coopBattleId, nextId, "alongside ANN")
+  resetCoopWild(gAnn); resetCoopWild(gBob)
+  endFight(gAnn, gBob)
 end)()
 
 -- ------- partner gating: two layers, and both are checked
@@ -9965,13 +10785,17 @@ end)()
   -- the wrapper `coopSide`'s fake transport flattens elsewhere in this file,
   -- and this harness deliberately does not, so it is unwrapped here instead.
   local sawAbort, sawField, sawLeave = false, false, false
+  local leaves, leftBeforeAbort = 0, false
   for _, m in ipairs(sent) do
     local relayed = type(m.payload) == "table" and m.payload.payload
     if m.type == Wire.COOP_RELAY and type(relayed) == "table"
-       and relayed.t == "abort" then sawAbort = true end
+       and relayed.t == "abort" then
+      sawAbort = true
+      leftBeforeAbort = leftBeforeAbort or sawLeave
+    end
     if m.type == Wire.COOP_RELAY and type(relayed) == "table"
        and relayed.t == "field" then sawField = true end
-    if m.type == Wire.COOP_LEAVE then sawLeave = true end
+    if m.type == Wire.COOP_LEAVE then sawLeave = true; leaves = leaves + 1 end
   end
   check(sawAbort, "a dead-party host relays an abort")
   check(not sawField,
@@ -9979,6 +10803,10 @@ end)()
   check(sawLeave,
         "and says goodbye -- the same one-goodbye-closes-all a finished "
         .. "battle uses")
+  eq(leftBeforeAbort, false,
+     "the abort goes first: after the goodbye the group is gone, and the "
+     .. "other three would never hear why")
+  eq(leaves, 1, "and says it once")
   eq(host.battle, nil, "its own assembly is abandoned")
   eq(host.running, false, "and it is no longer marked mid-battle")
 end)()
@@ -10144,6 +10972,24 @@ end)()
   eq(party[1].status, nil, "status clears")
   eq(party[1].moves[1].pp, 24,
      "and PP restores to base plus the PP UP bonus (20 + floor(20/5)*1)")
+  -- The bonus is capped at 7 per PP UP on both carts (pokered AddBonusPP,
+  -- pokecrystal / pokegold ComputeMaxPP): a 40-PP move with three heals to
+  -- 61, not 64 -- the uncapped fifth this heal used to add.
+  local capped = {
+    { stats = { hp = 60 }, hp = 1, moves = {
+      { id = "FIX_LONG", pp = 0, ppUps = 3 }, { id = "FIX_EDGE", pp = 0, ppUps = 3 } } },
+  }
+  Coop.healParty({ data = { moves = { FIX_LONG = { pp = 40 }, FIX_EDGE = { pp = 35 } } },
+                   save = { party = capped } })
+  eq(capped[1].moves[1].pp, 61, "PP cap: a 40-PP move with three PP UPs heals to 61")
+  eq(capped[1].moves[2].pp, 56, "PP cap: a 35-PP move's bonus is exactly the cap, 56")
+  -- A Gold slot that states only its raised maximum (the engine's own
+  -- Mon.ppUpsOf recovers the count) heals to it, and keeps it in step.
+  local gold = { { stats = { hp = 60 }, hp = 1, moves = { { id = "FIX_LONG", pp = 3, maxPp = 61 } } } }
+  Coop.healParty({ generation = 2, data = { moves = { FIX_LONG = { pp = 40 } } },
+                   save = { generation = 2, party = gold } })
+  eq(gold[1].moves[1].pp, 61, "PP cap (Gold): a stated 61 is three PP UPs, and heals to it")
+  eq(gold[1].moves[1].maxPp, 61, "PP cap (Gold): ...the stated maximum kept in step")
   eq(Coop.healParty({ save = {} }), false,
      "no party at all is answered rather than thrown through")
 
@@ -10843,6 +11689,25 @@ end)()
   Evolution.checkParty = realCheck
   check(seen and seen[caterpie],
         "and still offers when no mid-battle movie played")
+
+  -- ...and never after a lost fight (FX-C2): pokered EndOfBattle jumps past
+  -- EvolutionAfterBattle when wBattleResult is not 0 -- a Red loss, the
+  -- mutual last-monster knockout against the computer included.
+  for _, word in ipairs({ "loss", "lose" }) do
+    seen = nil
+    Evolution.checkParty = function(game, onDone, leveledUp)
+      seen = leveledUp
+      return 0
+    end
+    local offered = Coop.offerEvolutions(
+      { data = { pokemon = {} }, save = { party = { caterpie } } },
+      { [caterpie] = true },
+      word,
+      nil)
+    Evolution.checkParty = realCheck
+    check(seen == nil and offered == false,
+          "offerEvolutions offers nothing after a Red " .. word .. " (EndOfBattle's wBattleResult gate)")
+  end
 
   -- Gen 2 apply replaces the party slot and retargets on-plate pointers.
   local old = { species = "SLUG", level = 8 }
@@ -13678,17 +14543,31 @@ end)()
   eq(next(pvpMenu.pending), nil, "and commits nothing -- no action was filed")
   eq(pvpMenu.phase, "choose", "the phase itself is untouched by asking")
 
+  -- #86: an NPC RUN is refused on the spot and never filed. Forwarding it used
+  -- to forfeit the gym, because the referee took every run as a concession;
+  -- the sim still no-ops a filed one (modified-client proof), but an honest
+  -- menu never sends it and the turn is not spent. Same contract
+  -- tests/coop_mediated.lua pins for the mediated screen.
   local npcMenu = setmetatable({
     sim = npcClient.sim, mine = 1, phase = "choose", commandIndex = runIndex,
-    pending = {},
+    pending = {}, messages = {},
   }, { __index = CoopBattle })
   local committed
   npcMenu.commit = function(_, action) committed = action end
   CoopBattle.updateCommand(npcMenu, { wasPressed = function(_, k) return k == "a" end })
   eq(npcMenu.runAsk, nil, "against an NPC, RUN never raises a prompt")
-  check(committed ~= nil and committed.kind == "run",
-        "it is filed as the ordinary refused action instead -- byte-identical "
-        .. "to today")
+  eq(committed, nil, "and files no action -- a run would forfeit the fight")
+  local refused = false
+  for _, row in ipairs(npcMenu.messages) do
+    local text = type(row) == "table" and row.text or row
+    if type(text) == "string" and text:lower():find("running", 1, true) then
+      refused = true
+    end
+  end
+  check(refused, "it says the original's line: no running from a trainer battle")
+  eq(npcMenu.phase, "messages", "the line plays")
+  eq(npcMenu.after, "choose",
+     "and the command menu comes back without spending the turn")
 
   -- ------- the partner's prompt: NO by default, and a settle floor before
   -- any button counts
@@ -14665,8 +15544,10 @@ end)()
     refBoth:submitChoice("foeB", { action = "fight", move = 0, target = 0 })
     local refBothEvents = refBoth:drainEvents()
     local refSaysNoTarget = false
+    -- Read without its K17 name mark (and any K18 break): the referee writes
+    -- "^aGamma" where the cart's <USER> prints the name.
     for _, e in ipairs(refBothEvents) do
-      if e.t == "msg" and e.text == "Gamma has no target" then refSaysNoTarget = true end
+      if e.t == "msg" and Wire.plainBattleLine(e.text) == "Gamma has no target" then refSaysNoTarget = true end
     end
     check(refSaysNoTarget,
        "cross-path/wording: the referee narrates the skip -- 'Gamma has no target'")
@@ -15548,12 +16429,29 @@ end)()
   -- the throws exactly as Red does.
   check(Battlefield.enabled(goldGame),
         "Gen2 draws the top-down theatre too")
-  -- Still a gate rather than `true`: a generation the engine grows later has no
-  -- front pics this file knows how to ask for, and the GB fallback is a better
-  -- answer than an arena full of blanks.
-  check(not Battlefield.enabled({ data = { type_chart = { generation = 3 } } })
-        or Gen.generation({ data = { type_chart = { generation = 3 } } }) ~= 3,
-        "an unknown generation falls back to the classic path")
+  -- Still a gate rather than `true`, and Gen 3 is now a known generation
+  -- (Battlefield's THEATRE_GENERATIONS carries it) -- so this used to pass only
+  -- because a Gen 3 table was clamped to Gen 1 by Gen.generation and the
+  -- clause after the `or` was never reached.  The truth it pins now is the
+  -- gate T9 kept on purpose: Gen 3's art (64x64 pics, the cart's icons and
+  -- walkers, the backdrop from its own battle scene) is reached through the
+  -- *running* engine, so a table that merely says generation 3 on a boot that
+  -- is not one -- this stub, a dataset read out of context -- has none of it to
+  -- draw with and keeps the classic path rather than an arena full of blanks.
+  local gen3Shaped = { data = { type_chart = { generation = 3 } } }
+  eq(Gen.generation(gen3Shaped), 3,
+     "a Gen 3-shaped stub reads as generation 3, no longer clamped to Gen 1")
+  check(not Battlefield.enabled(gen3Shaped),
+        "but without a live Gen 3 boot (Gen3.active() is false) it stays off the theatre")
+  -- The other half: the same table through a module graph whose mod facade is
+  -- a Gen 3 loader, which is the fact Gen3.active() reads.  The real loader
+  -- version of this (a Gen 3 load, both carts) is the tri-gen block near the
+  -- top of this file; tests/gen3_battlefield.lua drives the theatre itself.
+  local gen3Battlefield = resolver(setmetatable({ generation = 3 }, { __index = stubMod }))("Battlefield")
+  check(gen3Battlefield.enabled(gen3Shaped),
+        "and on a Gen 3 boot the same table enables the theatre")
+  eq(Gen.generation({ data = { type_chart = { generation = 4 } } }), 1,
+     "a generation the mod does not know still reads as Gen 1 -- Gen.generation only answers 1, 2 or 3")
 
   for _, mode in ipairs({ "coop_wild", "wild" }) do
     local wild = Battlefield.layout({
@@ -21765,8 +22663,11 @@ if eng and eng.BattleState then
   local okBadges, victories = pcall(require, "data.scripts.victories")
   local leaderClass, leaderParty
   if okBadges and type(victories) == "table" then
+    -- The engine's victories module also carries helper functions beside the
+    -- badge rows, and `pairs` order is unspecified, so a function can come up
+    -- first -- indexing it threw here on some runs and killed the suite.
     for key, reward in pairs(victories) do
-      if reward.badge and type(key) == "string" then
+      if type(reward) == "table" and reward.badge and type(key) == "string" then
         local hash = key:find("#", 1, true)
         if hash then
           leaderClass = key:sub(1, hash - 1)
@@ -22215,20 +23116,20 @@ end)()
   eq(f.lines[2].spawnfx, 3, "row 2 is the reveal that pops it")
   eq(f.lines[3].drain, 3, "row 3 is the bar finishing its fall")
   eq(f.lines[4].faintfx, 3, "row 4 is the monster sinking")
-  eq(f.lines[5], "RATT fainted!", "row 5 is the text, only after the sink")
+  eq(f.lines[5], "Enemy RATT\nfainted!", "row 5 is the text, only after the sink")
   eq(f.lines[6].clearPic, 3, "row 6 releases the sprite, behind the text")
 
   local sawTextEarly = false
   local guard = 0
-  while f.shown ~= "RATT fainted!" and guard < 400 do
+  while f.shown ~= "Enemy RATT\nfainted!" and guard < 400 do
     f:update(1 / 60)
     guard = guard + 1
-    if f.shown == "RATT fainted!" and (f.draining or f.faintFx) then
+    if f.shown == "Enemy RATT\nfainted!" and (f.draining or f.faintFx) then
       sawTextEarly = true
     end
   end
   check(guard < 400, "the faint sequence resolves in a bounded number of frames")
-  eq(f.shown, "RATT fainted!", "...and it ends on the fainted! text")
+  eq(f.shown, "Enemy RATT\nfainted!", "...and it ends on the fainted! text")
   check(not sawTextEarly,
         "the text never shows while the bar or the sink is still playing")
   eq(f.slots[3].shownHp, 0, "by the time the text shows, the bar has fully landed")
@@ -24753,6 +25654,35 @@ end
           "...and the id the referee states beside it is what pays the award")
   end
 
+  -- ------- CL2: Red's traded boost, read as pokered GainExperience reads it
+  -- (MON_OTID against wPlayerID; MediatedBattle.expTraded1, the one reading
+  -- co-op prices its awards with too): x1.5 and "a boosted" in the line.
+  do
+    local function award(otId, flagged)
+      local mine = monAt(50)
+      mine.exp = 1000000 -- no level-up, so the number is readable
+      mine.otId, mine.traded = otId, flagged
+      local screen = newScreen({ party = { mine }, mode = "wild", role = "host", battle = "b-trade" })
+      screen.game.save.player.id = 1111
+      local said = nil
+      screen.say = function(_, text) if type(text) == "string" and text:find("gained", 1, true) then said = text end end
+      local before = mine.exp
+      screen:gainExp({ slot = 0, species = foeSpecies, level = 50, participants = 1 })
+      return mine.exp - before, said
+    end
+    local def = data.pokemon[foeSpecies]
+    local plain = eng.Experience.gainFor(def, 50, false, 1, false, data.constants)
+    local boosted = eng.Experience.gainFor(def, 50, false, 1, true, data.constants)
+    local got, line = award(2222)
+    eq(got, boosted, "CL2 (mediated Red): a monster from another OT id is paid x1.5")
+    check(line ~= nil and line:find("a boosted", 1, true) ~= nil,
+          "CL2 (mediated Red): ...and its line says \"a boosted\" (" .. tostring(line) .. ")")
+    got, line = award(1111, true)
+    eq(got, plain, "CL2 (mediated Red): the player's own OT id is home-grown, a stale flag notwithstanding")
+    check(line ~= nil and line:find("a boosted", 1, true) == nil, "CL2 (mediated Red): ...with the plain line")
+    eq((award(nil, true)), boosted, "CL2 (mediated Red): an OT-less monster flagged traded is paid as one")
+  end
+
   -- ------- save-mon mutation vs. the referee sheet, and the row order the
   -- award queues on the battlefield path (text -> expfill -> grew/learned)
   do
@@ -24784,8 +25714,11 @@ end
     check(screen.slots[0].hp < mine.hp or plateHpBefore == hpBefore,
           "...so a hurt fighter is not healed to full off the save file")
 
-    -- The referee never levels, so the next damage packet still states the
-    -- pre-level pair. The plate must keep the climb rather than snap back.
+    -- The rest of the batch the level-up came in was resolved before the
+    -- referee heard of it (contract K9 tells it; from the next batch on its
+    -- numbers hold the climb -- tests/mediated_battle_client.lua pins that
+    -- half), so the next damage packet here still states the pre-level pair.
+    -- The plate must keep the climb rather than snap back.
     screen:noteSlot({
       t = "damage", slot = 0,
       hp = plateHpBefore, maxHp = plateMaxBefore,
@@ -25175,6 +26108,35 @@ end
        "the vitamin's Stat Exp did not land on the skipped member")
     check((real.statExp.attack or 0) > rightEv,
           "...it landed on the monster the sheet actually describes")
+  end
+
+  -- ------- a fight between players writes nothing home (wave 5 of
+  -- docs/plans/gen12-referee-gaps-fix.md): no cart pays EXP in a link battle
+  -- (pokered GainExperience returns on LINK_STATE_BATTLING; Gold and Gen 3
+  -- reload the party after one), so a 1-on-1's `exp` is refused whatever a hub
+  -- sends, and a vitamin's Stat Exp stays the fight's while the bag -- this
+  -- mod's rule -- is still spent.  The same award in a wild fight is paid.
+  do
+    local function fightOver(mode, battleId, party, inventory)
+      local screen = newScreen({ party = party, mode = mode, battle = battleId, inventory = inventory })
+      send(screen, battleId, { t = "faint", slot = 3, side = "b", text = "FOE" })
+      send(screen, battleId, { t = "exp", slot = 0, side = "a", mon = 0, species = foeSpecies,
+                               level = 30, participants = 1 })
+      return screen
+    end
+    local mine = monAt(12)
+    local before = mine.exp
+    local pvp = fightOver("1v1", "b-pvp", { mine }, { PROTEIN = 1 })
+    eq(mine.exp, before, "1v1: no EXP is banked in a fight between players")
+    local ev0 = mine.statExp.attack or 0
+    pvp.pendingItem, pvp.pendingItemSlot = "PROTEIN", 1
+    pvp:confirmPendingItem("PROTEIN", 1)
+    eq(mine.statExp.attack or 0, ev0, "1v1: a vitamin's Stat Exp is not written home")
+    eq(pvp.game.save.inventory.PROTEIN, nil, "1v1: ...while the bag is still spent")
+    local wild = monAt(12)
+    local wildBefore = wild.exp
+    fightOver("wild", "b-pvw", { wild })
+    check(wild.exp > wildBefore, "wild: the same award is paid against the computer")
   end
 
   -- ------- round 6: participation-based exp on the mediated client
@@ -26085,7 +27047,10 @@ end)()
     eq(ppClient.phase, "messages",
        "a 0-PP fight that skipped the move menu still shows why")
     eq(ppClient.after, "move", "...and comes back to the list")
-    check((ppClient.messages[1] or ""):find("no PP left", 1, true),
+    -- Red's own words (FX-C2): pokered MoveNoPPText, "No PP left for /
+    -- this move!" -- Gold's BattleText_TheresNoPPLeftForThisMove is the
+    -- other one (MediatedBattle `noPpLine`).
+    check((ppClient.messages[1] or ""):gsub("\n", " "):find("No PP left for this move!", 1, true),
           "the PP sentence is shown")
     eq(ppClient.moveMemory[2], nil,
        "...and does not remember a move the hub never took")
@@ -26673,6 +27638,20 @@ do
      "GSC Official is allowed on Gen 2")
   eq(Config.featuredServerAllowed(1, gsc.host), false,
      "and refused on Gen 1")
+  -- No official hub is deployed for FireRed / LeafGreen / Emerald (owner
+  -- decision, 2026-09-30; the FEATURED_SERVERS note in Config.lua), so a Gen 3
+  -- boot is offered neither row -- both name their generation, and a gate
+  -- admits only what a row names.  Unknown generations stay shut the same way.
+  eq(Config.featuredServerAllowed(3), false,
+     "no official hub is offered on Gen 3")
+  eq(Config.featuredServerAllowed(3, Config.FEATURED_SERVER_HOST), false,
+     "RBY Official is refused on Gen 3")
+  eq(Config.featuredServerAllowed(3, gsc.host), false,
+     "and so is GSC Official")
+  eq(Config.featuredServerAllowed(3, "friend.example.com:7788"), true,
+     "while a community hub is never gated, on any generation")
+  eq(Config.featuredServerAllowed(4), false,
+     "a generation nothing knows is offered no official hub")
   eq(Servers.isFeaturedAddress(Config.FEATURED_SERVER_HOST), true,
      "isFeaturedAddress recognises the RBY official host")
   eq(Servers.isFeaturedAddress("play.rbymmo.com"), true,
@@ -26707,6 +27686,13 @@ do
      "Gen 1 still shows only RBY Official")
   eq(store:menuList(redGame)[1].name, Config.FEATURED_SERVER_NAME,
      "under the RBY official label")
+  local gen3Game = { data = { type_chart = { generation = 3 } } }
+  eq(#store:menuList(gen3Game), 0,
+     "Gen 3 sees neither official row on a fresh SERVERS list")
+  eq(store:menuGet(Config.FEATURED_SERVER_HOST, gen3Game), nil,
+     "menuGet refuses the RBY official key on Gen 3")
+  eq(store:menuGet(gsc.host, gen3Game), nil,
+     "and the GSC official key too")
 
   local resolved = store:menuGet(featured.key)
   check(resolved ~= nil, "menuGet resolves the synthetic row")
@@ -27163,6 +28149,19 @@ do
   }
   eq(store:autoJoinEntry(redGame), nil,
      "while a Gen 1 boot cannot resolve the GSC official auto-join")
+  -- Gen 3 has no official row to arm or dial (Config.FEATURED_SERVERS names
+  -- only Gen 1 and Gen 2), so the same gate refuses both -- and the GSC arming
+  -- Gold left behind resolves to nothing there too, rather than a Gen 3 boot
+  -- dialling a Gold-only hub.
+  local gen3Game = {
+    data = { type_chart = { generation = 3 } },
+  }
+  eq(store:autoJoinEntry(gen3Game), nil,
+     "a Gen 3 boot cannot resolve the GSC official auto-join either")
+  eq(store:setAutoJoin(Config.FEATURED_SERVER_HOST, true, gen3Game), nil,
+     "and cannot arm RBY Official")
+  eq(store:setAutoJoin(gsc.host, true, gen3Game), nil,
+     "or GSC Official")
   -- Restore the RBY official arming this block started with, so the stub
   -- assertions below still see one featured auto-join row.
   check(store:setAutoJoin(Config.FEATURED_SERVER_HOST, true) ~= nil,
@@ -28643,6 +29642,44 @@ do
   stubMod.log.warn = function() end
 end
 
+-- ------- SCREEN.HOSTINFO: the address page states what a friend types
+--
+-- Drawn rows, not a text box: `textLines` is what `draw` paints, row for
+-- row.  The IP and the PORT are rows of their own, because "ip:port" whole
+-- ran past the box's right border (17 glyphs from x 16 on a 20-tile box) and
+-- cut the last digit of the port.
+do
+  local hostingClient = {
+    isHosting = function() return true end,
+    isConnected = function() return true end,
+    hostAddress = function() return "192.168.1.125:7681" end,
+    hostJoinCode = function() return "SN21JW" end,
+  }
+  local before = ctx.client
+  ctx.client = hostingClient
+  local infoDef = screenRegistry[Ui.SCREEN.HOSTINFO]
+  local page = infoDef and infoDef.new({ input = {}, stack = {} })
+  check(page ~= nil and type(page.textLines) == "function",
+        "HOSTINFO is a drawn page that says its words through textLines")
+  local text = page and table.concat(page:textLines(), " | ") or ""
+  check(text:find("192.168.1.125", 1, true) ~= nil, "the page states the IP: " .. text)
+  check(text:find("PORT 7681", 1, true) ~= nil, "...the port on a row of its own")
+  check(text:find("CODE SN21JW", 1, true) ~= nil, "...and the join code")
+  local fits = true
+  for _, row in ipairs(page and page:rows() or {}) do
+    if row[2] + #row[1] * 8 > 152 then fits = false end
+  end
+  check(fits, "every row ends inside the box's right border (x <= 152)")
+  local widest = "255.255.255.255:65535"
+  hostingClient.hostAddress = function() return widest end
+  fits = true
+  for _, row in ipairs(page:rows()) do
+    if row[2] + #row[1] * 8 > 152 then fits = false end
+  end
+  check(fits, "...the widest IPv4 address and port too")
+  ctx.client = before
+end
+
 stubMod.content.screens, stubMod.hooks, stubMod.ui = nil, nil, nil
 _G.love = ambientLove
 
@@ -28855,6 +29892,16 @@ do
   redMenu.opts.onCancel()
   eq(pushed and pushed.id, "StartMenu",
      "on Gen 1, B from MMO still reopens StartMenu")
+
+  -- Gen 3's START is a layer on the cart's own stack rather than a screen the
+  -- mod can push (Ui.reopenStartMenu hands it to Gen.reopenStartMenu on a live
+  -- Gen 3 boot, which needs the engine), so what a headless suite can pin is
+  -- the id the helpers name it by -- the layer StartMenu.show pushes.
+  local MenuGen = need("Gen")
+  eq(MenuGen.startMenuId(goldGame), "Gen2StartMenu", "Gold's START menu is named for Gold")
+  eq(MenuGen.startMenuId(redGame), "StartMenu", "Red's for Red")
+  eq(MenuGen.startMenuId({ data = { type_chart = { generation = 3 } } }), "start",
+     "and a Gen 3 boot's is the cart's own \"start\" layer")
 end
 
 stubSprites = {}
@@ -29462,6 +30509,11 @@ local gen2 = { data = { gen2Constants = {}, pokemon = { PIDGEY = { name = "PIDGE
 
 eq(Gen.nicknameScreenId(gen1), "NamingScreen", "Gen 1 catches open the Gen 1 grid")
 eq(Gen.nicknameScreenId(gen2), "Gen2NamingScreen", "and Gold's opens Gold's")
+-- Gen 3 is not a pushed mod screen at all: the id is the game3 stack layer
+-- the cart's own naming grid pushes, which is what a caller watching the
+-- stack looks for.
+eq(Gen.nicknameScreenId({ data = { type_chart = { generation = 3 } } }), "naming",
+   "and a Gen 3 catch opens the cart's grid layer")
 eq(Config.NICKNAME_MAX, 10,
    "the grid takes the same ten characters every other nickname in the save gets")
 
@@ -29694,6 +30746,13 @@ end
 
 check(Gen.dexAddedText({ data = POKEDEX }, "PIDGEY"):find("PIDGEY", 1, true) ~= nil,
       "the new-entry line names the species")
+-- Broken where the carts break them: pokered _ItemUseBallText06 ("New #DEX
+-- data" / line "will be added for" / cont "<MON>!") and pokegold / pokecrystal
+-- _NewDexDataText ("<MON>'s data" / line "was newly added to" / cont "the #DEX.").
+eq(Gen.dexAddedText({ data = POKEDEX }, "PIDGEY"), "New POK\195\169DEX data\nwill be added for\nPIDGEY!",
+   "Red's new-entry line, the cart's three rows")
+eq(Gen.dexAddedText({ generation = 2, data = {} }, "SENTRET"), "SENTRET's data\nwas newly added to\nthe #DEX.",
+   "Gold's new-entry line, the cart's three rows (pokegold _NewDexDataText)")
 
 -- ------- the grant, end to end on the screen
 
@@ -30356,6 +31415,46 @@ end)()
   T.same(scissorWith(function(x, y) return 112.5 + x * 5, 24.5 + y * 5 end),
      { 112, 24, 801, 481 },
      "a fractional origin still reaches the far edge's partial pixel")
+end)()
+
+-- ------------------------------------------------------------------
+-- Gold's weather on the arena (wave 4 of docs/plans/gen12-referee-gaps-fix.md)
+-- ------------------------------------------------------------------
+--
+-- The arena's sky painter was Gen 3's alone; Gold's RAIN DANCE / SUNNY DAY /
+-- SANDSTORM now reach it (MediatedBattle.weatherOfLine2), so a Gold frame
+-- with a sky draws its particles and a Red frame never does.
+;(function()
+  if not io.open(MOD_PATH .. "/src/Battlefield.lua", "rb") then
+    check(true, "(Battlefield unavailable -- Gold weather draw skipped)")
+    return
+  end
+  local Battlefield = need("Battlefield")
+  local polys = 0
+  local gfx = setmetatable({
+    polygon = function() polys = polys + 1 end,
+    getLineWidth = function() return 1 end,
+    getFont = function() return nil end,
+    getWidth = function() return 640 end,
+    getHeight = function() return 360 end,
+  }, { __index = function() return function() end end })
+  local savedLove = _G.love
+  _G.love = { graphics = gfx }
+  local function rainDrops(generation, weather)
+    polys = 0
+    Battlefield.draw({ game = { generation = generation, data = {} } }, {
+      mode = "mmo",
+      allySeats = { { index = 1, name = "PIKA", hp = 20, maxHp = 24 } },
+      foeSeats = { { index = 3, name = "RATT", hp = 18, maxHp = 18 } },
+      weather = weather,
+    }, nil)
+    return polys
+  end
+  local goldClear = rainDrops(2, nil)
+  local goldRain = rainDrops(2, "RAIN")
+  check(goldRain > goldClear + 3, "Gold weather: the arena paints Gold's rain", goldRain - goldClear)
+  eq(rainDrops(1, "RAIN"), rainDrops(1, nil), "Gold weather: a Red frame paints no sky")
+  _G.love = savedLove
 end)()
 
 T.finish("rby_mmo")

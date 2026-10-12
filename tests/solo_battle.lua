@@ -17,13 +17,14 @@
 -- MediatedBattle's renderer, Coop's warp, SoloBrain's TrainerAI. Run from the
 -- engine checkout those resolve and run from this folder they do not, which
 -- would make the same suite a different suite depending on which directory it
--- was started in -- and the sharpest end of that is `SoloBrain`, whose default
--- RNG is `math.random`: with the engine reachable a trainer fight stops being a
--- pure function of its seed. Blanking the search path makes every one of those
--- requires fail the same way in both places, which is both what keeps this
--- suite deterministic and what proves the fallback contract SoloBattle states
--- outright: a nil brain is not a failure, `Turn:autoPick` answers for the
--- opponent, and the fight still runs. The brain itself is tests/solo_brain.lua.
+-- was started in. Blanking the search path makes every one of those requires
+-- fail the same way in both places, which keeps this suite deterministic.  It
+-- costs nothing on the opponent's side: on Red and Gold SoloBrain builds no
+-- brain anyway (the referee runs the carts' own computer, `Turn:autoPick`),
+-- and the one brain it does build -- a mod's `brain` function on a Red
+-- trainer record -- needs no engine module to run.  The brain itself is
+-- tests/solo_brain.lua; who answers for the opponent in a whole fight is the
+-- "who answers for the computer" section at the end of this file.
 --
 -- Legal: every species, move and trainer below is invented for this file. No
 -- ROM-derived name appears in it. The item ids are the ones `BattleSim`'s own
@@ -215,12 +216,25 @@ local function fightOf(kind, o)
           maxHp = o.pHp or 200, level = 20 }),
   })
   for id, count in pairs(o.inventory or {}) do game.save.inventory[id] = count end
+  -- A dataset of the section's own (a fresh table: MediatedBattle memoises the
+  -- type order per data table, so the shared one cannot be edited in place).
+  if o.data then game.data = o.data end
+  -- `cart2`: a Gold game (the referee-fidelity section at the end of this file
+  -- installs what reads it as one) -- the cart's data, and the player's id and
+  -- purse where Gold keeps them.
+  if o.cart2 then
+    game.generation = 2
+    game.data = o.data or game.data
+    game.save.generation = 2
+    game.save.player = { name = "PLAYER", id = 4321, money = o.money or 3000 }
+  end
 
   local state, wildMon
   if kind == "wild" then
     wildMon = o.wildMon or mon({ species = "BETA", spd = o.eSpd or 10,
                                  maxHp = o.eHp or 40, atk = o.eAtk or 20 })
-    state = { kind = "wild", enemy = { mon = wildMon }, enemyParty = { wildMon } }
+    state = { kind = "wild", enemy = { mon = wildMon }, enemyParty = { wildMon },
+              battleType = o.battleType }
   else
     state = {
       kind = "trainer",
@@ -289,9 +303,12 @@ local function fightOf(kind, o)
     say = function(_, _, after) if after then after() end end,
   }
 
+  -- `unseeded`: no seed hook, so `_seed` draws the same love-then-math roll
+  -- `_randomByte` does when `random` is absent too -- the game's own shape.
   local solo = Solo.new(ui, {
     enabled = function() return o.enabled ~= false end,
-    seed = function() return o.seed or 4242 end,
+    seed = (not o.unseeded) and function() return o.seed or 4242 end or nil,
+    random = o.random,
   })
   local started = (kind == "wild")
     and solo:onWildEncounter(game, state, o.mapId or "MAP")
@@ -398,10 +415,10 @@ end
   eq(table.concat(levels, ","), "11,12,13",
      "in party order, so the trainer leads with the monster it means to")
 
-  -- The trainer's own kit. This fixture has no items list and no AI class
-  -- that would give it one, so the seat is empty -- not DEFAULT_NPC_BAG.
-  -- A Youngster that spammed potions was the gym kit being handed to every
-  -- NPC; gym leaders still reach for their class item via SoloBrain.bagFor.
+  -- The trainer's kit. Red and Gold seat none (contract K16): the class's
+  -- item is the referee's TrainerAI / AI_TryItem, run from the class data the
+  -- upload states -- not DEFAULT_NPC_BAG, the gym kit that once made a
+  -- Youngster spam potions.
   local bag = foe.bag
   eq(bag, nil, "a trainer with no items carries no bag")
 end)()
@@ -411,8 +428,10 @@ end)()
     trainer = { baseMoney = 20, classId = "OPP_ALPHA",
                 items = { "POTION", "POTION" } },
   })
-  eq(f.sim.byId[FOE].bag and f.sim.byId[FOE].bag.POTION, 2,
-     "the trainer's own items list is the bag, counted per entry")
+  -- Contract K16: Red and Gold upload no NPC bag -- the referee runs the
+  -- class's own item AI off `aiClass` (Red) / the class attributes (Gold).
+  eq(f.sim.byId[FOE].bag, nil,
+     "K16: a Red trainer's items list is no bag any more -- nothing is uploaded")
 end)()
 
 ;(function()
@@ -432,9 +451,9 @@ end)()
 --
 -- The property the spike measured and this pins: a three-mon trainer fought on
 -- one seat runs through both replacements to a real outcome, and every event
--- reaches the screen. The brain is deliberately absent here (see the header),
--- so what answers for the trainer is `Turn:autoPick` -- the same picker every
--- hub-refereed NPC seat runs on.
+-- reaches the screen. A Red trainer with no registered brain gets none (the
+-- header), so what answers for the trainer is `Turn:autoPick` -- the carts'
+-- own computer, the same path every hub-refereed NPC seat runs on.
 
 ;(function()
   local f = fightOf("trainer", {
@@ -447,8 +466,8 @@ end)()
     },
   })
   eq(f.solo.brain, nil,
-     "no brain: with no engine reachable SoloBrain declines, which is the "
-     .. "fallback contract rather than a failure")
+     "no brain: a Red trainer with no registered brain gets none -- the "
+     .. "referee's own computer answers for it")
 
   local out = playOut(f)
   ok(out ~= nil, "the fight reaches an outcome")
@@ -476,8 +495,9 @@ end)()
 -- Gen 1 charges for a ball thrown at a trainer's monster -- the ball is gone
 -- and the turn is spent (`BattleState:throwBall`'s non-wild arm) -- and
 -- `coop_npc` gets that for free, because the referee's refusal costs exactly
--- the same two things. What it does *not* get is the cart's wording; that
--- divergence is written down in Config rather than asserted here.
+-- the same two things.  Since wave 5 the referee says it in the cart's words
+-- too (pokered ThrowBallAtTrainerMon: "The trainer blocked the BALL!" /
+-- "Don't be a thief!"; BattleSim Turn), where it used to say "But it failed".
 
 ;(function()
   local f = fightOf("trainer", { inventory = { POKE_BALL = 3 } })
@@ -495,7 +515,8 @@ end)()
   f.solo:update(1 / 60, f.game)
 
   eq(countKind(f.events, "catch"), 0, "nothing is caught off a trainer")
-  eq(saidTimes(fight, "But it failed"), 1, "the throw is refused")
+  eq(saidTimes(fight, "blocked the BALL!"), 1, "the throw is refused, in the cart's words")
+  eq(saidTimes(fight, "Don't be a thief!"), 1, "...both of its lines")
   eq(sim.byId[PLAYER].bag.POKE_BALL, 2, "the ball is spent all the same")
   eq(f.game.save.inventory.POKE_BALL, 2, "and debited from the real bag")
   eq(sim.turn, turnBefore + 1, "and the turn goes with it")
@@ -651,12 +672,14 @@ end)()
   eq(fight.COMMANDS[4], "RUN", "the fourth command is RUN")
   fight:updateCommand(input)
 
-  eq(saidTimes(fight, "running from"), 1, "the screen refuses, once")
+  -- "No! There's no" / line "running from a" / cont "trainer battle!": the
+  -- `cont` scrolls the middle row (K18), so the first row is the count.
+  eq(saidTimes(fight, "No! There's no"), 1, "the screen refuses, once")
   eq(f.solo.refuseRun, nil, "and nothing is filed with the referee")
   eq(fight.answeredTurn, false, "the menu is not closed as answered")
 
   f.solo:update(1 / 60, f.game)
-  eq(saidTimes(fight, "running from"), 1,
+  eq(saidTimes(fight, "No! There's no"), 1,
      "the pump adds no second copy of the sentence")
   eq(sim.turn, turnBefore, "the turn is not spent")
   eq(sim:outcome(), nil, "and nothing was forfeited")
@@ -699,12 +722,14 @@ end)()
   eq(pvpSent[1] and pvpSent[1].action, "run", "...as a concession")
   eq(saidTimes(pvp, "running from"), 0,
      "and does not pretend a 1v1 is a trainer battle")
-  eq(saidTimes(pvp, "forfeit"), 1,
-     "and says it forfeited after the send landed")
+  -- Red: nothing at the send -- the cart's "Got away safely!" follows the
+  -- referee's `run` event (MediatedBattle.linkRunLine).
+  eq(saidTimes(pvp, "forfeit"), 0,
+     "and says nothing at the send on Red (the link run line follows the referee)")
 
   local npc, npcSent = pressRun("coop_npc")
   eq(#npcSent, 0, "trainer RUN is not filed")
-  eq(saidTimes(npc, "running from"), 1,
+  eq(saidTimes(npc, "No! There's no"), 1,
      "the screen still says there is no running from a trainer battle")
 end)()
 
@@ -1299,6 +1324,1648 @@ end)()
   -- got right -- it must keep getting it right.
   local foe = f.fight.slots[f.fight:foeSlot()]
   eq(foe.hp, foe.maxHp, "a wild monster is still out of its own whole bar")
+end)()
+
+-- ------------------------------------------------------------------
+-- the chart's axis by name reaches the solo referee
+-- ------------------------------------------------------------------
+--
+-- Gold's badge type boost (BattleSim2, DoBadgeTypeBoosts) names a move's type
+-- through the ruleset's `typeIds` -- MediatedBattle.snapshotRuleset's axis, the
+-- registry ids in chart order -- and the solo divert hands its referee
+-- whatever the ruleset carries (`turnFor(generation)`, one call site for Gen 1
+-- and Gold).  Red's referee reads it too, since this release's side effects:
+-- PoisonEffect turns a POISON type away and a FIRE move thaws (BattleSim
+-- `typeIndexOf`), so a Gen 1 fight is handed the axis as well (the ruleset is
+-- held to carrying it in tests/mediated_battle_client.lua; this harness pins
+-- package.path empty, so every game here reads as Gen 1).
+
+;(function()
+  local real, seen = Turn.create, nil
+  Turn.create = function(opts)
+    seen = opts
+    return real(opts)
+  end
+  local okFight, f = pcall(fightOf, "wild")
+  Turn.create = real
+  ok(okFight and f.started, "typeIds solo: the wild fight is taken over")
+  ok(seen ~= nil and type(seen.typeIds) == "table" and #seen.typeIds > 0,
+     "typeIds solo: Gen 1's referee is handed the axis -- Red's POISON / FIRE side-effect checks read it")
+end)()
+
+-- ------------------------------------------------------------------
+-- Gen 3's statics, and that none of them reaches this generation's path
+-- ------------------------------------------------------------------
+--
+-- The Gen 3 fight itself is tests/gen3_solo.lua (it needs the game3 stand-ins
+-- and the modal stack). What is pinned here is the vocabulary the Gen 3
+-- divert is decided with -- all pure functions -- and that the referee per
+-- generation is still the one this file was written against.
+
+;(function()
+  eq(Solo.turnFor(1), Turn, "turnFor(1) is still BattleSim")
+  eq(Solo.turnFor(3), need("BattleSim3/Turn"), "turnFor(3) is BattleSim3")
+  -- The refusal list is what stays the cart's (Config.SOLO_REFUSED_GEN3, C1:
+  -- the link family and the e-Reader); the other keys name a solo kind (C2).
+  ok(Solo.gen3Refused({ link = true }), "gen3Refused: a link opt")
+  ok(Solo.gen3Refused({}, { eReader = true }), "gen3Refused: an e-Reader foe")
+  ok(Solo.gen3Refused(nil, nil, { kinds = { link = true } }),
+     "gen3Refused: a kinds table on any argument")
+  eq(Solo.kind3Name({ safari = true }, nil, "wild"), "safari", "kind3Name: a safari opt")
+  eq(Solo.kind3Name({}, { roamer = true }, "wild"), "roamer", "kind3Name: a roamer foe")
+  eq(Solo.kind3Name({ kinds = { tutorial = "wally" } }, nil, "wild"), "tutorial",
+     "kind3Name: a kinds table")
+  ok(not Solo.gen3Refused({ firstBattle = false, trainerId = 5 }, {}),
+     "gen3Refused: firstBattle = false is an ordinary trainer")
+  ok(Solo.gen3Double({ double = true }, {}), "gen3Double: the double flag")
+  ok(not Solo.gen3Double({}, { doubleBattle = false }), "gen3Double: a single")
+  ok(Solo.gen3Double({}, { doubleBattle = true }), "gen3Double: a double trainer row")
+  ok(Solo.gen3Double({ trainerIdB = 5 }, {}), "gen3Double: a second trainer is a double of a kind")
+  ok(not Solo.gen3Double(nil, nil), "gen3Double: nothing is not")
+  -- The wider question above; the take-over decision below it.
+  ok(Solo.gen3LoneDouble({ double = true }, {}), "gen3LoneDouble: the double flag")
+  ok(Solo.gen3LoneDouble({}, { doubleBattle = true }), "gen3LoneDouble: a double trainer row")
+  ok(not Solo.gen3LoneDouble({}, { doubleBattle = false }), "gen3LoneDouble: a single is not")
+  ok(not Solo.gen3LoneDouble(nil, nil), "gen3LoneDouble: nothing is not")
+  ok(not Solo.gen3LoneDouble({ trainerIdB = 5 }, {}), "gen3LoneDouble: a second trainer is not")
+  ok(not Solo.gen3LoneDouble({ double = true, trainerIdB = 5 }, { doubleBattle = true }),
+     "gen3LoneDouble: ...whatever else says double")
+  local function gen3Mon(species, extra)
+    local m = { species = species, hp = 20 }
+    for k, v in pairs(extra or {}) do m[k] = v end
+    return m
+  end
+  eq(Solo.gen3UsableMons({ gen3Mon(4), gen3Mon(16) }), 2, "gen3UsableMons: two")
+  eq(Solo.gen3UsableMons({ gen3Mon(4), gen3Mon(16, { hp = 0 }) }), 1, "gen3UsableMons: a fainted one is not")
+  eq(Solo.gen3UsableMons({ gen3Mon(4), { species = 16 } }), 1, "gen3UsableMons: one with no HP is not")
+  eq(Solo.gen3UsableMons({ gen3Mon(4), gen3Mon(16, { isEgg = true }) }), 1, "gen3UsableMons: an egg is not")
+  eq(Solo.gen3UsableMons({ gen3Mon(4), gen3Mon(16, { egg = true }) }), 1, "gen3UsableMons: ...either egg flag")
+  eq(Solo.gen3UsableMons({ gen3Mon(4), gen3Mon(412) }), 1, "gen3UsableMons: the egg species is not")
+  eq(Solo.gen3UsableMons({ gen3Mon(4), gen3Mon(0) }), 1, "gen3UsableMons: no species is not")
+  eq(Solo.gen3UsableMons({ gen3Mon(4), { speciesId = 16, hp = 3 } }), 2,
+     "gen3UsableMons: a monster known only by its speciesId counts")
+  eq(Solo.gen3UsableMons({ gen3Mon(4), "junk", false }), 1, "gen3UsableMons: a non-monster entry is not")
+  eq(Solo.gen3UsableMons({}), 0, "gen3UsableMons: an empty party")
+  eq(Solo.gen3UsableMons(nil), 0, "gen3UsableMons: no party")
+  local two = { gen3Mon(4), gen3Mon(16) }
+  ok(Solo.gen3TakesDouble({ double = true }, {}, two), "gen3TakesDouble: a lone double, two usable")
+  ok(Solo.gen3TakesDouble({}, { doubleBattle = true }, two), "gen3TakesDouble: ...by the row")
+  ok(not Solo.gen3TakesDouble({ double = true }, {}, { gen3Mon(4) }), "gen3TakesDouble: not with one monster")
+  ok(not Solo.gen3TakesDouble({ double = true }, {}, { gen3Mon(4), gen3Mon(16, { hp = 0 }) }),
+     "gen3TakesDouble: ...nor with one usable and a fainted one")
+  ok(not Solo.gen3TakesDouble({ double = true }, {}, nil), "gen3TakesDouble: nor with no party")
+  ok(not Solo.gen3TakesDouble({ double = true, trainerIdB = 5 }, {}, two),
+     "gen3TakesDouble: not a second trainer's, whatever the party")
+  ok(not Solo.gen3TakesDouble({}, {}, two), "gen3TakesDouble: not a single")
+  eq(Solo.kind3Name({ partner = true }, {}, "trainer"), "partner", "kind3Name: Steven's partner")
+  eq(Solo.kind3Name({ twoOpponents = true }, {}, "trainer"), "pair", "kind3Name: ...and two opponents")
+  eq(Solo.gen3Result("win", "catch"), "caught", "gen3Result: a catch")
+  eq(Solo.gen3Result("loss", "run"), "run", "gen3Result: the player ran")
+  eq(Solo.gen3Result("win", "run"), "mon_fled", "gen3Result: the wild mon left (C5: MON_FLED)")
+  eq(Solo.gen3Result("draw", "ko", true), "lose", "gen3Result: a whiteout draw is a defeat")
+  -- ...to the script; the save keeps B_OUTCOME_DREW (pret Cmd_checkteamslost
+  -- ORs LOST and WON), W3-CORE.
+  eq(Solo.gen3OutcomeWord("draw", "ko", true), "draw", "gen3OutcomeWord: a double-knockout whiteout saves DREW")
+  eq(Solo.gen3OutcomeWord("loss", "ko", true), "lose", "gen3OutcomeWord: ...a whiteout lost outright LOST")
+  eq(Solo.gen3Kind({ wild = true }), "wild", "gen3Kind: wild")
+  eq(Solo.gen3Kind({ trainerId = 7 }), "trainer", "gen3Kind: trainer")
+  local s = Solo.new(nil, { enabled = function() return true end })
+  eq(s:fromGen3Encounter({ generation = 1, save = {} }, { species = 1, level = 5 }, {}), false,
+     "the Gen 3 entries decline on a Gen 1 game")
+  eq(s:fromGen3Trainer({ generation = 1, save = {} }, 5, {}), false, "...both of them")
+  eq(s:isRunning(), false, "and nothing was started")
+end)()
+
+-- ------------------------------------------------------------------
+-- A Gen 3 double's pure helpers: the seats, the second monster, the party
+-- as a fight found it
+-- ------------------------------------------------------------------
+--
+-- Table-in, table-out: the referee is a stand-in that answers `seatsOf`, the
+-- way the real one does for a shared team's two seats.
+
+;(function()
+  local function simWith(seats) return { seatsOf = function() return seats end } end
+
+  -- seatIds3: the owner's own id first, then `<id>#2` for a shared team's second seat
+  local two = simWith({ { playerId = "me" }, { playerId = "me#2" } })
+  eq(table.concat(Solo.seatIds3(two, "me"), ","), "me,me#2", "seatIds3: both seats of a shared team, in slot order")
+  eq(table.concat(Solo.seatIds3(simWith({ { playerId = "foe" } }), "foe"), ","), "foe",
+     "seatIds3: a one-seat side is its one id")
+  eq(table.concat(Solo.seatIds3(simWith({}), "me"), ","), "me", "seatIds3: no seats answered -> the owner's id")
+  eq(table.concat(Solo.seatIds3({ seatsOf = function() error("boom") end }, "me"), ","), "me",
+     "seatIds3: a referee that throws -> the owner's id")
+  eq(table.concat(Solo.seatIds3({}, "me"), ","), "me", "seatIds3: a referee with no seatsOf -> the owner's id")
+
+  -- secondMon3: the monster on (or last on) the second player seat
+  local party = { { name = "p1" }, { name = "p2" }, { name = "p3" }, { name = "p4" } }
+  local standing = simWith({ { playerId = "me", active = 1, mons = { { slot = 0 } } },
+                             { playerId = "me#2", active = 2, mons = { { slot = 0 }, { slot = 3 } } } })
+  eq(Solo.secondMon3(standing, party), party[4], "secondMon3: the second seat's active monster, by its party slot")
+  local fainted = simWith({ { playerId = "me" }, { playerId = "me#2", lastB = { mon = { slot = 1 } } } })
+  eq(Solo.secondMon3(fainted, party), party[2],
+     "secondMon3: a seat with nothing standing is the monster that last stood there")
+  eq(Solo.secondMon3(simWith({ { playerId = "me" } }), party), nil, "secondMon3: no second seat, no monster")
+  eq(Solo.secondMon3(simWith({ { playerId = "me" }, { playerId = "me#2" } }), party), nil,
+     "secondMon3: a second seat that never had one has none")
+  eq(Solo.secondMon3(standing, nil), nil, "secondMon3: no party")
+  eq(Solo.secondMon3(nil, party), nil, "secondMon3: no referee")
+  eq(Solo.secondMon3({ seatsOf = function() error("boom") end }, party), nil, "secondMon3: a referee that throws")
+  eq(Solo.secondMon3(simWith({ { playerId = "me" }, { playerId = "me#2", active = 1, mons = { { slot = 9 } } } }), party),
+     nil, "secondMon3: a slot the party does not hold is no monster")
+
+  -- snapshotParty3 / restoreParty3: everything a fight wrote, put back in place
+  local moves, pp = { 1, 2 }, { 5, 6 }
+  local m1 = { species = 4, hp = 20, level = 10, shiny = false, moves = moves, pp = pp,
+               ivs = { hp = 31 }, deep = { inner = { x = 1 } } }
+  local m2 = { species = 16, hp = 30 }
+  local m3 = { species = 29, hp = 10 }
+  local live = { m1, m2, m3 }
+  local snap = Solo.snapshotParty3(live)
+  ok(type(snap) == "table", "snapshotParty3: a party is recorded")
+  -- what a fight does to the live party
+  m1.hp, m1.level, m1.status, m1.shiny, m1.fightKey = 1, 11, "PSN", true, "added"
+  moves[1], pp[2] = 99, 0
+  m1.ivs.hp = 0
+  m1.deep.inner.x = 2
+  live[1], live[2] = m2, m1
+  live[3] = nil
+  live[4] = { species = 5 }
+  eq(Solo.restoreParty3(snap), true, "restoreParty3: a record is restored")
+  eq(live[1], m1, "restoreParty3: the first member is the same monster table")
+  eq(live[2], m2, "restoreParty3: ...the second")
+  eq(live[3], m3, "restoreParty3: ...a removed member is back")
+  eq(live[4], nil, "restoreParty3: ...a member the fight added is gone")
+  eq(#live, 3, "restoreParty3: ...the same size")
+  eq(m1.hp, 20, "restoreParty3: HP")
+  eq(m1.level, 10, "restoreParty3: level")
+  eq(m1.status, nil, "restoreParty3: a status the fight added is off again")
+  eq(m1.fightKey, nil, "restoreParty3: a key the fight added is off again")
+  eq(m1.shiny, false, "restoreParty3: a false field is restored as false, not dropped")
+  eq(m1.moves, moves, "restoreParty3: the moves list is the very table it was")
+  eq(moves[1], 1, "restoreParty3: ...with its contents")
+  eq(pp[2], 6, "restoreParty3: ...and the PP")
+  eq(m1.ivs.hp, 31, "restoreParty3: a nested table is restored in place")
+  eq(m1.deep.inner.x, 1, "restoreParty3: ...three levels down")
+  -- something with a metatable is a reference to something else: kept, never walked
+  local shared = setmetatable({ n = 1 }, { __index = {} })
+  m2.ref = shared
+  local snap2 = Solo.snapshotParty3(live)
+  shared.n = 2
+  m2.ref = nil
+  Solo.restoreParty3(snap2)
+  eq(m2.ref, shared, "restoreParty3: a table with a metatable comes back as the same reference")
+  eq(shared.n, 2, "restoreParty3: ...and is not itself rewound")
+  -- a monster that holds itself is no loop
+  local loop = { species = 4, hp = 5 }
+  loop.me = loop
+  local snap3 = Solo.snapshotParty3({ loop })
+  ok(type(snap3) == "table", "snapshotParty3: a self-referencing monster is recorded, not looped on")
+  -- no record
+  eq(Solo.snapshotParty3(nil), nil, "snapshotParty3: no party, no record")
+  eq(Solo.snapshotParty3("junk"), nil, "snapshotParty3: not a party, no record")
+  eq(Solo.restoreParty3(nil), false, "restoreParty3: no record, nothing done")
+  eq(Solo.restoreParty3({}), false, "restoreParty3: a record with no party, nothing done")
+  -- an empty party is a record too: it empties the list again
+  local empty = {}
+  local snap4 = Solo.snapshotParty3(empty)
+  empty[1] = { species = 4 }
+  eq(Solo.restoreParty3(snap4), true, "restoreParty3: an empty party's record restores")
+  eq(#empty, 0, "restoreParty3: ...to empty")
+end)()
+
+-- ------------------------------------------------------------------
+-- Gold solo: the client half of referee fidelity
+-- ------------------------------------------------------------------
+--
+-- docs/plans/gen12-referee-fidelity.md: Gold's cart lineage on side a (K6), the
+-- player's traded mons (K1), the wild held item the engine never rolls, a
+-- `held` event written home, SMOKE BALL and AMULET COIN.  This harness pins
+-- package.path empty, so every game above reads as Gen 1; this section makes
+-- a Gold game read as one by standing in for the four engine modules the
+-- client asks -- the link handshake's generation (a game's own `generation`,
+-- which is what the real one reads first), the launcher's cart, and the Gold
+-- item / mail tables in their engine shape -- and takes them away again after.
+-- Item rows and species slots are invented for this file.
+
+;(function()
+  local stubs = {
+    ["src.link.Handshake"] = {
+      generation = function(game) return tonumber(type(game) == "table" and game.generation) or 1 end,
+    },
+    ["src.core.gen2.ItemEffects"] = {
+      heldItemFor = function(id, d)
+        local def = d and d.items and d.items[id]
+        if type(def) ~= "table" or def.heldEffect == nil then return nil end
+        return { heldEffect = def.heldEffect, heldParameter = def.heldParameter or 0 }
+      end,
+    },
+    ["src.core.gen2.Mail"] = { isMail = function(id) return id == "FLOWER_MAIL" end },
+  }
+  local saved = {}
+  for name, module in pairs(stubs) do
+    saved[name] = package.loaded[name]
+    package.loaded[name] = module
+  end
+
+  local goldData = setmetatable({
+    items = {
+      BERRY       = { name = "BERRY", heldEffect = "HELD_BERRY", heldParameter = 5 },
+      NUGGET      = { name = "NUGGET", heldEffect = "HELD_NONE", heldParameter = 0 },
+      SMOKE_BALL  = { name = "SMOKE BALL", heldEffect = "HELD_ESCAPE", heldParameter = 0 },
+      AMULET_COIN = { name = "AMULET COIN", heldEffect = "HELD_AMULET_COIN", heldParameter = 0 },
+    },
+    pokemon = {
+      ALPHA = { name = "ALPHA", types = { "NORM" }, catchRate = 200 },
+      BETA  = { name = "BETA", types = { "NORM" }, catchRate = 200, items = { "BERRY", "NUGGET" } },
+    },
+  }, { __index = data })
+  local function goldMon(o, item, otId)
+    local m = mon(o)
+    m.item, m.otId = item, otId
+    return m
+  end
+  local function bytes(list)
+    local i = 0
+    return function() i = i + 1; return list[i] end, function() return i end
+  end
+  local Turn2 = need("BattleSim2/Turn")
+  local function spyCreate(fn)
+    local real, seen = Turn2.create, nil
+    Turn2.create = function(opts) seen = opts; return real(opts) end
+    local okRun, result = pcall(fn)
+    Turn2.create = real
+    return seen, okRun and result or nil, okRun or result
+  end
+
+  -- K6: side a's family, Gen.family's word for the running cart.
+  local seen, f = spyCreate(function()
+    return fightOf("wild", { cart2 = true, data = goldData, random = function() return 0 end })
+  end)
+  ok(f and f.started, "gold solo: a Gold wild fight is taken over")
+  eq(seen and seen.sides.a[1].family, "gs", "K6: side a is Gold / Silver when the launcher names no cart")
+  eq(seen and seen.sides.b[1].family, nil, "K6: ...and side b carries none")
+  package.loaded["src.core.GameVersion"] = {
+    ORDER = { "red", "gold", "crystal" },
+    VERSIONS = { red = { generation = 1 }, gold = { generation = 2 }, crystal = { generation = 2 } },
+    get = function() return "crystal" end,
+    engine = function(v) return v == "crystal" and "crystal" or "gs" end,
+  }
+  seen = spyCreate(function()
+    return fightOf("wild", { cart2 = true, data = goldData, random = function() return 0 end })
+  end)
+  eq(seen and seen.sides.a[1].family, "crystal", "K6: a Crystal boot says crystal")
+  package.loaded["src.core.GameVersion"] = nil
+  local realOne, seenOne = Turn.create, nil
+  Turn.create = function(opts) seenOne = opts; return realOne(opts) end
+  pcall(fightOf, "wild")
+  Turn.create = realOne
+  eq(seenOne and seenOne.sides.a[1].family, nil, "K6: a Gen 1 fight's side a carries no family")
+
+  -- K1: the player's own traded mon says so; the fight is against the computer.
+  f = fightOf("wild", { cart2 = true, data = goldData, random = function() return 0 end,
+                        party = { goldMon({ species = "ALPHA", spd = 90, maxHp = 200 }, nil, 77),
+                                  goldMon({ species = "ALPHA", maxHp = 200 }, nil, 4321) } })
+  eq(f.fight.mine[1].traded, true, "K1 solo: a mon from another OT id is uploaded traded")
+  eq(f.fight.mine[2].traded, nil, "K1 solo: the player's own is not")
+
+  -- The wild held item: the cart's two draws, onto the engine monster.
+  local random, drawn = bytes({ 250, 99 })
+  f = fightOf("wild", { cart2 = true, data = goldData, random = random })
+  eq(f.wildMon.item, "BERRY", "wild item: rolled onto the engine monster the catch keeps")
+  eq(f.fight.wildParty[1].heldItem, "BERRY", "wild item: the foe's sheet carries it")
+  eq(f.fight.wildParty[1].holdEffect, "HELD_BERRY", "wild item: ...with its K2 fields")
+  eq(drawn(), 2, "wild item: two draws, off the solo's own byte source")
+  random, drawn = bytes({ 191 })
+  f = fightOf("wild", { cart2 = true, data = goldData, random = random })
+  eq(f.wildMon.item, nil, "wild item: under 192 the monster holds nothing")
+  random, drawn = bytes({})
+  f = fightOf("wild", { cart2 = true, data = goldData, random = random, battleType = 10 })
+  eq(f.wildMon.item, "BERRY", "wild item: a forced-item encounter holds item 1")
+  eq(drawn(), 0, "wild item: ...with no draw")
+  -- A divert that declines after the roll leaves the engine's monster as it was.
+  random = bytes({ 250, 99 })
+  f = fightOf("wild", { cart2 = true, data = goldData, random = random, party = {} })
+  eq(f.started, false, "wild item: an empty party is not taken over")
+  eq(f.wildMon.item, nil, "wild item: ...and the roll is undone -- the engine's battle starts as built")
+  -- The fight's seed is not moved by the roll.
+  local seedSeen
+  seen = spyCreate(function()
+    return fightOf("wild", { cart2 = true, data = goldData, random = bytes({ 250, 99 }), seed = 99 })
+  end)
+  seedSeen = seen and seen.seed
+  eq(seedSeen, 99, "wild item: the referee's seed is the solo's, untouched by the roll")
+  -- ...and in the game's own shape, with no hook in: `_seed` and `_randomByte`
+  -- both draw the one love-then-math generator, so the seed is drawn ahead of
+  -- the roll and is the same draw whether the wild species has item slots
+  -- (BETA: BERRY / NUGGET, two draws) or none (ALPHA, no draw).
+  local function sharedDraws(wild)
+    local love_ = rawget(_G, "love")
+    local host = (love_ and love_.math and love_.math.random) and love_.math or math
+    local real, n = host.random, 0
+    host.random = function(lo, hi)
+      n = n + 1
+      if lo == nil then return 0.5 end
+      if hi == nil then lo, hi = 1, lo end
+      -- A byte answers 250 (an item, item 1); anything wider says which draw it was.
+      local v = (hi - lo == 255) and 250 or (1000 + n)
+      return math.max(lo, math.min(hi, lo + v))
+    end
+    local spied, fight, okRun = spyCreate(function()
+      return fightOf("wild", { cart2 = true, data = goldData, unseeded = true,
+                               wildMon = mon({ species = wild, spd = 10, maxHp = 40, atk = 20 }) })
+    end)
+    host.random = real
+    ok(okRun == true, "seed (" .. wild .. "): the fight opens with no hook in")
+    return spied and spied.seed, fight
+  end
+  local slotSeed, slotFight = sharedDraws("BETA")
+  local bareSeed, bareFight = sharedDraws("ALPHA")
+  eq(slotFight and slotFight.wildMon.item, "BERRY", "seed: the slotted species rolls its item off the shared generator")
+  eq(bareFight and bareFight.wildMon.item, nil, "seed: ...and the bare one holds none")
+  ok(slotSeed ~= nil, "seed: the referee is handed one")
+  eq(slotSeed, bareSeed, "seed: the same draw with item slots and without -- the roll never moves it")
+
+  -- The catch keeps what the wild monster holds at the throw.
+  f = fightOf("wild", { cart2 = true, data = goldData, random = bytes({ 250, 99 }) })
+  f.solo:_feed({ t = "held", slot = 3, side = "b", mon = 0, text = "BERRY", amount = 0 })
+  f.fight:grantCatch({ caught = {} })
+  eq(f.wildMon.item, nil, "catch: a wild monster that ate its berry is caught holding nothing")
+  f = fightOf("wild", { cart2 = true, data = goldData, random = bytes({ 250, 99 }) })
+  f.fight:grantCatch({ caught = {} })
+  eq(f.wildMon.item, "BERRY", "catch: ...and one that kept it is caught with it")
+  -- Its own THIEF of an item nobody here described: the BERRY it was rolled is
+  -- gone (THIEF takes only when its user holds nothing), and what it took is a
+  -- claim -- caught holding nothing, not the roll handed back.
+  f = fightOf("wild", { cart2 = true, data = goldData, random = bytes({ 250, 99 }) })
+  f.solo:_feed({ t = "held", slot = 3, side = "b", mon = 0, text = "BERRY", amount = 0 })
+  f.solo:_feed({ t = "held", slot = 3, side = "b", mon = 0, text = "MASTER_BALL", amount = 1 })
+  f.fight:grantCatch({ caught = {} })
+  eq(f.wildMon.item, nil, "catch: a foreign item it took is not caught, and its lost BERRY is not handed back")
+
+  -- `held` written home: a berry eaten, in a wild fight and against a trainer.
+  for _, kind in ipairs({ "wild", "trainer" }) do
+    f = fightOf(kind, { cart2 = true, data = goldData, random = function() return 0 end,
+                        party = { goldMon({ species = "ALPHA", spd = 90, maxHp = 200 }, "BERRY", 4321) } })
+    f.solo:_feed({ t = "held", slot = 0, side = "a", mon = 0, text = "BERRY", amount = 0 })
+    eq(f.party[1].item, nil, "held solo (" .. kind .. "): the berry eaten is gone from the save")
+  end
+  -- ...and the whole way round, from the referee itself: a holder already under
+  -- half its maximum eats its BERRY in the first turn (HandleHPHealingItem),
+  -- the referee says so with a `held`, and the save loses the berry.
+  f = fightOf("trainer", { cart2 = true, data = goldData, seed = 7,
+                           party = { goldMon({ species = "ALPHA", spd = 90, atk = 1, maxHp = 200, hp = 90 },
+                                             "BERRY", 4321) },
+                           foes = { mon({ species = "BETA", spd = 5, maxHp = 400, atk = 1 }) } })
+  f.fight:sendChoice({ action = "fight", move = 0 })
+  for _ = 1, 4 do f.solo:update(1 / 60, f.game) end
+  local ate
+  for _, event in ipairs(f.events) do
+    if event.t == "held" and event.side == "a" and event.text == "BERRY" and event.amount == 0 then ate = event end
+  end
+  ok(ate ~= nil, "held solo (referee): the Gold referee's own `held` reaches the screen")
+  eq(f.party[1].item, nil, "held solo (referee): ...and the berry it ate is gone from the save")
+  -- A foe's THIEF on a trainer fight: gone for good ("if the enemy steals your
+  -- item, it's gone for good if you don't get it back").
+  f = fightOf("trainer", { cart2 = true, data = goldData,
+                           party = { goldMon({ species = "ALPHA", spd = 90, maxHp = 200 }, "NUGGET", 4321) } })
+  f.solo:_feed({ t = "held", slot = 0, side = "a", mon = 0, text = "NUGGET", amount = 0 })
+  f.solo:_feed({ t = "held", slot = 3, side = "b", mon = 0, text = "NUGGET", amount = 1 })
+  eq(f.party[1].item, nil, "held solo: a trainer's THIEF takes the item from the save")
+  -- The player's THIEF from the wild monster: kept.
+  f = fightOf("wild", { cart2 = true, data = goldData, random = bytes({ 250, 99 }) })
+  f.solo:_feed({ t = "held", slot = 3, side = "b", mon = 0, text = "BERRY", amount = 0 })
+  f.solo:_feed({ t = "held", slot = 0, side = "a", mon = 0, text = "BERRY", amount = 1 })
+  eq(f.party[1].item, "BERRY", "held solo: the player's THIEF from a wild monster is kept")
+
+  -- SMOKE BALL: a slow runner holding one gets away, with the cart's line,
+  -- no roll and no attempt counted.
+  f = fightOf("wild", { cart2 = true, data = goldData, random = function() return 0 end,
+                        party = { goldMon({ species = "ALPHA", spd = 1, maxHp = 200 }, "SMOKE_BALL", 4321) },
+                        eSpd = 250 })
+  f.fight:sendChoice({ action = "run" })
+  eq(f.solo.runAttempts, 0, "smoke ball: the attempt is not counted (the cart skips wNumFleeAttempts)")
+  for _ = 1, 4 do f.solo:update(1 / 60, f.game) end
+  local fledAt, ranAt
+  for i, event in ipairs(f.events) do
+    if event.t == "msg" and tostring(event.text):find("fled using a", 1, true) then fledAt = fledAt or i end
+    if event.t == "run" then ranAt = ranAt or i end
+  end
+  ok(fledAt ~= nil, "smoke ball: the cart's line is printed")
+  eq(fledAt and f.events[fledAt].text, "ALPHA\nfled using a\nSMOKE BALL!",
+     "smoke ball: BattleText_UserFledUsingAStringBuffer1, the item's name filled in")
+  ok(fledAt and ranAt and fledAt < ranAt, "smoke ball: ...ahead of the escape itself")
+  local out = f.sim:outcome()
+  eq(out and out.reason, "run", "smoke ball: the fight ends in an escape")
+  -- The same runner with the ball gone (a THIEF took it) rolls like anyone.
+  f = fightOf("wild", { cart2 = true, data = goldData, random = function() return 0 end,
+                        party = { goldMon({ species = "ALPHA", spd = 1, maxHp = 200 }, "SMOKE_BALL", 4321) },
+                        eSpd = 250 })
+  f.solo:_feed({ t = "held", slot = 0, side = "a", mon = 0, text = "SMOKE_BALL", amount = 0 })
+  f.fight:sendChoice({ action = "run" })
+  eq(f.solo.runAttempts, 1, "smoke ball: once taken, the run is the ordinary roll")
+  eq(f.solo.fledLine, nil, "smoke ball: ...and no line is owed")
+
+  -- AMULET COIN: the lead comes out holding one and the trainer's prize doubles.
+  local function trainerWin(item)
+    local fight = fightOf("trainer", {
+      cart2 = true, data = goldData, money = 3000, seed = 7,
+      party = { goldMon({ species = "ALPHA", spd = 90, atk = 120, maxHp = 200, level = 20 }, item, 4321) },
+      foes = { mon({ species = "BETA", spd = 5, maxHp = 20, atk = 1 }) },
+    })
+    local result = playOut(fight)
+    fight.fight:exit()
+    return fight, result
+  end
+  local plainWin, plainOut = trainerWin(nil)
+  eq(plainOut and plainOut.outcome, "win", "amulet: the Gold trainer fight is won")
+  eq(plainWin.game.save.player.money, 3400, "amulet: the prize, 20 base against level 20")
+  local coinWin, coinOut = trainerWin("AMULET_COIN")
+  eq(coinOut and coinOut.outcome, "win", "amulet: ...won holding the coin")
+  eq(coinWin.state.amuletCoin, true, "amulet: the buried battle is told the coin came out")
+  eq(coinWin.game.save.player.money, 3800, "amulet: the prize doubled (pokecrystal .DoubleReward)")
+
+  -- A Gold move record's secondary effect, end to end.  An imported Gold
+  -- record states its odds as `effectChance` (percent) and `effectChanceRaw`
+  -- (the cart's byte) and has no `chance` field at all; the sheet used to read
+  -- `chance`, so every Gold move reached the referee at 0 and no secondary
+  -- effect -- THIEF included -- ever fired.  The records below are in the
+  -- importer's shape with invented numbers; a 100 percent chance is the
+  -- referee's byte under 255, so the seed decides nothing here.
+  local goldMoveData = setmetatable({
+    moves = {
+      SCORCH = { id = "SCORCH", name = "SCORCH", power = 10, type = "FIRE", pp = 20,
+                 accuracy = 100, accuracyRaw = 255, effect = "EFFECT_BURN_HIT",
+                 effectId = 4, effectChance = 100, effectChanceRaw = 255 },
+      THIEF = { id = "THIEF", name = "THIEF", power = 10, type = "NORM", pp = 10,
+                accuracy = 100, accuracyRaw = 255, effect = "EFFECT_THIEF",
+                effectId = 105, effectChance = 100, effectChanceRaw = 255 },
+    },
+  }, { __index = goldData })
+  local function knowing(moveId, item)
+    local m = goldMon({ species = "ALPHA", spd = 90, atk = 20, maxHp = 200 }, item, 4321)
+    m.moves = { { id = moveId, pp = 10, maxPp = 10 } }
+    return m
+  end
+  local function firstTurn(fight)
+    fight.fight:sendChoice({ action = "fight", move = 0 })
+    for _ = 1, 4 do fight.solo:update(1 / 60, fight.game) end
+  end
+
+  -- The burn: SCORCH's effectChance rides the sheet and the referee rolls it.
+  f = fightOf("trainer", { cart2 = true, data = goldMoveData, seed = 7,
+                           party = { knowing("SCORCH") },
+                           foes = { mon({ species = "BETA", spd = 5, maxHp = 400, atk = 1 }) } })
+  eq(f.fight.mine[1].moves[1].chance, 100, "gold effectChance: the sheet carries the record's 100")
+  firstTurn(f)
+  local burned
+  for _, event in ipairs(f.events) do
+    if event.t == "status" and event.side == "b" and event.status == "BRN" then burned = event end
+  end
+  ok(burned ~= nil, "gold effectChance: SCORCH's burn procs on the foe (a `status` BRN event)")
+  local foeSeat = f.sim.byId[FOE]
+  eq(foeSeat and foeSeat.mons[1].status, "burn", "gold effectChance: ...and the referee's foe is burned")
+
+  -- THIEF: the wild monster's rolled BERRY comes away with the player's THIEF.
+  f = fightOf("wild", { cart2 = true, data = goldMoveData, seed = 7, random = bytes({ 250, 99 }),
+                        party = { knowing("THIEF") } })
+  eq(f.fight.wildParty[1].heldItem, "BERRY", "gold THIEF: the wild monster holds its rolled BERRY")
+  eq(f.fight.mine[1].moves[1].chance, 100, "gold THIEF: the sheet carries THIEF's 100")
+  firstTurn(f)
+  local took
+  for _, event in ipairs(f.events) do
+    if event.t == "held" and event.side == "a" and event.text == "BERRY" and event.amount == 1 then took = event end
+  end
+  ok(took ~= nil, "gold THIEF: the referee's `held` says the player took the BERRY")
+  eq(f.party[1].item, "BERRY", "gold THIEF: ...and the stolen BERRY is on the save")
+
+  for name in pairs(stubs) do package.loaded[name] = saved[name] end
+end)()
+
+-- ------------------------------------------------------------------
+-- closing the Red / Gold referee gaps: the solo half
+-- ------------------------------------------------------------------
+--
+-- docs/plans/gen12-referee-gaps-fix.md, wave 2 task C: a mid-fight learn or
+-- level-up reaches the solo referee on Red and Gold (it used to be dropped),
+-- by the hub's own two rules and the referee's K9 `levelUp`; Pay Day paid; a
+-- Gold trainer's held item rides the foe's sheet.  The same engine stand-ins
+-- as the Gold section above, installed and taken away again.
+
+;(function()
+  local stubs = {
+    ["src.link.Handshake"] = {
+      generation = function(game) return tonumber(type(game) == "table" and game.generation) or 1 end,
+    },
+    ["src.core.gen2.ItemEffects"] = {
+      heldItemFor = function(id, d)
+        local def = d and d.items and d.items[id]
+        if type(def) ~= "table" or def.heldEffect == nil then return nil end
+        return { heldEffect = def.heldEffect, heldParameter = def.heldParameter or 0 }
+      end,
+    },
+    ["src.core.gen2.Mail"] = { isMail = function() return false end },
+  }
+  local saved = {}
+  for name, module in pairs(stubs) do
+    saved[name] = package.loaded[name]
+    package.loaded[name] = module
+  end
+  local Wire = need("Wire")
+  local Gen = need("Gen")
+  local goldData = setmetatable({
+    items = {
+      NUGGET = { name = "NUGGET", heldEffect = "HELD_NONE", heldParameter = 0 },
+      BERRY  = { name = "BERRY", heldEffect = "HELD_BERRY", heldParameter = 5 },
+    },
+    moves = {
+      THUMP = { power = 40, accuracy = 100, type = "NORM", pp = 20, effect = "EFFECT_NORMAL_HIT" },
+      SWIPE = { power = 30, accuracy = 100, type = "NORM", pp = 30, effect = "EFFECT_NORMAL_HIT" },
+    },
+  }, { __index = data })
+
+  -- A spy standing in for the referee's K9 `levelUp` (the Gen 1 / Gen 2
+  -- referees grow it this wave): what the solo transport hands it.
+  local function spyLevelUp(sim)
+    local calls = {}
+    sim.levelUp = function(_, playerId, index, level, stats, maxHp)
+      calls[#calls + 1] = { id = playerId, index = index, level = level, stats = stats, maxHp = maxHp }
+    end
+    return calls
+  end
+  local function moveset(f, fields)
+    fields.battle = f.fight.battle
+    return f.fight.transport:send(Wire.BATTLE_MOVESET, fields)
+  end
+  local function row(id, pp)
+    return { id = id, pp = pp, maxPp = pp, power = 40, accuracy = 255, type = 0,
+             effect = 0, chance = 0 }
+  end
+
+  -- Red: a learn (one slot added) lands on the referee's copy, keeping the old
+  -- slot's PP; the level-up goes to `levelUp` with the seat and a 1-based index.
+  local f = fightOf("wild")
+  local calls = spyLevelUp(f.sim)
+  local seatMon = f.sim.byId[PLAYER].mons[1]
+  seatMon.moves[1].pp = 7
+  local took = moveset(f, { mon = 0, moves = { row("THUMP", 20), row("SWIPE", 30) },
+                            level = 21, maxHp = 210,
+                            stats = { atk = 41, def = 41, spd = 91, spc = 41 } })
+  eq(took, true, "moveset (Red solo): the message reaches the referee -- it used to be dropped")
+  eq(#seatMon.moves, 2, "moveset (Red solo): the learned move is on the referee's copy")
+  eq(seatMon.moves[2].id, "SWIPE", "moveset (Red solo): ...in the new slot")
+  eq(seatMon.moves[1].pp, 7, "moveset (Red solo): an unchanged slot keeps the referee's PP (nextMoves12)")
+  eq(#calls, 1, "K9 (Red solo): the level-up is handed to the referee")
+  eq(calls[1] and calls[1].id, PLAYER, "K9 (Red solo): ...for the player's seat")
+  eq(calls[1] and calls[1].index, 1, "K9 (Red solo): ...1-based, as the hubs call it")
+  eq(calls[1] and calls[1].level, 21, "K9 (Red solo): ...the new level")
+  eq(calls[1] and calls[1].maxHp, 210, "K9 (Red solo): ...max HP")
+  eq(calls[1] and calls[1].stats and calls[1].stats.spd, 91, "K9 (Red solo): ...and the stats")
+  -- A rewrite of two slots is refused (movesetDeltaOk), the level still lands.
+  moveset(f, { mon = 0, moves = { row("SWIPE", 30), row("THUMP", 20) }, level = 22 })
+  eq(seatMon.moves[1].id, "THUMP", "moveset (Red solo): a two-slot rewrite is refused, as on the hub")
+  eq(#calls, 2, "K9 (Red solo): ...though the level-up beside it still lands")
+  -- A transformed battler keeps its copied list; the level still lands.
+  seatMon.transformed = true
+  moveset(f, { mon = 0, moves = { row("THUMP", 20), row("SWIPE", 30), row("THUMP", 1) }, level = 23 })
+  eq(#seatMon.moves, 2, "moveset (Red solo): a transformed battler's list is left alone")
+  eq(#calls, 3, "K9 (Red solo): ...its level-up is not")
+  seatMon.transformed = nil
+  -- Nothing the wire would refuse reaches the referee.
+  eq(moveset(f, { mon = 0, moves = { row("THUMP", 20) }, level = 0 }), false,
+     "moveset (Red solo): a level the wire refuses is refused here too")
+  eq(#calls, 3, "K9 (Red solo): ...and never reaches levelUp")
+  -- A referee with no levelUp yet applies the moves and nothing else.
+  f.sim.levelUp = nil
+  local before = #calls
+  eq(moveset(f, { mon = 0, moves = { row("THUMP", 20), row("SWIPE", 30), row("THUMP", 5) }, level = 24 }), true,
+     "K9 (Red solo): a referee without levelUp still takes the learn")
+  eq(#seatMon.moves, 3, "K9 (Red solo): ...onto its copy")
+  eq(#calls, before, "K9 (Red solo): ...and is asked nothing it cannot answer")
+
+  -- End to end through the screen: a level-up the save monster just made.
+  f = fightOf("wild")
+  calls = spyLevelUp(f.sim)
+  local saveMon = f.party[1]
+  saveMon.level = 21
+  saveMon.stats = { hp = 210, attack = 41, defense = 41, speed = 91, special = 41 }
+  f.fight:levelled(saveMon, nil, { 21 })
+  eq(#calls, 1, "K9 (Red solo): the screen's level-up reaches the referee")
+  eq(calls[1] and calls[1].maxHp, 210, "K9 (Red solo): ...with the save monster's new max HP")
+  eq(calls[1] and calls[1].stats and calls[1].stats.atk, 41, "K9 (Red solo): ...and its stats")
+
+  -- Gold: the same route, in Gold's dialect.
+  f = fightOf("wild", { cart2 = true, data = goldData, random = function() return 0 end })
+  calls = spyLevelUp(f.sim)
+  local gm = f.party[1]
+  gm.level = 21
+  gm.stats = { hp = 210, attack = 41, defense = 41, speed = 91, specialAttack = 43, specialDefense = 44 }
+  f.fight:levelled(gm, nil, { 21 })
+  eq(#calls, 1, "K9 (Gold solo): the level-up reaches the Gold referee")
+  eq(calls[1] and calls[1].stats and calls[1].stats.spe, 91, "K9 (Gold solo): ...stats in Gold's dialect")
+  eq(calls[1] and calls[1].stats and calls[1].stats.spd, 44, "K9 (Gold solo): ...Sp. Def split from Sp. Atk")
+
+  -- Gold trainer items ride the foe's sheet (gap #12, proven on the solo path):
+  -- the trainer's engine party mon holding an item.
+  local holder = mon({ species = "BETA", spd = 5, maxHp = 400, atk = 1 })
+  holder.item = "NUGGET"
+  f = fightOf("trainer", { cart2 = true, data = goldData, foes = { holder } })
+  local foeSheet = f.fight.npcParty and f.fight.npcParty[1]
+  eq(foeSheet and foeSheet.heldItem, "NUGGET", "gold trainer item (solo): the foe sheet holds the item")
+  eq(foeSheet and foeSheet.holdEffect, "HELD_NONE", "gold trainer item (solo): ...with its K2 hold effect")
+  eq(foeSheet and foeSheet.itemName, "NUGGET", "gold trainer item (solo): ...and its name")
+  local foeSeat = f.sim.byId[FOE]
+  eq(foeSeat and foeSeat.mons[1].heldItem, "NUGGET", "gold trainer item (solo): ...and the referee fights with it")
+  eq(foeSheet and foeSheet.dvs and foeSheet.dvs.spe, 8, "K7 (solo): the trainer's sheet carries its DVs")
+
+  -- Pay Day: a won Red wild fight pays the pot the referee reports.
+  f = fightOf("wild")
+  f.game.save.money = 3000
+  f.game.save.player = { name = "PLAYER" }
+  f.fight:onOutcome({ battle = f.fight.battle, outcome = "win", winners = { PLAYER },
+                      losers = { FOE }, reason = "ko", payDay = 44 })
+  eq(Gen.money.get(f.game.save), 3044, "Pay Day (Red solo): the pot is paid")
+  eq(f.fight.payDayLine, "PLAYER picked up\n¥44!", "Pay Day (Red solo): ...and the cart's line is owed")
+
+  for name in pairs(stubs) do package.loaded[name] = saved[name] end
+end)()
+
+-- ------------------------------------------------------------------
+-- closing the Red / Gold referee gaps: wave 3 (task C2a), the solo half
+-- ------------------------------------------------------------------
+--
+-- A learn on a transformed monster lands where the hubs land it (src/Hub.lua
+-- `learnTo`): in the party list the referee put aside at Transform, and on Red
+-- in the battle list too (pokered LearnMove copies over wBattleMonMoves; Gold's
+-- skips that under SUBSTATUS_TRANSFORMED) -- so the switch-out gives back the
+-- learned list.  Driven through the real referees: their own TransformEffect_ /
+-- BattleCommand_Transform makes the monster transformed, their own untransform
+-- gives it back.  Red's paying escape (TELEPORT) through the real Gen 1
+-- referee, and the player's own RUN that pays nothing; the foe's Gold
+-- happiness is the cart's BASE_HAPPINESS.
+
+;(function()
+  local stubs = {
+    ["src.link.Handshake"] = {
+      generation = function(game) return tonumber(type(game) == "table" and game.generation) or 1 end,
+    },
+    ["src.core.gen2.ItemEffects"] = {
+      heldItemFor = function(id, d)
+        local def = d and d.items and d.items[id]
+        if type(def) ~= "table" or def.heldEffect == nil then return nil end
+        return { heldEffect = def.heldEffect, heldParameter = def.heldParameter or 0 }
+      end,
+    },
+    ["src.core.gen2.Mail"] = { isMail = function() return false end },
+  }
+  local saved = {}
+  for name, module in pairs(stubs) do
+    saved[name] = package.loaded[name]
+    package.loaded[name] = module
+  end
+  local Wire = need("Wire")
+  local Gen = need("Gen")
+  local Effects1 = need("BattleSim/Effects")
+  local Effects2 = need("BattleSim2/Effects")
+  local goldData = setmetatable({
+    items = {},
+    moves = {
+      THUMP = { power = 40, accuracy = 100, type = "NORM", pp = 20, effect = "EFFECT_NORMAL_HIT" },
+      SWIPE = { power = 30, accuracy = 100, type = "NORM", pp = 30, effect = "EFFECT_NORMAL_HIT" },
+    },
+  }, { __index = data })
+  local function moveset(f, fields)
+    fields.battle = f.fight.battle
+    return f.fight.transport:send(Wire.BATTLE_MOVESET, fields)
+  end
+  local function row(id, pp)
+    return { id = id, pp = pp, maxPp = pp, power = 40, accuracy = 255, type = 0,
+             effect = 0, chance = 0 }
+  end
+  local function idsOf(list)
+    local out = {}
+    for i, m in ipairs(list or {}) do out[i] = m.id end
+    return table.concat(out, ",")
+  end
+  -- A wild BETA that knows only SWIPE, so a Transform is visible in the ids.
+  local function swiper()
+    local w = mon({ species = "BETA", spd = 10, maxHp = 40, atk = 20 })
+    w.moves = { { id = "SWIPE", pp = 30 } }
+    return w
+  end
+
+  -- ------- Red: a learn under Transform
+  data.moves.SWIPE = { power = 30, accuracy = 100, type = "NORM", pp = 30 }
+  local f = fightOf("wild", { wildMon = swiper() })
+  local seat, foe = f.sim.byId[PLAYER], f.sim.byId[FOE]
+  local own = seat.mons[1]
+  own.moves[1].pp = 12
+  Effects1.applyPrimary({ effectId = 57, userMon = own, targetMon = foe.mons[1],
+                          userFighter = seat, targetFighter = foe })
+  eq(own.transformed, true, "learn under Transform (Red solo): the referee's TransformEffect_ ran")
+  eq(idsOf(own.moves), "SWIPE", "learn under Transform (Red solo): ...the copied list is fighting")
+  eq(own.preTransform and idsOf(own.preTransform.moves), "THUMP",
+     "learn under Transform (Red solo): ...and the party list is put aside")
+  local took = moveset(f, { mon = 0, moves = { row("THUMP", 20), row("SWIPE", 30) } })
+  eq(took, true, "learn under Transform (Red solo): the learn reaches the referee -- it used to be dropped")
+  eq(idsOf(own.preTransform.moves), "THUMP,SWIPE",
+     "learn under Transform (Red solo): the learn lands in the party list put aside (learnTo)")
+  eq(own.preTransform.moves[1].pp, 12,
+     "learn under Transform (Red solo): ...an unchanged slot keeps the party's PP")
+  eq(idsOf(own.moves), "THUMP,SWIPE",
+     "learn under Transform (Red solo): ...and in the battle list (pokered LearnMove's wBattleMonMoves copy)")
+  ok(own.moves ~= own.preTransform.moves,
+     "learn under Transform (Red solo): ...as its own copy (DecrementPP never reaches the party while transformed)")
+  Effects1.untransform(own)
+  eq(own.transformed, false, "learn under Transform (Red solo): the switch-out's untransform")
+  eq(idsOf(own.moves), "THUMP,SWIPE", "learn under Transform (Red solo): ...gives back the learned list")
+  -- A rewrite of two slots is still refused while transformed (movesetDeltaOk).
+  f = fightOf("wild", { wildMon = swiper() })
+  seat, foe = f.sim.byId[PLAYER], f.sim.byId[FOE]
+  own = seat.mons[1]
+  Effects1.applyPrimary({ effectId = 57, userMon = own, targetMon = foe.mons[1],
+                          userFighter = seat, targetFighter = foe })
+  eq(moveset(f, { mon = 0, moves = { row("SWIPE", 30), row("THUMP", 20), row("SWIPE", 1) } }), false,
+     "learn under Transform (Red solo): a rewrite the hub refuses is refused here too")
+  eq(idsOf(own.moves), "SWIPE", "learn under Transform (Red solo): ...and the copies stand")
+
+  -- The screen's half on Red: a learn it sends drops the Transform overlay,
+  -- because the referee's battle list is the monster's own again.
+  f = fightOf("wild", { wildMon = swiper() })
+  seat, foe = f.sim.byId[PLAYER], f.sim.byId[FOE]
+  own = seat.mons[1]
+  Effects1.applyPrimary({ effectId = 57, userMon = own, targetMon = foe.mons[1],
+                          userFighter = seat, targetFighter = foe })
+  f.fight.liveMoves = { { id = "SWIPE", pp = 5, maxPp = 5 } }
+  f.fight.active = 1
+  f.fight:teach(f.party[1], "ALPHA", "SWIPE")
+  eq(idsOf(own.moves), "THUMP,SWIPE", "learn under Transform (Red screen): the referee fights on its own list")
+  eq(f.fight.liveMoves, nil, "learn under Transform (Red screen): ...so FIGHT drops the overlay")
+  eq(idsOf(f.fight:activeMon().moves), "THUMP,SWIPE", "learn under Transform (Red screen): ...and reads the sheet")
+  -- A level-up that taught nothing resends the list unchanged: no LearnMove on
+  -- the cart, so the overlay stays.
+  f.fight.liveMoves = { { id = "SWIPE", pp = 5, maxPp = 5 } }
+  f.fight:syncFightMoves(f.party[1], true)
+  eq(f.fight.liveMoves and f.fight.liveMoves[1].id, "SWIPE",
+     "learn under Transform (Red screen): a level-up with no learn leaves the overlay up")
+  data.moves.SWIPE = nil
+
+  -- ------- Gold: a learn under Transform
+  local g = fightOf("wild", { cart2 = true, data = goldData, random = function() return 0 end,
+                              wildMon = swiper() })
+  local seat2, foe2 = g.sim.byId[PLAYER], g.sim.byId[FOE]
+  local own2 = seat2.mons[1]
+  own2.moves[1].pp = 12
+  Effects2.applyPrimary({ effectId = 57, userMon = own2, targetMon = foe2.mons[1],
+                          userFighter = seat2, targetFighter = foe2 })
+  eq(own2.transformed, true, "learn under Transform (Gold solo): BattleCommand_Transform ran")
+  eq(idsOf(own2.moves), "SWIPE", "learn under Transform (Gold solo): ...the copied list is fighting")
+  eq(moveset(g, { mon = 0, moves = { row("THUMP", 20), row("SWIPE", 30) } }), true,
+     "learn under Transform (Gold solo): the learn reaches the referee")
+  eq(idsOf(own2.preTransform.moves), "THUMP,SWIPE",
+     "learn under Transform (Gold solo): the learn lands in the party list put aside")
+  eq(own2.preTransform.moves[1].pp, 12, "learn under Transform (Gold solo): ...keeping the party's PP")
+  eq(idsOf(own2.moves), "SWIPE",
+     "learn under Transform (Gold solo): the copies fight on (LearnMove skips the copy under SUBSTATUS_TRANSFORMED)")
+  eq(own2.moves[1].pp, Effects2.TRANSFORM_PP, "learn under Transform (Gold solo): ...with their 5 PP")
+  g.sim:_undoTransform(own2)
+  eq(idsOf(own2.moves), "THUMP,SWIPE", "learn under Transform (Gold solo): the switch-out gives back the learned list")
+  eq(own2.moves[1].pp, 12, "learn under Transform (Gold solo): ...with the party's PP")
+  -- The Gold screen keeps its overlay through a learn: the referee kept the copies.
+  g = fightOf("wild", { cart2 = true, data = goldData, random = function() return 0 end,
+                        wildMon = swiper() })
+  seat2, foe2 = g.sim.byId[PLAYER], g.sim.byId[FOE]
+  own2 = seat2.mons[1]
+  Effects2.applyPrimary({ effectId = 57, userMon = own2, targetMon = foe2.mons[1],
+                          userFighter = seat2, targetFighter = foe2 })
+  g.fight.liveMoves = { { id = "SWIPE", pp = 5, maxPp = 5 } }
+  g.fight.active = 1
+  g.fight:teach(g.party[1], "ALPHA", "SWIPE")
+  eq(idsOf(own2.preTransform.moves), "THUMP,SWIPE", "learn under Transform (Gold screen): the learn reached the referee")
+  eq(g.fight.liveMoves and g.fight.liveMoves[1].id, "SWIPE",
+     "learn under Transform (Gold screen): FIGHT keeps the copies the referee fights with")
+
+  -- ------- Red Pay Day on an escape, through the real Gen 1 referee
+  -- PAY DAY scatters the coins (PayDayEffect_: twice the user's level), then
+  -- TELEPORT gets away; the player's own RUN, after the same PAY DAY, pays
+  -- nothing.  Level 30 against 20, so the cart's escape never rolls.
+  data.moves.PAYDAY = { power = 40, accuracy = 100, type = "NORM", pp = 20, effect = "PAY_DAY_EFFECT" }
+  data.moves.TELEPORT = { power = 0, accuracy = 100, type = "NORM", pp = 20,
+                          effect = "SWITCH_AND_TELEPORT_EFFECT" }
+  local function payDayThen(second)
+    local user = mon({ species = "ALPHA", spd = 90, maxHp = 200, level = 30 })
+    user.moves = { { id = "PAYDAY", pp = 20 }, { id = "TELEPORT", pp = 20 } }
+    local fight = fightOf("wild", { party = { user },
+                                    wildMon = mon({ species = "BETA", spd = 10, maxHp = 400, atk = 5 }) })
+    fight.game.save.player = { name = "PLAYER" }
+    fight.fight:sendChoice({ action = "fight", move = 0 })
+    for _ = 1, 4 do fight.solo:update(1 / 60, fight.game) end
+    fight.fight:sendChoice(second)
+    for _ = 1, 4 do fight.solo:update(1 / 60, fight.game) end
+    return fight, fight.sim:outcome()
+  end
+  local out
+  f, out = payDayThen({ action = "fight", move = 1 })
+  eq(out and out.reason, "run", "Pay Day (Red escape): our TELEPORT ends the wild fight as a run")
+  eq(out and out.payDay, 60, "Pay Day (Red escape): ...and the referee states the pot (wBattleResult stays 0)")
+  ok(out and out.losers and out.losers[1] == PLAYER, "Pay Day (Red escape): ...with us in `losers` -- we fled")
+  eq(Gen.money.get(f.game.save), 3060, "Pay Day (Red escape): the fleeing player is still the payee")
+  eq(f.fight.payDayPaid, 60, "Pay Day (Red escape): ...once")
+  -- The player's own RUN writes wBattleResult 2: the referee states no pot.
+  f, out = payDayThen({ action = "run" })
+  eq(out and out.reason, "run", "Pay Day (Red RUN): the player's own RUN gets away")
+  eq(out and out.payDay, nil, "Pay Day (Red RUN): ...with no pot stated (TryRunningFromBattle writes 2)")
+  eq(Gen.money.get(f.game.save), 3000, "Pay Day (Red RUN): ...so nothing is paid")
+  data.moves.PAYDAY, data.moves.TELEPORT = nil, nil
+
+  -- ------- Gold: a foe's happiness is the cart's BASE_HAPPINESS
+  local fond = mon({ species = "BETA", spd = 5, maxHp = 400, atk = 1 })
+  fond.happiness = 255
+  local tr = fightOf("trainer", { cart2 = true, data = goldData, foes = { fond },
+                                   party = { (function()
+                                     local m = mon({ species = "ALPHA", spd = 90, maxHp = 200 })
+                                     m.happiness = 200
+                                     return m
+                                   end)() } })
+  eq(tr.fight.npcParty and tr.fight.npcParty[1].happiness, 70,
+     "K14 foe (Gold solo): a trainer's monster is described at BASE_HAPPINESS (LoadEnemyMon .Happiness)")
+  eq(tr.sim.byId[FOE].mons[1].happiness, 70, "K14 foe (Gold solo): ...and the referee fights with it")
+  eq(tr.fight.mine[1].happiness, 200, "K14 own (Gold solo): the player's own monster keeps its own")
+  local wildFond = swiper()
+  wildFond.happiness = 3
+  local wf = fightOf("wild", { cart2 = true, data = goldData, random = function() return 0 end,
+                               wildMon = wildFond })
+  eq(wf.sim.byId[FOE].mons[1].happiness, 70, "K14 foe (Gold solo): a wild monster too")
+
+  for name in pairs(stubs) do package.loaded[name] = saved[name] end
+end)()
+
+-- ------------------------------------------------------------------
+-- closing the Red / Gold referee gaps: wave 4 (task C2b), the solo half
+-- ------------------------------------------------------------------
+--
+-- Gold's wTimeOfDay reaches the solo referee; a SKETCH the Gold referee runs
+-- is written home and its PP brought back at the end; Red's MIMIC pick rides
+-- the choice and its slot's PP comes home as MIMIC's; the end-of-fight
+-- reconcile reads the party's own list under a TRANSFORM or a MIMIC and saves
+-- a TOXIC as PSN.  Through the real referees; moves and numbers invented.
+
+;(function()
+  local stubs = {
+    ["src.link.Handshake"] = {
+      generation = function(game) return tonumber(type(game) == "table" and game.generation) or 1 end,
+    },
+    ["src.core.gen2.ItemEffects"] = {
+      heldItemFor = function(id, d)
+        local def = d and d.items and d.items[id]
+        if type(def) ~= "table" or def.heldEffect == nil then return nil end
+        return { heldEffect = def.heldEffect, heldParameter = def.heldParameter or 0 }
+      end,
+    },
+    ["src.core.gen2.Mail"] = { isMail = function() return false end },
+  }
+  local saved = {}
+  for name, module in pairs(stubs) do
+    saved[name] = package.loaded[name]
+    package.loaded[name] = module
+  end
+  local Turn2 = need("BattleSim2/Turn")
+  local goldData = setmetatable({
+    items = {},
+    moves = {
+      THUMP = { power = 40, accuracy = 100, type = "NORM", pp = 20, effect = "EFFECT_NORMAL_HIT" },
+      SWIPE = { power = 30, accuracy = 100, type = "NORM", pp = 30, effect = "EFFECT_NORMAL_HIT" },
+      SKETCH = { power = 0, accuracy = 100, type = "NORM", pp = 1, effect = "EFFECT_SKETCH" },
+    },
+  }, { __index = data })
+  local function goldMon(o)
+    local m = mon(o)
+    m.otId = 4321
+    return m
+  end
+  local function settle(f, n) for _ = 1, n or 6 do f.solo:update(1 / 60, f.game) end end
+
+  -- ------- Gold's wTimeOfDay reaches the referee
+  local savedWorld = stubMod.world
+  stubMod.world = { overworld = function()
+    return { timeOfDayId = function() return 0 end }
+  end }
+  local real, seen = Turn2.create, nil
+  Turn2.create = function(opts) seen = opts; return real(opts) end
+  local f = fightOf("wild", { cart2 = true, data = goldData, random = function() return 0 end })
+  Turn2.create = real
+  eq(seen and seen.timeOfDay, "morn", "timeOfDay (Gold solo): the overworld's wTimeOfDay is handed to the referee")
+  eq(f.sim and f.sim.timeOfDay, "morn", "timeOfDay (Gold solo): ...which keeps it for MORNING SUN and its kin")
+  local realOne, seenOne = Turn.create, nil
+  Turn.create = function(opts) seenOne = opts; return realOne(opts) end
+  pcall(fightOf, "wild")
+  Turn.create = realOne
+  ok(seenOne ~= nil and seenOne.timeOfDay == nil, "timeOfDay (Red solo): Red's referee is handed none")
+  stubMod.world = savedWorld
+
+  -- ------- SKETCH through the Gold referee, written home
+  local painter = goldMon({ species = "ALPHA", spd = 90, atk = 1, maxHp = 200 })
+  painter.moves = { { id = "THUMP", pp = 20, maxPp = 20 }, { id = "SKETCH", pp = 1, maxPp = 1 } }
+  local foe = mon({ species = "BETA", spd = 10, maxHp = 300, atk = 1 })
+  foe.moves = { { id = "SWIPE", pp = 30 } }
+  f = fightOf("wild", { cart2 = true, data = goldData, random = function() return 0 end,
+                        party = { painter }, wildMon = foe })
+  ok(f.started, "SKETCH (Gold solo): the fight is taken over")
+  f.fight:sendChoice({ action = "fight", move = 0 })
+  settle(f)
+  f.fight:sendChoice({ action = "fight", move = 1 })
+  settle(f)
+  local sketched = false
+  for _, event in ipairs(f.events) do
+    if event.t == "moves" and event.side == "a" and event.mon == 0 and type(event.moves) == "table"
+       and event.moves[2] and event.moves[2].id == "SWIPE" then sketched = true end
+  end
+  ok(sketched, "SKETCH (Gold solo): the referee states the sketch as a party list (`moves` with `mon`)")
+  eq(painter.moves[2].id, "SWIPE", "SKETCH (Gold solo): the save monster's SKETCH slot holds the sketched move")
+  eq(painter.moves[2].maxPp, 30, "SKETCH (Gold solo): ...out of its base PP")
+  eq(f.fight.mine[1].moves[2].id, "SWIPE", "SKETCH (Gold solo): ...and FIGHT lists it")
+  f.fight:sendChoice({ action = "fight", move = 1 })
+  settle(f)
+  local simPp = f.sim.byId[PLAYER].mons[1].moves[2].pp
+  eq(f.fight.mine[1].moves[2].pp, simPp, "SKETCH (Gold solo): a spend of the sketched move reaches the sheet")
+  -- The end brings its PP home by id (the reconcile), past the spend.
+  f.solo:_reconcile(f.sim, f.game, f.game.save)
+  eq(painter.moves[2].pp, simPp, "SKETCH (Gold solo): the end of the fight brings the sketched move's PP home")
+
+  -- A TRANSFORMed sketcher (the cart's bug) the fight ends on: the referee's
+  -- party list put aside holds the sketch, and the end writes it home.
+  local worn = goldMon({ species = "ALPHA", spd = 90, atk = 1, maxHp = 200 })
+  worn.moves = { { id = "THUMP", pp = 20, maxPp = 20 }, { id = "SKETCH", pp = 1, maxPp = 1 } }
+  f = fightOf("wild", { cart2 = true, data = goldData, random = function() return 0 end,
+                        party = { worn }, wildMon = foe })
+  local wornMon = f.sim.byId[PLAYER].mons[1]
+  wornMon.transformed = true
+  wornMon.preTransform = { moves = { { id = "THUMP", pp = 17 }, { id = "SWIPE", pp = 30, maxPp = 30 } } }
+  wornMon.moves = { { id = "SWIPE", pp = 5 }, { id = "SKETCH", pp = 1 } }
+  f.solo:_reconcile(f.sim, f.game, f.game.save)
+  eq(worn.moves[2].id, "SWIPE", "SKETCH (Gold solo, TRANSFORMed at the end): the reconcile writes the sketch home")
+  eq(worn.moves[2].pp, 30, "SKETCH (Gold solo, TRANSFORMed at the end): ...at the party list's PP")
+  eq(worn.moves[1].pp, 17, "SKETCH (Gold solo, TRANSFORMed at the end): ...and the party's own PP, not the copies'")
+
+  -- ------- Red: MIMIC's pick rides the choice, and its slot's PP comes home
+  data.moves.MIMIC = { power = 0, accuracy = 100, type = "NORM", pp = 10, effect = "MIMIC_EFFECT" }
+  data.moves.SWIPE = data.moves.SWIPE or { power = 30, accuracy = 100, type = "NORM", pp = 30 }
+  local copycat = mon({ species = "ALPHA", spd = 90, atk = 1, maxHp = 200 })
+  copycat.moves = { { id = "MIMIC", pp = 10 }, { id = "THUMP", pp = 20 } }
+  local red = mon({ species = "BETA", spd = 10, maxHp = 300, atk = 1 })
+  red.moves = { { id = "THUMP", pp = 20 }, { id = "SWIPE", pp = 30 } }
+  f = fightOf("wild", { party = { copycat }, wildMon = red })
+  ok(f.started, "MIMIC (Red solo): the fight is taken over")
+  f.fight:sendChoice({ action = "fight", move = 0, mimic = 1 })
+  settle(f)
+  local own = f.sim.byId[PLAYER].mons[1]
+  eq(own.moves[1].id, "SWIPE", "MIMIC (Red solo): the pick sent with the choice is the move copied (`.letPlayerChooseMove`)")
+  f.fight:sendChoice({ action = "fight", move = 0 })
+  settle(f)
+  eq(f.fight.mine[1].moves[1].id, "MIMIC", "MIMIC (Red solo): the sheet keeps MIMIC")
+  eq(f.fight.mine[1].moves[1].pp, own.moves[1].pp, "MIMIC (Red solo): ...at the slot's PP (DecrementPP by slot)")
+  f.solo:_reconcile(f.sim, f.game, f.game.save)
+  eq(copycat.moves[1].id, "MIMIC", "MIMIC (Red solo): the party keeps MIMIC at the end")
+  eq(copycat.moves[1].pp, own.moves[1].pp, "MIMIC (Red solo): ...and pays for the mimicked uses")
+  eq(copycat.moves[2].pp, 20, "MIMIC (Red solo): ...and the walk goes on past that slot")
+  data.moves.MIMIC = nil
+
+  -- ------- the reconcile's reading, by hand
+  local solo = Solo.new({ say = function() end }, { enabled = function() return true end })
+  local function target(list)
+    local t = mon({})
+    t.moves = list
+    return t
+  end
+  local tgt = target({ { id = "MIMIC", pp = 10 }, { id = "THUMP", pp = 20 } })
+  solo:_applyMon(tgt, { hp = 10, maxHp = 60, status = "toxic",
+    moves = { { id = "SWIPE", pp = 7 }, { id = "THUMP", pp = 18 } },
+    preMimic = { [1] = { id = "MIMIC", pp = 10 } } }, 1)
+  eq(tgt.moves[1].pp, 7, "reconcile (Red): MIMIC comes home at the mimicked slot's PP")
+  eq(tgt.moves[2].pp, 18, "reconcile (Red): ...and the next slot still comes home")
+  eq(tgt.status, "PSN", "reconcile (Red): a TOXIC is saved as PSN")
+  tgt = target({ { id = "MIMIC", pp = 10 }, { id = "THUMP", pp = 20 } })
+  solo:_applyMon(tgt, { hp = 10, maxHp = 60, status = "toxic",
+    moves = { { id = "SWIPE", pp = 3 }, { id = "THUMP", pp = 18 } },
+    preMimic = { [1] = { id = "MIMIC", pp = 9 } } }, 2)
+  eq(tgt.moves[1].pp, 9, "reconcile (Gold): MIMIC keeps its own PP (CheckMimicUsed)")
+  eq(tgt.status, "PSN", "reconcile (Gold): a TOXIC is saved as PSN")
+  tgt = target({ { id = "THUMP", pp = 20 }, { id = "SWIPE", pp = 30 } })
+  solo:_applyMon(tgt, { hp = 10, maxHp = 60,
+    moves = { { id = "GLARE", pp = 5 }, { id = "SWIPE", pp = 5 } },
+    preTransform = { moves = { { id = "THUMP", pp = 12 }, { id = "SWIPE", pp = 4 } } } }, 1)
+  eq(tgt.moves[1].pp, 12, "reconcile (TRANSFORM): the party's own list comes home, not the copies")
+  eq(tgt.moves[2].pp, 4, "reconcile (TRANSFORM): ...a copied id the party also knows is not the copy's 5")
+  tgt = target({ { id = "MIMIC", pp = 10 }, { id = "THUMP", pp = 20 } })
+  solo:_applyMon(tgt, { hp = 10, maxHp = 60,
+    moves = { { id = "GLARE", pp = 5 }, { id = "THUMP", pp = 11 } } }, 2)
+  eq(tgt.moves[2].pp, 11, "reconcile: a move the party does not hold no longer ends the walk")
+  eq(tgt.moves[1].pp, 10, "reconcile: ...and writes nothing itself")
+
+  for name in pairs(stubs) do package.loaded[name] = saved[name] end
+end)()
+
+-- ------------------------------------------------------------------
+-- wave 5 of docs/plans/gen12-referee-gaps-fix.md (C3), end to end in solo
+-- ------------------------------------------------------------------
+
+-- Lines the screen queued that start with `who` and say `what`.
+local function saidBy(fight, who, what)
+  local n = 0
+  for _, line in ipairs(fight.lines or {}) do
+    if type(line) == "string" and line:sub(1, #who) == who and line:find(what, 1, true) then
+      n = n + 1
+    end
+  end
+  return n
+end
+
+-- ------- Red's TypeEffects order decides "doesn't affect" against "missed"
+--
+-- pokered AdjustDamageForMoveType walks TypeEffects top to bottom, floors after
+-- every matching row, and leaves the LAST row's multiplier for
+-- PrintMoveFailureText: a GROUND move into a FLYING/ROCK dual type is "It
+-- doesn't affect" only when the immunity row is the last one it applied, and
+-- "<USER>'s attack missed!" when a 2x row follows it (the damage is 0 either
+-- way).  The ruleset uploads the engine's rows in their order (`chartOrder`)
+-- and solo hands it to the referee.  Invented types and moves.
+;(function()
+  local function fightWith(matchups, seed)
+    local chartData = setmetatable({
+      type_chart = { types = { GRND = {}, ROCK = {}, BIRD = {} }, matchups = matchups },
+      moves = {
+        QUAKE = { name = "QUAKE", power = 100, accuracy = 100, type = "GRND", pp = 10 },
+        THUMP = { name = "THUMP", power = 40, accuracy = 100, type = "BIRD", pp = 20 },
+      },
+      pokemon = {
+        ALPHA = { name = "ALPHA", types = { "GRND" }, catchRate = 200 },
+        BETA  = { name = "BETA", types = { "BIRD", "ROCK" }, catchRate = 200 },
+      },
+    }, { __index = data })
+    local player = mon({ species = "ALPHA", spd = 90, maxHp = 200 })
+    player.moves = { { id = "QUAKE", pp = 10 } }
+    local foe = mon({ species = "BETA", spd = 5, maxHp = 400, atk = 1 })
+    foe.moves = { { id = "THUMP", pp = 20 } }
+    local f = fightOf("wild", { seed = seed or 11, party = { player }, wildMon = foe,
+                                data = chartData })
+    f.fight:sendChoice({ action = "fight", move = 0 })
+    for _ = 1, 4 do f.solo:update(1 / 60, f.game) end
+    return f
+  end
+  local immuneLast = {
+    { attacker = "GRND", defender = "ROCK", multiplier = 20 },
+    { attacker = "GRND", defender = "BIRD", multiplier = 0 },
+  }
+  local f = fightWith(immuneLast)
+  ok(f.started, "chartOrder (solo Red): the fight is taken over")
+  eq(f.sim.chartRows and #f.sim.chartRows, 2, "chartOrder (solo Red): the referee holds the rows, in order")
+  eq(saidTimes(f.fight, "doesn't affect"), 1,
+     "chartOrder (solo Red): the immunity row applied last -- \"It doesn't affect\"")
+  eq(saidBy(f.fight, "ALPHA", "missed"), 0, "chartOrder (solo Red): ...and no \"missed\"")
+  local immuneFirst = {
+    { attacker = "GRND", defender = "BIRD", multiplier = 0 },
+    { attacker = "GRND", defender = "ROCK", multiplier = 20 },
+  }
+  f = fightWith(immuneFirst)
+  eq(saidTimes(f.fight, "doesn't affect"), 0,
+     "chartOrder (solo Red): a 2x row after the immunity -- no \"doesn't affect\"")
+  eq(saidBy(f.fight, "ALPHA", "missed"), 1,
+     "chartOrder (solo Red): ...\"<USER>'s attack missed!\", the last row's reading")
+end)()
+
+-- ------- the escape is said once: "Got away safely!"
+;(function()
+  local f = fightOf("wild", { seed = 1, pSpd = 200, eSpd = 10, eHp = 9999, eAtk = 3 })
+  f.fight:sendChoice({ action = "run" })
+  for _ = 1, 5 do f.solo:update(1 / 60, f.game) end
+  local out = f.sim:outcome()
+  eq(out and out.reason, "run", "escape (solo Red): the fight ends in an escape")
+  eq(saidTimes(f.fight, "Got away safely!"), 1, "escape (solo Red): \"Got away safely!\", once")
+  eq(saidTimes(f.fight, "Someone ran away!") + saidTimes(f.fight, "You lost!"), 0,
+     "escape (solo Red): ...with no loss line or second reason after it")
+end)()
+
+-- ------- Gold's BATON PASS: the successor the player picked comes in
+;(function()
+  local stubs = {
+    ["src.link.Handshake"] = {
+      generation = function(game) return tonumber(type(game) == "table" and game.generation) or 1 end,
+    },
+    ["src.core.gen2.ItemEffects"] = { heldItemFor = function() return nil end },
+    ["src.core.gen2.Mail"] = { isMail = function() return false end },
+  }
+  local saved = {}
+  for name, module in pairs(stubs) do
+    saved[name] = package.loaded[name]
+    package.loaded[name] = module
+  end
+  local goldData = setmetatable({
+    items = {},
+    moves = {
+      THUMP = { name = "THUMP", power = 40, accuracy = 100, type = "NORM", pp = 20,
+                effect = "EFFECT_NORMAL_HIT" },
+      BATON_PASS = { name = "BATON PASS", power = 0, accuracy = 100, type = "NORM", pp = 40,
+                     effect = "EFFECT_BATON_PASS" },
+    },
+  }, { __index = data })
+  local function passer(level)
+    local m = mon({ species = "ALPHA", spd = 90, maxHp = 200, level = level })
+    m.moves = { { id = "THUMP", pp = 20, maxPp = 20 }, { id = "BATON_PASS", pp = 40, maxPp = 40 } }
+    m.otId = 4321
+    return m
+  end
+  local lead, second, third = passer(20), passer(21), passer(22)
+  local f = fightOf("wild", { cart2 = true, data = goldData, random = function() return 0 end,
+    party = { lead, second, third },
+    wildMon = mon({ species = "BETA", spd = 5, maxHp = 400, atk = 1 }) })
+  ok(f.started, "BATON PASS (solo Gold): the fight is taken over")
+  local fight = f.fight
+  eq(fight:pickMove(2), false, "BATON PASS (solo Gold): choosing it opens the party menu first")
+  eq(fight.phase, "switch", "BATON PASS (solo Gold): ...the picker")
+  local pressed = {}
+  local input = { wasPressed = function(_, k) local was = pressed[k]; pressed[k] = nil; return was == true end }
+  pressed.down = true
+  fight:updateSwitch(input)   -- the second bench member, party position 3
+  pressed.a = true
+  fight:updateSwitch(input)
+  for _ = 1, 4 do f.solo:update(1 / 60, f.game) end
+  local came
+  for _, event in ipairs(f.events) do
+    if event.t == "send" and event.side == "a" and tonumber(event.mon) ~= 0 then came = tonumber(event.mon) end
+  end
+  eq(came, 2, "BATON PASS (solo Gold): the monster picked comes in (choice.pass), not the referee's default")
+  eq(f.sim.byId[PLAYER].active, 3, "BATON PASS (solo Gold): ...the seat fields party member 3")
+  for name in pairs(stubs) do package.loaded[name] = saved[name] end
+end)()
+
+-- ------------------------------------------------------------------
+-- wave 6 of docs/plans/gen12-referee-gaps-fix.md (C4): Red's PP byte comes
+-- home whole, the trainer seat carries its name and AI layers, and a Gold
+-- trainer monster `standing` at 0 HP is answered for
+-- ------------------------------------------------------------------
+
+;(function()
+  -- Red's PP byte: a slot DecrementPP wrapped holds 63 PP and one PP Up fewer
+  -- (pokered decrement_pp.asm), and the party struct keeps both.
+  local solo = Solo.new({ say = function() end }, { enabled = function() return true end })
+  local tgt = mon({})
+  tgt.moves = { { id = "THUMP", pp = 0, ppUps = 3 }, { id = "SWIPE", pp = 9 } }
+  solo:_applyMon(tgt, { hp = 10, maxHp = 60,
+    moves = { { id = "THUMP", pp = 63, ppUps = 2 }, { id = "SWIPE", pp = 8, ppUps = 0 } } }, 1)
+  eq(tgt.moves[1].pp, 63, "PP wrap (solo Red): the save keeps the 63 the byte holds, never a clamped PP")
+  eq(tgt.moves[1].ppUps, 2, "PP wrap (solo Red): ...and the PP Up the wrap borrowed")
+  eq(tgt.moves[2].ppUps, nil, "PP wrap (solo Red): a slot whose PP Ups did not move keeps its shape")
+  local gold = mon({})
+  gold.moves = { { id = "THUMP", pp = 3, maxPp = 35 } }
+  solo:_applyMon(gold, { hp = 10, maxHp = 60, moves = { { id = "THUMP", pp = 2, ppUps = 1 } } }, 2)
+  eq(gold.moves[1].ppUps, nil, "PP (solo Gold): no PP Up is written -- Gold's DecrementPP never wraps")
+
+  -- The trainer seat (Red): the record's name, as the cart's lines print it,
+  -- and its class's move-choice layers for a pick nobody filed.
+  local realCreate, seen = Turn.create, nil
+  Turn.create = function(opts) seen = opts; return realCreate(opts) end
+  pcall(fightOf, "trainer", { trainer = { baseMoney = 20, classId = "OPP_ALPHA",
+                                          name = "ALPHA TRAINER", aiMods = { 1, 2 } } })
+  Turn.create = realCreate
+  local seat = seen and seen.sides.b[1]
+  eq(seat and seat.name, "ALPHA TRAINER", "trainer seat (solo Red): named as the record names the trainer")
+  eq(seat and table.concat(seat.aiMods or {}, ","), "1,2", "trainer seat (solo Red): ...with its AI layers")
+
+  -- A Gold trainer monster SPIKES left `standing` at 0 HP (BattleSim2, wave
+  -- 5) is asked for a choice; the solo screen answers for it -- with no choice
+  -- deadline, a seat it skipped would hold the fight forever.
+  local Turn2 = need("BattleSim2/Turn")
+  local E2 = need("BattleSim2/Effects")
+  local function mv(id, effect) return { id = id, pp = 20, power = 0, accuracy = 255, type = 0,
+                                          effect = effect or 0, chance = 0 } end
+  local function g(sp, moves, o)
+    o = o or {}
+    return { species = sp, level = 20, hp = o.hp, maxHp = 80,
+             stats = { atk = 40, def = 40, spe = o.spe or 40, spa = 40, spd = 40 }, moves = moves }
+  end
+  local battle = assert(Turn2.create({ id = "solo_w6", mode = "coop_npc", seed = 3,
+    choiceTimeout = 0, reconnectGrace = 60,
+    sides = {
+      a = { { playerId = PLAYER, name = "ANN", mons = {
+        g("ALPHA", { mv("SPIKES", E2.idOf("EFFECT_SPIKES")), mv("PERISH", E2.idOf("EFFECT_PERISH_SONG")),
+                     mv("SPLASH") }, { spe = 90 }),
+        g("DELTA", { mv("SPLASH") }, { spe = 1 }) } } },
+      b = { { playerId = FOE, name = "BOB", mons = {
+        g("BETA", { mv("SPLASH") }), g("GAMMA", { mv("SPLASH") }, { hp = 5 }) } } },
+    } }))
+  local function round(a, b)
+    battle:submitChoice(PLAYER, a)
+    battle:submitChoice(FOE, b)
+    battle:drainEvents()
+  end
+  local F = function(m) return { action = "fight", move = m } end
+  round(F(0), F(0)) round(F(1), F(0)) round(F(2), F(0)) round(F(2), F(0)) round(F(2), F(0))
+  round({ action = "switch", slot = 1 }, { action = "switch", slot = 1 })
+  local foe = battle.byId[FOE]
+  local gamma = foe.mons[foe.active]
+  eq(gamma and gamma.hp, 0, "standing (solo Gold): SPIKES left the trainer's successor at 0 HP")
+  eq(battle:snapshot().phase, "choice", "standing (solo Gold): ...and the turn opened with it standing")
+  local host = setmetatable({ sim = battle, generation = 2, brain = nil }, { __index = Solo })
+  eq(host:_answerFoe(), true, "standing (solo Gold): the screen answers for the standing monster")
+  ok(foe.choice ~= nil, "standing (solo Gold): ...so the turn is not left waiting on it")
+end)()
+
+-- ------------------------------------------------------------------
+-- final client fixes (FX-C2 of docs/plans/gen12-referee-gaps-fix.md)
+-- ------------------------------------------------------------------
+--
+-- Both last monsters down at once against the computer is the cart's
+-- LostBattle: pokered HandleEnemyMonFainted / HandlePlayerMonFainted run
+-- AnyPartyAlive and jump to HandlePlayerBlackOut, FaintEnemyPokemon returns
+-- before GainExperience, wBattleResult is RemoveFaintedPlayerMon's 1 (no Pay
+-- Day, and EndOfBattle skips EvolutionAfterBattle); pokecrystal
+-- HandleEnemyMonFaint's CheckPlayerPartyForFitMon goes to LostBattle the
+-- same way, and ExitBattle pays and evolves only on a WIN.  The referees
+-- state it as the computer's win (FX-R1 / FX-R2); every path this client
+-- reads the outcome on takes it as the loss it is -- the whiteout, no prize,
+-- no Pay Day, no exp, no fanfare, the loss line.
+
+;(function()
+  local function boomData(effect)
+    local d = {}
+    for k, v in pairs(data) do d[k] = v end
+    d.moves = {
+      THUMP = data.moves.THUMP,
+      BOOM = { power = 200, accuracy = 100, type = "NORM", pp = 5, effect = effect },
+    }
+    return d
+  end
+  for _, case in ipairs({
+    { tag = "Red wild", kind = "wild", effect = "EXPLODE_EFFECT" },
+    { tag = "Red trainer", kind = "trainer", effect = "EXPLODE_EFFECT" },
+    { tag = "Gold wild", kind = "wild", effect = "EFFECT_SELFDESTRUCT", cart2 = true },
+  }) do
+    -- A Gold game reads as one through the link handshake's generation (the
+    -- Gold section above has why); taken away again below.
+    local savedHandshake = package.loaded["src.link.Handshake"]
+    if case.cart2 then
+      package.loaded["src.link.Handshake"] = {
+        generation = function(game) return tonumber(type(game) == "table" and game.generation) or 1 end,
+      }
+    end
+    local lead = mon({ species = "ALPHA", spd = 90, maxHp = 60, level = 20 })
+    lead.moves = { { id = "BOOM", pp = 5 } }
+    local foes = { mon({ species = "BETA", spd = 5, maxHp = 30, atk = 5 }) }
+    local f = fightOf(case.kind, {
+      party = { lead }, data = boomData(case.effect), cart2 = case.cart2,
+      wildMon = case.kind == "wild" and foes[1] or nil, foes = foes,
+    })
+    ok(f.started, "mutual KO (" .. case.tag .. "): the fight is taken over")
+    local money = (case.cart2 and f.game.save.player.money) or f.game.save.money
+    local outcome = playOut(f, 60)
+    ok(outcome ~= nil, "mutual KO (" .. case.tag .. "): the fight ends")
+    eq(outcome and outcome.reason, "ko", "mutual KO (" .. case.tag .. "): ...on a knockout")
+    eq(f.fight.result, "loss", "mutual KO (" .. case.tag .. "): the screen reads the player's loss")
+    eq(countKind(f.events, "exp"), 0, "mutual KO (" .. case.tag .. "): no exp (FaintEnemyPokemon returns first)")
+    eq(outcome and outcome.payDay, nil, "mutual KO (" .. case.tag .. "): no Pay Day pot")
+    eq(saidTimes(f.fight, "You won!"), 0, "mutual KO (" .. case.tag .. "): no win line")
+    eq(saidTimes(f.fight, "You lost!"), 1, "mutual KO (" .. case.tag .. "): the loss line")
+    ok(f.fight.victoryMusicPlayed ~= true, "mutual KO (" .. case.tag .. "): no victory fanfare")
+    -- Off the screen: the engine is told "lose", which is its blackout.
+    f.fight:exit()
+    eq(f.ending[1] and f.ending[1].result, "lose", "mutual KO (" .. case.tag .. "): the engine blacks out (\"lose\")")
+    local after = (case.cart2 and f.game.save.player.money) or f.game.save.money
+    ok(after <= money, "mutual KO (" .. case.tag .. "): no prize and no coins were paid")
+    package.loaded["src.link.Handshake"] = savedHandshake
+  end
+end)()
+
+-- ------------------------------------------------------------------
+-- K16 / K21 on the solo path (docs/plans/gen12-referee-remaining-gaps.md):
+-- the class data rides to the computer's seat, no NPC bag, Gold's battle
+-- type on the ruleset and the wild foe's weight on its sheet.  Every
+-- number is invented.
+-- ------------------------------------------------------------------
+
+;(function()
+  local function capture(T, fn)
+    local captured
+    local real = T.create
+    T.create = function(opts) captured = opts; return real(opts) end
+    local okRun, result = pcall(fn)
+    T.create = real
+    if not okRun then error(result, 0) end
+    return captured, result
+  end
+
+  -- Red: the trainer's ai_classes record (TrainerAI.classFor's).
+  local redData = setmetatable({ ai_classes = {
+    OPP_FIX = { uses = 2, chance = 64, item = "X_ATTACK", hpBelow = 5 } } }, { __index = data })
+  local opts, f = capture(Turn, function()
+    return fightOf("trainer", { data = redData,
+      trainer = { id = "OPP_FIX", name = "FIXER", baseMoney = 20 } })
+  end)
+  ok(f.started, "K16 (solo Red): the trainer fight is taken over")
+  local seat = opts and opts.sides and opts.sides.b and opts.sides.b[1] or {}
+  local ai = seat.aiClass or {}
+  eq(table.concat({ ai.uses or "-", ai.chance or "-", ai.item or "-", ai.hpBelow or "-" }, ","),
+     "2,64,X_ATTACK,5", "K16 (solo Red): the class record rides to the computer's seat")
+  eq(seat.bag, nil, "K16 (solo Red): ...and no bag does")
+  eq(seat.trainerItems, nil, "K16 (solo Red): no Gold fields on a Red seat")
+
+  -- Gold: the class attributes, and the fight's battle type.  A Gold game
+  -- reads as one through the link handshake's generation (the Gold section
+  -- above has why); taken away again below.
+  local savedHandshake = package.loaded["src.link.Handshake"]
+  package.loaded["src.link.Handshake"] = {
+    generation = function(game) return tonumber(type(game) == "table" and game.generation) or 1 end,
+  }
+  local Turn2 = need("BattleSim2/Turn")
+  local goldOpts, g = capture(Turn2, function()
+    return fightOf("trainer", { cart2 = true, data = setmetatable({}, { __index = data }),
+      trainer = { name = "SCOUT FIX", baseMoney = 30, items = { "POTION" },
+                  attributes = { 1, 0, 30, 0x11, 0x02, 0x34, 0x01, 0 } } })
+  end)
+  ok(g.started, "K16 (solo Gold): the trainer fight is taken over")
+  local gseat = goldOpts and goldOpts.sides.b[1] or {}
+  eq(table.concat(gseat.trainerItems or {}, ","), "POTION", "K16 (solo Gold): trainerItems ride")
+  eq(gseat.aiFlags, 0x0211, "K16 (solo Gold): aiFlags (TRNATTR_AI_MOVE_WEIGHTS)")
+  eq(gseat.itemSwitch, 0x0134, "K16 (solo Gold): itemSwitch (TRNATTR_AI_ITEM_SWITCH)")
+  eq(gseat.baseReward, 30, "K16 (solo Gold): baseReward (TRNATTR_BASEMONEY)")
+  eq(gseat.bag, nil, "K16 (solo Gold): no NPC bag")
+  eq(gseat.countSpeciesTypes, nil, "K23 (solo Gold): no species numbered the party's size, none stated")
+
+  -- K23: the types of the species numbered the party's size (one BETA here,
+  -- so species 1), stated for pokegold's FindEnemyMonsThatResistPlayer.
+  local k23Data = setmetatable({ pokemon = {
+    ALPHA = { name = "ALPHA", index = 1, dex = 1, types = { "FIRE", "NORM" }, catchRate = 200 },
+    BETA = data.pokemon.BETA,
+  } }, { __index = data })
+  local k23Opts, k = capture(Turn2, function()
+    return fightOf("trainer", { cart2 = true, data = k23Data,
+      trainer = { name = "SCOUT FIX", baseMoney = 30, items = {},
+                  attributes = { 0, 0, 30, 0, 0, 0, 0, 0 } } })
+  end)
+  ok(k.started, "K23 (solo Gold): the trainer fight is taken over")
+  eq(table.concat(k23Opts and k23Opts.sides.b[1].countSpeciesTypes or {}, ","), "0,1",
+     "K23 (solo Gold): species 1's two types ride to the computer's seat (chart indices FIRE 0, NORM 1)")
+
+  local gwData = setmetatable({ gen2Pokedex = { entries = { BETA = { weight = 55 } } } },
+    { __index = data })
+  local wildOpts, w = capture(Turn2, function()
+    return fightOf("wild", { cart2 = true, data = gwData, battleType = 4 })
+  end)
+  ok(w.started, "K21 (solo Gold wild): the encounter is taken over")
+  eq(wildOpts and wildOpts.battleType, 4, "K21 (solo Gold wild): the engine battle's type reaches the referee")
+  local foe = wildOpts and wildOpts.sides.b[1].mons[1] or {}
+  eq(foe.weight, 55, "K21 (solo Gold wild): the wild foe's sheet carries its dex weight")
+  eq(wildOpts and wildOpts.sides.a[1].mons[1].weight, nil,
+     "K21 (solo Gold wild): a species with no dex entry states no weight on our side")
+
+  -- CL2: our own sheets weigh their species too, because a wild monster
+  -- that TRANSFORMed into ours weighs the copy under a HEAVY BALL
+  -- (pokecrystal HeavyBallMultiplier reads wEnemyMonSpecies' dex entry, which
+  -- BattleCommand_Transform overwrote; BattleSim2 Effects `transformWeight`).
+  -- End to end: the stamp, the referee's copy, the ball's rate.
+  do
+    local Effects2 = need("BattleSim2/Effects")
+    local ALPHA_W, BETA_W = 9000, 55
+    local tfData = setmetatable({
+      gen2Pokedex = { entries = { ALPHA = { weight = ALPHA_W }, BETA = { weight = BETA_W } } },
+      moves = {
+        THUMP = data.moves.THUMP,
+        MIMICRY = { id = "MIMICRY", name = "MIMICRY", power = 0, type = "NORM", pp = 10,
+                    accuracy = 100, accuracyRaw = 255, effect = "EFFECT_TRANSFORM", effectId = 57 },
+      },
+    }, { __index = data })
+    local morph = mon({ species = "BETA", spd = 5, maxHp = 400, atk = 1 })
+    morph.moves = { { id = "MIMICRY", pp = 10 } }
+    local tfOpts, t = capture(Turn2, function()
+      return fightOf("wild", { cart2 = true, data = tfData, wildMon = morph, pAtk = 1 })
+    end)
+    ok(t.started, "CL2 K21 (solo Gold): the encounter is taken over")
+    eq(tfOpts and tfOpts.sides.a[1].mons[1].weight, ALPHA_W,
+       "CL2 K21 (solo Gold wild): our own sheet carries its species' dex weight")
+    eq(tfOpts and tfOpts.sides.b[1].mons[1].weight, BETA_W, "CL2 K21: ...beside the wild foe's own")
+    t.fight:sendChoice({ action = "fight", move = 0 })
+    for _ = 1, 4 do t.solo:update(1 / 60, t.game) end
+    local seat = t.sim.byId[FOE]
+    local foeMon = seat and seat.mons[seat.active or 1] or {}
+    eq(foeMon.transformed, true, "CL2 K21: the wild monster TRANSFORMed into ours")
+    eq(foeMon.transformWeight, ALPHA_W, "CL2 K21: ...and the referee holds the weight it copied")
+    local heavy = Effects2.ballRate("HEAVY_BALL", 200, foeMon)
+    eq(heavy, Effects2.ballRate("HEAVY_BALL", 200, { weight = ALPHA_W }),
+       "CL2 K21: a HEAVY BALL now weighs our monster's species")
+    ok(heavy ~= Effects2.ballRate("HEAVY_BALL", 200, { weight = BETA_W }),
+       "CL2 K21: ...not the wild monster's own (the fixture's two weights rate apart)")
+    -- A trainer fight (the ball is blocked) leaves our sheets unweighed.
+    local trOpts = capture(Turn2, function()
+      return fightOf("trainer", { cart2 = true, data = tfData,
+        trainer = { name = "SCOUT FIX", baseMoney = 30, items = {}, attributes = { 0, 0, 30, 0, 0, 0, 0, 0 } } })
+    end)
+    eq(trOpts and trOpts.sides.a[1].mons[1].weight, nil, "CL2 K21 (solo Gold trainer): no weight on our side")
+  end
+  package.loaded["src.link.Handshake"] = savedHandshake
+
+  local redWild = capture(Turn, function()
+    return fightOf("wild", { battleType = 4 })
+  end)
+  eq(redWild and redWild.battleType, nil, "K21: Red's ruleset carries no battle type")
+  eq(redWild and redWild.sides.b[1].mons[1].weight, nil, "K21: ...nor a weight")
+end)()
+
+-- ------------------------------------------------------------------
+-- who answers for the computer: the referee on Red and Gold, a registered
+-- brain's move on Red (the "Solo fights" bullet of contract K16,
+-- docs/plans/gen12-referee-remaining-gaps.md)
+-- ------------------------------------------------------------------
+--
+-- What is pinned is *who decided*, never which move: the referee's own pick
+-- is the cart's (TrainerAI / AIEnemyTrainerChooseMoves, AIChooseMove,
+-- AI_SwitchOrTryItem), and its draws are the referee suites' to test.  Every
+-- referee a fight below builds is watched from its first answer: the
+-- `autoPick` calls that filed for the computer's seat, split by whether the
+-- seat owed a send-out, and every choice `submitChoice` was handed for it --
+-- the only road a SoloBrain answer takes to the referee (M:_answerFoe).
+-- Every number is invented.
+
+;(function()
+  local function watched(T, fn)
+    local log = { turnPicks = 0, sendPicks = 0, filed = {} }
+    local real = T.create
+    T.create = function(opts)
+      local sim, why = real(opts)
+      log.opts = opts
+      if sim then
+        local pick, submit = sim.autoPick, sim.submitChoice
+        sim.autoPick = function(self, id, ...)
+          local seat = self.byId and self.byId[id]
+          local replacing = (seat and seat.mustReplace) and true or false
+          local got = pick(self, id, ...)
+          if got and id == FOE then
+            if replacing then log.sendPicks = log.sendPicks + 1
+            else log.turnPicks = log.turnPicks + 1 end
+          end
+          return got
+        end
+        sim.submitChoice = function(self, id, choice, ...)
+          local got = submit(self, id, choice, ...)
+          if id == FOE then log.filed[#log.filed + 1] = { choice = choice, got = got } end
+          return got
+        end
+      end
+      return sim, why
+    end
+    local okRun, f = pcall(fn)
+    T.create = real
+    if not okRun then error(f, 0) end
+    return log, f
+  end
+  local function threeFoes(moves)
+    local out = {}
+    for i, level in ipairs({ 11, 12, 13 }) do
+      out[i] = mon({ species = "BETA", level = level, maxHp = 20, spd = 5, atk = 5 })
+      if moves then out[i].moves = moves() end
+    end
+    return out
+  end
+
+  -- Red, a trainer with layers and no brain: autoPick, every turn and both
+  -- send-outs.
+  local red, f = watched(Turn, function()
+    return fightOf("trainer", {
+      party = { mon({ species = "ALPHA", spd = 90, atk = 120, maxHp = 200, level = 40 }) },
+      foes = threeFoes(),
+      trainer = { baseMoney = 20, classId = "OPP_ALPHA", name = "FIX RED", aiMods = { 1, 3 } },
+    })
+  end)
+  ok(f.started, "who answers (Red trainer): the fight is taken over")
+  eq(f.solo.brain, nil, "who answers (Red trainer): SoloBrain builds no brain")
+  local out = playOut(f)
+  eq(out and out.outcome, "win", "who answers (Red trainer): the fight is played to its verdict")
+  eq(#red.filed, 0, "who answers (Red trainer): nothing reached the computer's seat through submitChoice")
+  ok(red.turnPicks >= 3, "who answers (Red trainer): autoPick answered every turn it owed (" .. red.turnPicks .. ")")
+  eq(red.sendPicks, 2, "who answers (Red trainer): ...and both forced send-outs (EnemySendOut)")
+  eq(table.concat(red.opts.sides.b[1].aiMods or {}, ","), "1,3",
+     "who answers (Red trainer): the seat carries the layers the referee picks with")
+
+  -- Red wild: the same, with no trainer record at all.
+  local redWild, w = watched(Turn, function() return fightOf("wild", { pAtk = 120 }) end)
+  eq(w.solo.brain, nil, "who answers (Red wild): no brain")
+  local wout = playOut(w)
+  ok(wout ~= nil, "who answers (Red wild): the fight ends")
+  eq(#redWild.filed, 0, "who answers (Red wild): nothing filed through submitChoice")
+  ok(redWild.turnPicks >= 1, "who answers (Red wild): autoPick answered (" .. redWild.turnPicks .. ")")
+
+  -- Red, a mod's `brain` on the trainer record: its move is filed, every
+  -- turn; the send-outs are still the referee's, and the seat keeps the class
+  -- data the referee runs TrainerAI from in the computer's slot.
+  local mindData = setmetatable({
+    moves = {
+      THUMP = data.moves.THUMP,
+      SWIPE = { power = 40, accuracy = 100, type = "NORM", pp = 20 },
+    },
+    -- `chance = 0`: the class routine's `cp N percent` never passes, so the
+    -- slot's move is the brain's every turn (the referee draws the byte).
+    ai_classes = { FIX_MIND_CLASS = { uses = 1, chance = 0, item = "X_ATTACK" } },
+  }, { __index = data })
+  local asked, views = 0, {}
+  local mindTrainer = {
+    baseMoney = 20, classId = "OPP_ALPHA", name = "FIX MIND", aiMods = { 1 },
+    aiClass = "FIX_MIND_CLASS",
+    brain = function(battle)
+      asked = asked + 1
+      views[#views + 1] = battle
+      return battle.enemy.curMoves[2]
+    end,
+  }
+  local mind, m = watched(Turn, function()
+    return fightOf("trainer", {
+      data = mindData,
+      party = { mon({ species = "ALPHA", spd = 90, atk = 120, maxHp = 200, level = 40 }) },
+      foes = threeFoes(function() return { { id = "THUMP", pp = 20 }, { id = "SWIPE", pp = 20 } } end),
+      trainer = mindTrainer,
+    })
+  end)
+  ok(m.started, "who answers (Red brain): the fight is taken over")
+  ok(m.solo.brain ~= nil, "who answers (Red brain): a registered brain gets a SoloBrain")
+  local mout = playOut(m)
+  eq(mout and mout.outcome, "win", "who answers (Red brain): the fight is played to its verdict")
+  ok(asked >= 3, "who answers (Red brain): the brain was asked every turn (" .. asked .. ")")
+  eq(#mind.filed, asked, "who answers (Red brain): each answer was filed through submitChoice")
+  local allMoves = true
+  for _, entry in ipairs(mind.filed) do
+    local c = entry.choice
+    if not (entry.got and c.action == "fight" and c.move == 1) then allMoves = false end
+  end
+  ok(allMoves, "who answers (Red brain): ...each the brain's move (SWIPE, zero-based 1), and the referee took it")
+  eq(mind.turnPicks, 0, "who answers (Red brain): autoPick answered no turn")
+  eq(mind.sendPicks, 2, "who answers (Red brain): ...but both send-outs, which the brain never files")
+  eq(views[1] and views[1].trainer, mindTrainer, "who answers (Red brain): the brain sees its own trainer record")
+  eq(views[1] and views[1].enemy.curMoves[2].id, "SWIPE", "who answers (Red brain): ...and the monster's moves")
+  local mseat = mind.opts.sides.b[1]
+  eq(table.concat(mseat.aiMods or {}, ","), "1", "who answers (Red brain): the seat keeps its layers")
+  eq(mseat.aiClass and mseat.aiClass.uses, 1, "who answers (Red brain): ...and its class record (TrainerAI's slot)")
+
+  -- Gold: no brain for anyone, a `brain` on the record included -- AIChooseMove,
+  -- AI_SwitchOrTryItem and the replacement are the referee's.  A Gold game
+  -- reads as one through the stand-ins the Gold section above installs, put
+  -- back after.
+  local stubs = {
+    ["src.link.Handshake"] = {
+      generation = function(game) return tonumber(type(game) == "table" and game.generation) or 1 end,
+    },
+    ["src.core.gen2.ItemEffects"] = { heldItemFor = function() return nil end },
+    ["src.core.gen2.Mail"] = { isMail = function() return false end },
+  }
+  local saved = {}
+  for name, module in pairs(stubs) do
+    saved[name] = package.loaded[name]
+    package.loaded[name] = module
+  end
+  local goldData = setmetatable({ pokemon = {
+    ALPHA = data.pokemon.ALPHA,
+    BETA = data.pokemon.BETA,
+    -- K23: the species numbered the party's size (three), whose types the
+    -- seat states for pokegold's FindEnemyMonsThatResistPlayer.
+    GAMMA = { name = "GAMMA", index = 3, dex = 3, types = { "FIRE", "NORM" }, catchRate = 200 },
+  } }, { __index = data })
+  local function goldLead()
+    local lead = mon({ species = "ALPHA", spd = 90, atk = 120, maxHp = 200, level = 20 })
+    lead.otId = 4321
+    return lead
+  end
+  local Turn2 = need("BattleSim2/Turn")
+  local goldAsked = false
+  local gold, g = watched(Turn2, function()
+    return fightOf("trainer", { cart2 = true, data = goldData, seed = 7,
+      party = { goldLead() }, foes = threeFoes(),
+      trainer = { name = "FIX GOLD", baseMoney = 30, items = { "POTION" },
+                  attributes = { 1, 0, 30, 0x11, 0x02, 0x34, 0x01, 0 },
+                  brain = function() goldAsked = true end } })
+  end)
+  ok(g.started, "who answers (Gold trainer): the fight is taken over")
+  eq(g.solo.brain, nil, "who answers (Gold trainer): SoloBrain builds no brain, a `brain` on the record notwithstanding")
+  local gout = playOut(g)
+  eq(gout and gout.outcome, "win", "who answers (Gold trainer): the fight is played to its verdict")
+  eq(goldAsked, false, "who answers (Gold trainer): the record's `brain` is never called")
+  eq(#gold.filed, 0, "who answers (Gold trainer): nothing reached the computer's seat through submitChoice")
+  ok(gold.turnPicks >= 3, "who answers (Gold trainer): autoPick answered every turn it owed (" .. gold.turnPicks .. ")")
+  eq(gold.sendPicks, 2, "who answers (Gold trainer): ...and both forced send-outs")
+  local gseat = gold.opts.sides.b[1]
+  eq(table.concat({ table.concat(gseat.trainerItems or {}, ","), tostring(gseat.aiFlags),
+                    tostring(gseat.itemSwitch), tostring(gseat.baseReward) }, " "),
+     "POTION " .. 0x0211 .. " " .. 0x0134 .. " 30",
+     "who answers (Gold trainer): the seat carries the class data the referee's AI runs from (K16)")
+  eq(table.concat(gseat.countSpeciesTypes or {}, ","), "0,1",
+     "who answers (Gold trainer): ...and the count-as-species types (K23)")
+
+  local goldWild, gw = watched(Turn2, function()
+    return fightOf("wild", { cart2 = true, data = goldData, seed = 7, random = function() return 0 end,
+      party = { goldLead() } })
+  end)
+  eq(gw.solo.brain, nil, "who answers (Gold wild): no brain")
+  local gwout = playOut(gw)
+  ok(gwout ~= nil, "who answers (Gold wild): the fight ends")
+  eq(#goldWild.filed, 0, "who answers (Gold wild): nothing filed through submitChoice")
+  ok(goldWild.turnPicks >= 1, "who answers (Gold wild): autoPick answered (" .. goldWild.turnPicks .. ")")
+
+  for name in pairs(stubs) do package.loaded[name] = saved[name] end
 end)()
 
 -- ------------------------------------------------------------------

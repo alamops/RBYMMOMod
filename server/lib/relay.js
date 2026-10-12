@@ -13,10 +13,11 @@
  * this hub brokered is resolved here -- see the "mediated battles" section
  * below -- because a battle decided by one of the two players is a battle
  * decided by whichever of them modified their copy first. Every roll, the
- * turn order and the sole win/loss verdict live in lib/battle/Turn.js (Gen1)
- * or lib/battle2/Turn.js (Gen2), selected at construction from
- * `opts.generation`; this file owns the plumbing around it: who is in which
- * fight, whose party is still missing, and where the events go.
+ * turn order and the sole win/loss verdict live in lib/battle/Turn.js (Gen1),
+ * lib/battle2/Turn.js (Gen2) or lib/battle3/Turn.js (Gen 3: FireRed, LeafGreen,
+ * Emerald -- PROTOCOL 30), selected at construction from `opts.generation`;
+ * this file owns the plumbing around it: who is in which fight, whose party is
+ * still missing, and where the events go.
  *
  * **No sockets appear anywhere below.** Everything talks to *peer handles*
  * -- any object answering send(msg), close() and carrying a remoteAddress
@@ -44,6 +45,8 @@ const {
   cleanBattleRuleset, cleanBattleParty, cleanBattleChoice, cleanBattleReconnect,
   cleanBattleMoveset,
   BATTLE_MOVE_MAX,
+  cleanGeneration, cleanVersion, GENERATION_MAX,
+  effectsFor, cleanItemId3,
 } = require('./sanitize');
 const {
   Board, keyOf, RANK_START, RANK_TOP, RANK_REPORT_GRACE_MS,
@@ -54,9 +57,18 @@ const { createLog, safe } = require('./log');
 const DEFAULT_PLAYERS = 4;
 const DEFAULT_SPRITE = 'SPRITE_RED';
 const DEFAULT_SPRITE_GEN2 = 'SPRITE_CHRIS';
+// Not an engine name, on purpose -- the twin of Config.DEFAULT_SPRITE_GEN3,
+// where the reason is written out. One Gen 3 hub seats FireRed, LeafGreen and
+// Emerald, whose overworld graphics share no player name, so any real name
+// stamped into a sprite-less hello would be wrong for a third of the room.
+// Each viewer resolves this token on its own cart instead.
+const DEFAULT_SPRITE_GEN3 = 'GEN3_PLAYER';
 
 function defaultSpriteFor(generation) {
-  return Number(generation) === 2 ? DEFAULT_SPRITE_GEN2 : DEFAULT_SPRITE;
+  const g = Number(generation);
+  if (g === 2) return DEFAULT_SPRITE_GEN2;
+  if (g === 3) return DEFAULT_SPRITE_GEN3;
+  return DEFAULT_SPRITE;
 }
 // The wire dialect this hub speaks, and the one number both suites greet
 // with. 3 is where parties landed: nothing was removed, but an invite or a
@@ -183,7 +195,20 @@ function defaultSpriteFor(generation) {
 // follow (`COOP_SIDE` / `COOP_FIGHTERS` products). A protocol-26 hub still
 // treats parties as pairs and `FIELD_MAX` as 0‥3 -- third member / wider
 // open / slot 4‥5 drop or silence. Fuller note in src/Config.lua.
-const PROTOCOL = 29;
+// 30: Gen 3 -- FireRed, LeafGreen and Emerald on one hub. (a) `generation`
+// on mmo.hello reads 1, 2 or 3 and a hub locks to any of the three; a
+// protocol-29 hub clamps everything outside 1..2 to 1, so it *admits* a
+// FireRed client into a Red room rather than refusing it. A generation a hub
+// does not know is now refused, never clamped; a missing one is still 1 (the
+// compat reading 20 made). (b) An optional `version` on the hello -- the
+// cart, from the closed VERSIONS set in lib/sanitize.js -- kept only when it
+// belongs to the generation admitted and carried on every presence, because
+// a Gen 3 room's overworld graphics share no player name and a viewer maps a
+// partner's sprite through the cart it came from. (c) The Gen 3 battle sheet
+// dialect a Gen 3 hub referees, landing in the same release. Fuller note in
+// src/Config.lua.
+// 31: Gen 3 growth on battle_moveset; a protocol-30 referee drops it.
+const PROTOCOL = 31;
 // How long a four-way PARTY BATTLE ask waits for its three answers. Mirrors
 // Config.COOP_ASK_TIMEOUT: every one of the four is looking at a box right
 // now, and an ask that outlives the moment is one somebody answers yes to long
@@ -234,6 +259,79 @@ const BATTLE_SEED_MAX = 1073741824;
 // Milliseconds are what this hub's clock speaks and seconds are what the turn
 // machine does. One conversion, in one place.
 const battleSeconds = (ms) => Math.floor(ms / 1000);
+// The fights whose outcome may carry Pay Day coins: the sim's own EXP_MODES
+// (lib/battle3/Turn.js `_checkOver`; the Gen 1 / Gen 2 referees' K11 coins
+// follow the same rule), the three where side a is players and side b is the
+// hub's NPC seats. 1v1 / coop_pvp are link rules and pay none. Twin of Hub.lua
+// PAY_DAY_MODES.
+const PAY_DAY_MODES = new Set(['wild', 'coop_wild', 'coop_npc']);
+// The fights a mid-fight learn or level-up (`mmo.battle_moveset`) is heard in:
+// the fights against the computer, the referees' EXP_MODES again. No cart
+// gains experience in a link battle -- pokered GainExperience (engine/battle/
+// experience.asm) returns at once on LINK_STATE_BATTLING, pokecrystal /
+// pokegold GiveExperiencePoints (engine/battle/core.asm) on a non-zero
+// wLinkMode, pokeemerald / pokefirered Cmd_getexp (battle_script_commands.c)
+// skips to its last state under BATTLE_TYPE_LINK -- and a battle learns a move
+// only from a level-up's learnset or the evolution one brings, so in a 1v1 /
+// coop_pvp fight no monster's level, stats or moves ever change. An honest
+// client sends nothing there (the referees emit no `exp` in a link fight, and
+// the client's level-up path is the only sender); a message that arrives
+// anyway is a forgery -- 999 stats re-sent every turn, or a one-slot "learn"
+// of a move it never had -- against another player, and is dropped whole.
+// Twin of Hub.lua LEARN_MODES.
+const LEARN_MODES = new Set(['wild', 'coop_wild', 'coop_npc']);
+
+/*
+ * Whether a referee's verdict carries its Pay Day coins onto the broadcast
+ * (contract K11 of docs/plans/gen12-referee-gaps-fix.md). Every generation's
+ * outcome -- a knockout, a catch, a run, a forfeit -- reaches one copy, in
+ * Relay.settleMediated, so this is the whole rule:
+ *
+ *   - a positive count only: Lua reads a 0 as true where JS reads it as false,
+ *     so "no coins" is spelled as the field's absence on both twins (every
+ *     reader reads a 0 as absent anyway);
+ *   - a fight against the computer only (PAY_DAY_MODES): the mode test keeps
+ *     the field off a player-vs-player fight even if a sim ever set it;
+ *   - an escape (reason `run`) pays on Red alone. pokered's EndOfBattle adds
+ *     wTotalPayDayMoney whenever wBattleResult is still 0, and a Teleport /
+ *     Whirlwind / Roar (SwitchAndTeleportEffect) or POKE DOLL escape only sets
+ *     wEscapedFromBattle -- so the Gen 1 referee reports coins on those. Gold
+ *     calls every escape a DRAW (SetBattleDraw from Teleport and Whirlwind /
+ *     Roar, PokeDollEffect's own, the run command's in TryToRunAwayFromBattle,
+ *     WildFled_EnemyFled_LinkBattleCanceled), and ExitBattle skips CheckPayDay
+ *     unless wBattleResult is WIN; Gen 3 gives the money only from
+ *     HandleEndTurn_BattleWon. Their referees never report coins on a run, and
+ *     this keeps the field off one even if a sim ever set it.
+ *
+ * `generation` is the hub's own. Twin of paysDay in src/Hub.lua.
+ */
+function paysDay(generation, mode, outcome) {
+  if (!(Number(outcome.payDay) > 0 && PAY_DAY_MODES.has(mode))) return false;
+  if (outcome.reason === 'run') return generation === 1;
+  return true;
+}
+
+// The cart family a fighter entry's `family` names, keyed by the cart the
+// player's hello named (sanitize VERSIONS). Gen 3 (lib/battle3 Turn.FAMILIES,
+// docs/plans/gen3-battle-sheet.md §1.1): obedience reads it for one rule --
+// FireRed / LeafGreen exempt Focus Punch from the random-move branch, Emerald
+// does not -- so one Gen 3 hub seating both carts has to say whose mon is
+// whose, or every Emerald mon in a co-op fight plays FireRed's rule. Gen 2
+// (contract K6 of docs/plans/gen12-referee-fidelity.md, Gen.family's names):
+// lib/battle2 reads side a's first fighter for the rule Gold / Silver and
+// Crystal disagree on -- TruncateHL_BC loops on Crystal outside a link battle
+// and makes one pass on Gold / Silver (pokegold effect_commands.asm) -- so a
+// Gold hub seating a Crystal player has to say so. The hub's own word, from the
+// hello it admitted, never a field off the wire: a party carries no `family`
+// and none is read. A cart not listed (no version in the hello; every Gen 1
+// cart) leaves the field off, and the referee plays its default (frlg, gs). A
+// Map so a version can only ever hit these keys; the hello admitted only a cart
+// of this hub's generation (cleanVersion), so a key is always this hub's own.
+// Twin of Hub.lua CART_FAMILY.
+const CART_FAMILY = new Map([
+  ['gold', 'gs'], ['silver', 'gs'], ['crystal', 'crystal'],
+  ['firered', 'frlg'], ['leafgreen', 'frlg'], ['emerald', 'rse'],
+]);
 // Smallest gap between two character changes from one player. The chat
 // gate's window (500ms), for a sharper reason than scrollback: an avatar
 // bakes its sheet when it spawns, so every other client in the game despawns
@@ -375,6 +473,12 @@ function presenceOf(client, relay) {
     // sees the B button or the bike, so the client is the only authority on
     // it and this is the value it last reported.
     fast: Boolean(client.fast),
+    // The cart they said hello from (PROTOCOL 30), fixed for the session.
+    // With presence because it is how a viewer reads `sprite`: on a Gen 3 hub
+    // a FireRed and an Emerald player draw from two graphics tables that
+    // share no player name. Left off the object when the hello carried none,
+    // the way src/Hub.lua's nil never reaches the wire.
+    ...(client.version ? { version: client.version } : {}),
     // The trainer card the player shows others. Carried here because
     // src/Hub.lua does (Hub.lua:74): a player on a dedicated hub would
     // otherwise silently have no card, and the two hosting paths have to
@@ -410,8 +514,16 @@ handlers['mmo.hello'] = (relay, client, msg) => {
     return relay.refuse(client, `This game speaks protocol ${relay.protocol}; yours `
       + `speaks ${shortValue(msg.proto)}.`);
   }
-  // PROTOCOL 20: missing generation defaults to 1. Same sentence as Hub.lua.
-  const generation = cleanInt(msg.generation, 1, 2) ?? 1;
+  // PROTOCOL 20: missing generation defaults to 1 (cleanGeneration); 3 is a
+  // generation from PROTOCOL 30, so a FireRed or Emerald client is refused by
+  // a Gen 1 or Gen 2 hub here instead of being read as Gen 1. A generation
+  // this hub has never heard of is refused too, never guessed. Same sentences
+  // as src/Hub.lua so a client cannot tell which path refused it.
+  const generation = cleanGeneration(msg.generation);
+  if (generation === null) {
+    return relay.refuse(client, `This hub is for generation ${relay.generation}; yours `
+      + 'is not a generation it knows.');
+  }
   if (generation !== relay.generation) {
     return relay.refuse(client, `This hub is for generation ${relay.generation}; yours `
       + `is generation ${generation}.`);
@@ -445,6 +557,10 @@ handlers['mmo.hello'] = (relay, client, msg) => {
     name,
     playerId,
     generation,
+    // Only a cart of the generation just admitted (cleanVersion): a viewer
+    // maps this player's sprite through it, and a version that contradicts
+    // the room would map it for a cart nobody here is playing.
+    version: cleanVersion(msg.version, generation),
     sprite: cleanSpriteId(msg.sprite) || defaultSpriteFor(generation),
     profile: cleanProfile(msg.profile),
     map: cleanMapId(msg.map),
@@ -1306,7 +1422,7 @@ handlers['mmo.battle_ruleset'] = (relay, client, msg) => {
   if (!record || record.sim) return;
   if (client.id !== record.hostId) return;
 
-  const ruleset = cleanBattleRuleset(msg);
+  const ruleset = cleanBattleRuleset(msg, relay.generation);
   if (!ruleset) {
     return noteDrop(relay, client, 'the ruleset is not a shape we can fight under');
   }
@@ -1340,7 +1456,10 @@ handlers['mmo.battle_choice'] = (relay, client, msg) => {
   const record = mediatedOf(relay, client);
   if (!record || !record.sim) return;
 
-  const choice = cleanBattleChoice(msg);
+  // The hub's generation, so each field is read where its cart has it: Gen
+  // 3's `dexCaught` on a Gen 3 hub, BATON PASS's `pass` on a Gen 2 or Gen 3
+  // hub (wave 5: Gold's too), Red's MIMIC pick `mimic` on a Gen 1 hub.
+  const choice = cleanBattleChoice(msg, relay.generation);
   if (!choice || choice.battle !== record.id) return;
   // Item choices are proved against the bag uploaded with the party
   // (PROTOCOL 15). A missing stack costs the message and nothing else —
@@ -1373,7 +1492,7 @@ handlers['mmo.battle_choice'] = (relay, client, msg) => {
 handlers['mmo.battle_moveset'] = (relay, client, msg) => {
   const record = mediatedOf(relay, client);
   if (!record || !record.sim) return;
-  const payload = cleanBattleMoveset(msg);
+  const payload = cleanBattleMoveset(msg, relay.generation);
   if (!payload || payload.battle !== record.id) return;
   relay.applyBattleMoveset(record, client, payload);
 };
@@ -1508,6 +1627,201 @@ function movesetDeltaOk(old, incoming) {
   return false;
 }
 
+/*
+ * Gen 3's moveset apply. lib/battle3 keeps the battler apart from the party mon
+ * (`fighter.b`, whose `moves` is the mon's list until Transform / Mimic lays an
+ * overlay copy over it), and its rows carry num / target / priority / flags. So
+ * the party list is always rewritten, and the active battler takes the new list
+ * only when it is not wearing an overlay -- a Transform is left alone, as the
+ * older sims leave a transformed mon alone. Twin of Hub.lua's
+ * applyBattleMoveset3.
+ */
+function moveRow3(prev, nm) {
+  const pick = (a, b) => (a !== undefined && a !== null ? a : b);
+  if (prev && prev.id === nm.id) {
+    return {
+      id: prev.id,
+      name: pick(prev.name, nm.name),
+      num: pick(prev.num, nm.num),
+      pp: prev.pp,
+      maxPp: pick(prev.maxPp, nm.maxPp),
+      power: prev.power,
+      accuracy: prev.accuracy,
+      type: pick(prev.type, nm.type),
+      effect: prev.effect,
+      chance: prev.chance,
+      target: pick(prev.target, nm.target),
+      priority: pick(prev.priority, nm.priority),
+      flags: pick(prev.flags, nm.flags),
+    };
+  }
+  return {
+    id: nm.id,
+    name: nm.name,
+    num: nm.num,
+    pp: nm.pp,
+    maxPp: pick(nm.maxPp, nm.pp),
+    power: nm.power,
+    accuracy: nm.accuracy,
+    type: nm.type,
+    effect: nm.effect,
+    chance: nm.chance,
+    target: nm.target,
+    priority: nm.priority,
+    flags: nm.flags,
+  };
+}
+
+function applyBattleMoveset3(fighter, payload) {
+  const mon = fighter.mons[payload.mon];
+  if (!mon) return false;
+  const incoming = payload.moves;
+  if (!Array.isArray(incoming) || incoming.length === 0) return false;
+  const old = Array.isArray(mon.moves) ? mon.moves : [];
+  if (!movesetDeltaOk(old, incoming)) return false;
+  const next = incoming.map((nm, i) => moveRow3(old[i], nm));
+  const b = fighter.b;
+  const active = !!b && b.mon === mon;
+  mon.moves = next;
+  if (active && !b.overlay) b.moves = next;
+  return true;
+}
+
+/*
+ * The Gen 1 / Gen 2 move list a learn leaves on a live battler. Unchanged ids
+ * keep the hub's PP and combat fields -- highCrit among them -- with only what
+ * the hub's row never stated (a name, a max PP, a type, the K8 PP Ups and Gold
+ * priority) filled from the client's; a new id takes the client's row whole.
+ * highCrit is carried as the sims' copyMove spells it (a boolean): before
+ * contract K8 this rebuild named only the nine core fields, so a learn silently
+ * cost every move on the mon its high-crit flag. Twin of Hub.lua's nextMoves12.
+ */
+function nextMoves12(old, incoming) {
+  const next = [];
+  for (let i = 0; i < incoming.length; i += 1) {
+    const nm = incoming[i];
+    const prev = old[i];
+    if (prev && prev.id === nm.id) {
+      next.push({
+        id: prev.id,
+        name: prev.name != null ? prev.name : nm.name,
+        pp: prev.pp,
+        maxPp: prev.maxPp != null ? prev.maxPp : nm.maxPp,
+        power: prev.power,
+        accuracy: prev.accuracy,
+        type: prev.type != null ? prev.type : nm.type,
+        effect: prev.effect,
+        chance: prev.chance,
+        highCrit: prev.highCrit,
+        ppUps: prev.ppUps != null ? prev.ppUps : nm.ppUps,
+        priority: prev.priority != null ? prev.priority : nm.priority,
+        // The referee's own note, never the wire's: the base PP its maximum is
+        // a GetMaxPP over (Red's copyMove, lib/battle Effects.basePpOf), or the
+        // base a Gold MIMIC / TRANSFORM / SKETCH copy came from (lib/battle2
+        // Effects.basePp). Dropped, a level-up's re-send left a Red row whose
+        // next 63-PP wrap (stepPp's borrow) kept the old maximum instead of
+        // re-reading GetMaxPP over the moved PP Up bits.
+        basePp: prev.basePp,
+      });
+    } else {
+      next.push({
+        id: nm.id,
+        name: nm.name,
+        pp: nm.pp,
+        maxPp: nm.maxPp,
+        power: nm.power,
+        accuracy: nm.accuracy,
+        type: nm.type,
+        effect: nm.effect,
+        chance: nm.chance,
+        highCrit: nm.highCrit === true,
+        ppUps: nm.ppUps,
+        priority: nm.priority,
+      });
+    }
+  }
+  return next;
+}
+
+/*
+ * Every id the same, in the same slots: nothing for the carts' LearnMove to
+ * do. A level-up with no new move at that level still re-sends the list the
+ * client already had (K9), and LearnMove runs only for a new move (pokered
+ * LearnMoveFromLevelUp, pokecrystal LearnLevelMoves). Twin of Hub.lua's
+ * sameIds12.
+ */
+function sameIds12(old, incoming) {
+  if (old.length !== incoming.length) return false;
+  for (let i = 0; i < incoming.length; i += 1) {
+    const prev = old[i];
+    if (!prev || prev.id !== incoming[i].id) return false;
+  }
+  return true;
+}
+
+/*
+ * The party's own move list beneath a live battler's MIMIC: `base` (the battle
+ * list, or the one put aside at a Transform) with every slot a MIMIC wrote
+ * while the monster was itself given back the row it held (`mon.preMimic`,
+ * keyed by the 1-based slot -- lib/battle Effects' MIMIC_EFFECT keeps it and
+ * `restoreMoves` gives it back). The party's MIMIC PP is the cart's: on Red
+ * the slot's (DecrementPP writes both while not TRANSFORMed), on Gold the
+ * saved row's (CheckMimicUsed stops the party spend). No saved rows: `base`
+ * itself. Twin of Hub.lua's partyMoves12, which carries the carts' reasons.
+ */
+function partyMoves12(generation, base, mimic) {
+  if (!mimic || typeof mimic !== 'object') return base;
+  return base.map((row, i) => {
+    const own = mimic[i + 1];
+    if (!own || typeof own !== 'object') return row;
+    const back = { ...own };
+    if (generation === 1 && row.pp != null) back.pp = row.pp;
+    return back;
+  });
+}
+
+/*
+ * Where a Gen 1 / Gen 2 learn lands on a live battler, and whether it did.
+ * Twin of learnTo in src/Hub.lua, which carries the carts' reasons: the learn
+ * is judged against the PARTY list -- the one put aside at Transform
+ * (`mon.preTransform.moves`) when transformed, with a MIMIC's slots given back
+ * their own rows (partyMoves12) -- never the battle list laid over it, and is
+ * written there (a Mimic'd slot's saved row folded in). The battle struct is
+ * the cart's LearnMove, which runs only for a new move (sameIds12): Red copies
+ * the party list over it whatever the Transform (pokered LearnMove has no
+ * TRANSFORMED check), Gold only when not transformed (pokecrystal's does) -- a
+ * MIMIC's copy is gone either way. A transformed battler with no list put
+ * aside is left alone, as before.
+ */
+function learnTo(generation, mon, incoming) {
+  if (!Array.isArray(incoming) || incoming.length === 0) return false;
+  let saved = null;
+  if (mon.transformed) {
+    saved = mon.preTransform;
+    if (!saved || typeof saved !== 'object') return false;
+  }
+  const list = saved ? saved.moves : mon.moves;
+  const base = Array.isArray(list) ? list : [];
+  const mimic = mon.preMimic && typeof mon.preMimic === 'object' ? mon.preMimic : null;
+  const party = partyMoves12(generation, base, mimic);
+  if (!movesetDeltaOk(party, incoming)) return false;
+  const learnt = !sameIds12(party, incoming);
+  if (saved) {
+    saved.moves = nextMoves12(party, incoming);
+    if (mimic) mon.preMimic = null;
+    if (generation === 1 && learnt) mon.moves = nextMoves12(party, incoming);
+    return true;
+  }
+  // Itself, the battle list is the party list but for a MIMIC's slots: with
+  // none, the re-send rewrites it as it always did; with one, only a learn
+  // replaces it.
+  if (learnt || !mimic) {
+    mon.moves = nextMoves12(party, incoming);
+    if (mimic) mon.preMimic = null;
+  }
+  return true;
+}
+
 // --------------------------------------------------------------------- relay
 
 class Relay {
@@ -1522,21 +1836,30 @@ class Relay {
       ? Number(opts.chatIntervalMs) : 500;
     this.protocol = Number.isFinite(Number(opts.protocol))
       ? Number(opts.protocol) : PROTOCOL;
-    // PROTOCOL 20 generation lock. Default 1 when omitted so existing Gen1
-    // deploys keep working; Gen2 hubs MUST set generation:2 (CLI / config —
-    // twin of src/Hub.lua opts.generation).
+    // PROTOCOL 20 generation lock, 1, 2 or 3 (3 from PROTOCOL 30: FireRed,
+    // LeafGreen and Emerald share one Gen 3 hub). Default 1 when omitted so
+    // existing Gen 1 deploys keep working; Gen 2 and Gen 3 hubs MUST set it
+    // (CLI / config -- twin of src/Hub.lua opts.generation). cleanInt rather
+    // than cleanGeneration: this is the operator's number, already checked
+    // by lib/config.js, not a stranger's hello.
     {
-      const gen = cleanInt(opts.generation, 1, 2);
+      const gen = cleanInt(opts.generation, 1, GENERATION_MAX);
       this.generation = gen == null ? 1 : gen;
     }
     // Wave 2 T2d: mediated-battle twin at construction. Gen1 keeps lib/battle;
-    // Gen2 never instantiates Gen1 Turn for refereeing.
+    // Gen2 never instantiates Gen1 Turn for refereeing. Gen 3 referees on
+    // lib/battle3, whose bag catalog is Items.bagEffect keyed by numeric pret
+    // item id -- lib/sanitize's effectsFor(3) puts it behind the one
+    // `itemEffect` the bag paths below call, the same adapter an upload is
+    // proved against, so the proof and the spend read one table (twin of
+    // src/Hub.lua's battleSimFor).
     {
-      const battle = this.generation === 2
-        ? require('./battle2')
-        : require('./battle');
+      let battle;
+      if (this.generation === 3) battle = require('./battle3');
+      else if (this.generation === 2) battle = require('./battle2');
+      else battle = require('./battle');
       this.Turn = battle.Turn;
-      this.Effects = battle.Effects;
+      this.Effects = this.generation === 3 ? effectsFor(3) : battle.Effects;
     }
     this.auth = opts.auth || null;
     /*
@@ -2064,6 +2387,7 @@ class Relay {
 
     client.name = hello.name;
     client.sprite = hello.sprite || defaultSpriteFor(this.generation);
+    client.version = hello.version || null;
     client.profile = hello.profile || null;
     client.map = hello.map === undefined ? null : hello.map;
     client.x = hello.x === undefined ? null : hello.x;
@@ -2944,6 +3268,8 @@ class Relay {
       ruleset: null,
       parties: new Map(),
       bags: new Map(),
+      // Gen 3: seat -> { [itemId]: display name } (see noteBagNames).
+      bagNames: new Map(),
       bagHold: Object.create(null),
       sim: null,
       settled: false,
@@ -2997,60 +3323,74 @@ class Relay {
   }
 
   /*
-   * Mid-fight learn / replace (PROTOCOL 28). Twin of Hub:applyBattleMoveset.
+   * Mid-fight learn / replace (PROTOCOL 28) and level-up (contract K9 of
+   * docs/plans/gen12-referee-gaps-fix.md). Twin of Hub:applyBattleMoveset.
    *
    * The referee holds no learnset, so the client that owns the save copy is
    * the only party that can name the new sheet. Only an append of one slot
    * or a single-id replace is applied -- a full rewrite after seeing the
    * foe is not a learn. Unchanged ids keep the hub's PP *and* power /
-   * accuracy / effect, so this is not a free Ether or a live stat editor.
-   * A transformed battler is left alone: Transform wrote over `mon.moves`
-   * in place, and replacing that list would end the transform a turn early.
+   * accuracy / effect, so this is not a free Ether or a live stat editor
+   * (nextMoves12). A learn is judged against, and lands in, the party list --
+   * the one a Transform put aside (`preTransform.moves`), a MIMIC's slots
+   * given back (`preMimic`) -- and reaches the battle list only as the cart's
+   * LearnMove does: for a new move alone, on Red whatever the Transform, on
+   * Gold only untransformed. learnTo has the rule and the carts' reasons.
+   *
+   * Level-up: when the payload states a `level`, `stats` or `maxHp`, the hub forwards
+   * them to the referee's K9 API once the moves are settled:
+   *
+   *   record.sim.levelUp(playerId, monIndex, level, stats, maxHp)
+   *
+   *     playerId  the sender's seat (`client.id`, the sim's byId key)
+   *     monIndex  1-BASED party index -- the sim's own convention on both
+   *               twins (monAt(fighter, i) here, fighter.mons[i] in Lua) --
+   *               so the wire's 0-based `mon` plus one
+   *     level     1..LEVEL_MAX, or undefined when the payload stated none
+   *     stats     the dialect's `stats` block (cleanBattleMoveset), or undefined
+   *     maxHp     1..HP_MAX, or undefined
+   *
+   * always forwarded whatever became of the moves -- a transformed mon still
+   * grew, and a learn refused as a rewrite does not undo the level it came
+   * with. Guarded on the method existing: the Gen 1 / Gen 2 referees implement
+   * it, Gen 3 does from protocol 31, and a hub whose sim predates it simply applies
+   * the moves as before.
+   *
+   * Who judges what, layer by layer:
+   *
+   *   - cleanBattleMoveset (the sanitiser) checks shape and bounds alone: the
+   *     dialect's move rows, a level within 1..LEVEL_MAX, a `stats` block of
+   *     the dialect's keys within the sheet's stat bounds, a max HP within
+   *     1..HP_MAX. It judges no claim;
+   *   - this hub decides whether the message is heard at all -- only in the
+   *     fights against the computer (LEARN_MODES: no cart levels or learns in
+   *     a link battle, so in a 1v1 / coop_pvp fight it is dropped whole, on
+   *     every generation) and only for the sender's own seat -- and what a
+   *     move list may change (learnTo: one slot appended or replaced, every
+   *     unchanged row keeping the hub's PP and combat fields);
+   *   - the referee's levelUp decides what a level claim rebuilds (the cart's
+   *     in-battle CalcStats, the stages, badge boosts, the HP step) and which
+   *     claims it refuses -- lib/battle / lib/battle2 Turn `levelUp` say which.
+   *
+   * Returns whether anything reached the referee (a move list or a level-up).
    */
   applyBattleMoveset(record, client, payload) {
     if (!record || !record.sim || !payload) return false;
+    if (!LEARN_MODES.has(record.mode)) return false;
     const byId = record.sim.byId;
     const fighter = byId && (typeof byId.get === 'function'
       ? byId.get(client.id) : byId[client.id]);
     if (!fighter || !Array.isArray(fighter.mons)) return false;
     const mon = fighter.mons[payload.mon];
-    if (!mon || mon.transformed) return false;
-    const incoming = payload.moves;
-    if (!Array.isArray(incoming) || incoming.length === 0) return false;
-    const old = Array.isArray(mon.moves) ? mon.moves : [];
-    if (!movesetDeltaOk(old, incoming)) return false;
-    const next = [];
-    for (let i = 0; i < incoming.length; i += 1) {
-      const nm = incoming[i];
-      const prev = old[i];
-      if (prev && prev.id === nm.id) {
-        next.push({
-          id: prev.id,
-          name: prev.name != null ? prev.name : nm.name,
-          pp: prev.pp,
-          maxPp: prev.maxPp != null ? prev.maxPp : nm.maxPp,
-          power: prev.power,
-          accuracy: prev.accuracy,
-          type: prev.type != null ? prev.type : nm.type,
-          effect: prev.effect,
-          chance: prev.chance,
-        });
-      } else {
-        next.push({
-          id: nm.id,
-          name: nm.name,
-          pp: nm.pp,
-          maxPp: nm.maxPp,
-          power: nm.power,
-          accuracy: nm.accuracy,
-          type: nm.type,
-          effect: nm.effect,
-          chance: nm.chance,
-        });
-      }
+    if (!mon) return false;
+    let applied = this.generation === 3
+      ? applyBattleMoveset3(fighter, payload) : learnTo(this.generation, mon, payload.moves);
+    const grew = payload.level != null || payload.stats != null || payload.maxHp != null;
+    if (grew && typeof record.sim.levelUp === 'function') {
+      const taken = record.sim.levelUp(client.id, payload.mon + 1, payload.level, payload.stats, payload.maxHp);
+      applied = this.generation !== 3 || taken === true || applied;
     }
-    mon.moves = next;
-    return true;
+    return applied;
   }
 
   /*
@@ -3077,6 +3417,7 @@ class Relay {
       // never reaches this branch, so their own bag is not wiped by that upload.
       if (!record.bags) record.bags = new Map();
       record.bags.set(client.id, this.bagMap(party.bag));
+      this.noteBagNames(record, client.id, party.bag);
       return true;
     }
 
@@ -3085,17 +3426,42 @@ class Relay {
       dealt[index % record.npcIds.length].push(mon);
     });
 
+    // One trainer, so every seat it is dealt across is that trainer: each
+    // carries the party's display name and Red move-choice layers
+    // (cleanBattleParty reads `name` on Red / Gold and `aiMods` on Red, wave
+    // 6) -- tryStartSim names the seat and hands the layers on from here. K16
+    // rides the same way: Red's `aiClass` and Gold's `trainerItems`,
+    // `aiFlags`, `itemSwitch` and `baseReward`, the same objects on every seat
+    // as aiMods (one trainer, one record; what a 2v2 shares is the referee's to
+    // say). Left off when absent, as Hub.lua's nil is no key at all; a number
+    // by `!== undefined`, as Lua's 0 is true.
+    //
+    // Gold's `countSpeciesTypes` (K23) describes the party, not the trainer:
+    // the types of the species numbered the uploaded party's size, read as
+    // BaseData[wOTPartyCount] for the seat it sits on -- so only a seat dealt
+    // the whole party carries it (the count it was stated for). Twin of
+    // Hub.lua's `whole`.
     const kept = [];
     const dropped = new Set();
     record.npcIds.forEach((npcId, at) => {
       if (dealt[at].length) {
         kept.push(npcId);
-        record.parties.set(npcId, {
+        const whole = dealt[at].length === party.mons.length;
+        const seatParty = {
           battle: party.battle,
           side: party.side,
           badges: party.badges,
           mons: dealt[at],
-        });
+        };
+        if (party.name) seatParty.name = party.name;
+        if (party.aiMods) seatParty.aiMods = party.aiMods;
+        if (party.aiClass) seatParty.aiClass = party.aiClass;
+        if (party.trainerItems) seatParty.trainerItems = party.trainerItems;
+        if (party.aiFlags !== undefined) seatParty.aiFlags = party.aiFlags;
+        if (party.itemSwitch !== undefined) seatParty.itemSwitch = party.itemSwitch;
+        if (party.baseReward !== undefined) seatParty.baseReward = party.baseReward;
+        if (whole && party.countSpeciesTypes) seatParty.countSpeciesTypes = party.countSpeciesTypes;
+        record.parties.set(npcId, seatParty);
       } else {
         dropped.add(npcId);
         record.parties.delete(npcId);
@@ -3112,23 +3478,71 @@ class Relay {
     if (!record.bags) record.bags = new Map();
     if (kept[0] && !this.isWildSeat(record, kept[0])) {
       record.bags.set(kept[0], this.bagMap(party.bag));
+      this.noteBagNames(record, kept[0], party.bag);
     }
     return true;
   }
 
   // List of `{id, count}` → lookup map. Empty / null → empty map (no items).
+  // Keys are strings on every generation, because that is how a choice names
+  // an item; a Gen 3 bag's numeric pret id is keyed by its String() spelling,
+  // which is what its choice ("13") says. Twin of Hub:bagMap.
   bagMap(entries) {
     const map = Object.create(null);
     for (const entry of entries || []) {
-      if (entry && typeof entry.id === 'string'
-          && typeof entry.count === 'number' && entry.count > 0) {
-        map[entry.id] = entry.count;
+      if (entry && typeof entry.count === 'number' && entry.count > 0) {
+        if (typeof entry.id === 'string') map[entry.id] = entry.count;
+        else if (typeof entry.id === 'number') map[String(entry.id)] = entry.count;
       }
     }
     return map;
   }
 
-  // Shallow copy of an id→count bag map (null when empty / absent).
+  // Gen 3's display names for one seat's bag, keyed like bagMap, so the
+  // referee can say "Ann used POTION!" rather than "Ann used an item!"
+  // (lib/battle3 Turn's fallback): a Gen 3 bag id is a pret number, which
+  // names nothing. Nothing on the older generations: a Red / Gold bag id is
+  // the item's own name in the cart's words, and their referees spell the line
+  // from it themselves (lib/battle / lib/battle2 Turn `itemLabel` --
+  // underscores as spaces, POKé, GUARD SPEC.'s stop), "TWINS AMY & MAY used
+  // X ATTACK on FOE!" on Gold, so there is no name for a hub to keep.
+  // Twin of Hub:noteBagNames.
+  noteBagNames(record, seat, entries) {
+    if (this.generation !== 3) return;
+    const names = Object.create(null);
+    for (const entry of entries || []) {
+      if (entry && typeof entry.name === 'string'
+          && entry.id !== undefined && entry.id !== null) {
+        names[String(entry.id)] = entry.name;
+      }
+    }
+    if (!record.bagNames) record.bagNames = new Map();
+    record.bagNames.set(seat, names);
+  }
+
+  // The bag a Gen 3 fighter opens with: lib/battle3's list form, numeric ids
+  // in id order, each with its uploaded display name; null for none. Twin of
+  // Hub:simBag3.
+  simBag3(record, seat, bag) {
+    const names = (record.bagNames && record.bagNames.get(seat)) || Object.create(null);
+    const list = [];
+    for (const id of Object.keys(bag || {})) {
+      const n = cleanItemId3(id);
+      const count = bag[id];
+      if (n !== null && typeof count === 'number' && count > 0) {
+        const entry = { id: n, count };
+        if (typeof names[id] === 'string') entry.name = names[id];
+        list.push(entry);
+      }
+    }
+    if (!list.length) return null;
+    list.sort((a, b) => a.id - b.id);
+    return list;
+  }
+
+  // Shallow copy of an id→count bag map (null when empty / absent). A Gen 3
+  // fighter's bag is keyed by the numeric id inside lib/battle3; object keys
+  // are strings here already, which is the hub's spelling.
   cloneBagMap(src) {
     if (!src || typeof src !== 'object') return null;
     const out = Object.create(null);
@@ -3148,6 +3562,12 @@ class Relay {
    * a 2v2 would otherwise drink the kit twice. Alias the remaining seats onto
    * the first fighter's bag (and the hub sheet) so a potion spent on either
    * box is spent once. Wildlife is skipped: those seats carry no bag.
+   *
+   * The kit's names go with it (Gen 3): only the first seat was ever given the
+   * bag, so only its fighter holds the display names noteBagNames kept, and a
+   * second seat drinking the shared potion was narrated "TRAINER used an
+   * item!" beside the first seat's "TRAINER used POTION!". The older sims keep
+   * no names, and nothing is written for them. Twin of Hub:shareNpcBags.
    */
   shareNpcBags(record) {
     const seats = record && record.npcIds;
@@ -3160,7 +3580,10 @@ class Relay {
     if (!record.bags) record.bags = new Map();
     for (let i = 1; i < seats.length; i += 1) {
       const other = record.sim.byId.get(seats[i]);
-      if (other) other.bag = primary.bag;
+      if (other) {
+        other.bag = primary.bag;
+        if (primary.bagNames !== undefined) other.bagNames = primary.bagNames;
+      }
       record.bags.set(seats[i], record.bags.get(seats[0]));
     }
   }
@@ -3265,6 +3688,10 @@ class Relay {
       const ids = Object.keys(bag);
       for (let j = 0; j < ids.length; j += 1) {
         const id = ids[j];
+        // A Gen 3 bag is keyed by the numeric pret item id -- an enum value,
+        // not a name off the player's cart -- and its digits turn up in any
+        // count column, so the leak guard is for the older generations' names.
+        if (this.generation === 3 && /^\d+$/.test(id)) continue;
         if (typeof id === 'string' && id !== '' && body.indexOf(id) >= 0) {
           this.log.warn('npc bag dump refused: item ids must not leave the hub');
           return;
@@ -3348,15 +3775,46 @@ class Relay {
       // Youngster does not spam potions they never carried.
       if (!record.bags) record.bags = new Map();
       const bag = record.bags.get(seat);
-      const bagCopy = this.cloneBagMap(bag);
-      return {
+      const bagCopy = this.generation === 3
+        ? this.simBag3(record, seat, bag)
+        : this.cloneBagMap(bag);
+      // A human seat is named by its connection, an NPC seat by the trainer's
+      // display name its party brought (wave 6: cleanNpcName, Red / Gold), else
+      // 'TRAINER' as before. Its Red move-choice layers ride on the NPC seat
+      // alone (lib/battle Turn's copyAiMods reads a computer trainer seat's).
+      // Left off the object rather than set undefined, as Hub.lua's nil is no
+      // key at all.
+      const npc = this.isNpcSeat(record, seat);
+      const entry = {
         playerId: seat,
         name: (client && client.name)
-          || (this.isNpcSeat(record, seat) ? 'TRAINER' : seat),
+          || (npc ? (party.name || 'TRAINER') : seat),
         mons: party.mons,
         badges: party.badges,
         bag: bagCopy || undefined,
       };
+      if (npc && party.aiMods) entry.aiMods = party.aiMods;
+      // The computer's item / switch facts (K16): Red's TrainerAI record and
+      // Gold's TrainerClassAttributes bytes, on the NPC seat alone, as
+      // cleanBattleParty read them. A number by `!== undefined`, never by
+      // truthiness: an aiFlags or a baseReward of 0 is a value (Lua's 0 is true).
+      if (npc && party.aiClass) entry.aiClass = party.aiClass;
+      if (npc && party.trainerItems) entry.trainerItems = party.trainerItems;
+      if (npc && party.aiFlags !== undefined) entry.aiFlags = party.aiFlags;
+      if (npc && party.itemSwitch !== undefined) entry.itemSwitch = party.itemSwitch;
+      if (npc && party.baseReward !== undefined) entry.baseReward = party.baseReward;
+      // Gold's count-as-species types (K23), as fillBattleParty left them on
+      // this seat (a seat dealt the whole party alone).
+      if (npc && party.countSpeciesTypes) entry.countSpeciesTypes = party.countSpeciesTypes;
+      // Gen 2 and Gen 3 only, and only a human seat's: an NPC seat has no
+      // connection and so no cart, and the referees read side a's anyway.
+      // Every human is still connected here -- a seat that drops while the
+      // field is assembling calls the fight off (leaveBattle). Left off the
+      // object rather than set undefined, as Hub.lua's nil is no key at all.
+      const familyGen = this.generation === 2 || this.generation === 3;
+      const family = familyGen && client ? CART_FAMILY.get(client.version) : undefined;
+      if (family) entry.family = family;
+      return entry;
     };
 
     const sideRoster = (keys) => {
@@ -3385,13 +3843,19 @@ class Relay {
     const seed = typeof this.forceBattleSeed === 'number'
       ? this.forceBattleSeed
       : (1 + Math.floor(Math.random() * BATTLE_SEED_MAX));
-    const created = this.Turn.attempt({
+    const rules = record.ruleset;
+    const createOpts = {
       id: record.id,
       mode: record.mode,
       seed,
-      chart: record.ruleset.chart,
-      specialTypes: record.ruleset.specialTypes,
-      metronomePool: record.ruleset.metronomePool,
+      chart: rules.chart,
+      specialTypes: rules.specialTypes,
+      // Gen 1 / Gen 2: the chart's axis by name, which the referee names a
+      // move's type through -- Gold's badge type boost and side-effect type
+      // checks (lib/battle2 `_typeIdOf`), Red's POISON immunity and FIRE thaw
+      // (lib/battle `typeIndexOf`); never on Gen 3.
+      typeIds: rules.typeIds,
+      metronomePool: rules.metronomePool,
       choiceTimeout: BATTLE_CHOICE_TIMEOUT,
       reconnectGrace: BATTLE_RECONNECT_GRACE,
       resolveTimeout: BATTLE_RESOLVE_TIMEOUT,
@@ -3400,7 +3864,37 @@ class Relay {
         a: sideRoster(record.sides.a),
         b: sideRoster(record.sides.b),
       },
-    });
+    };
+    // Gen 3's ruleset is the ordered type table and the packed move pool, plus
+    // the field a wild fight opens on (docs/plans/gen3-battle-sheet.md §3).
+    if (this.generation === 3) {
+      createOpts.typeTable = rules.typeTable;
+      createOpts.movePool = rules.movePool;
+      createOpts.terrain = rules.terrain;
+      createOpts.weather = rules.weather;
+      createOpts.underwater = rules.underwater;
+    }
+    // Gold's wTimeOfDay, the host's cart clock (cleanBattleRuleset reads it on
+    // a Gen 2 hub alone), for MORNING SUN / SYNTHESIS / MOONLIGHT (lib/battle2
+    // Turn.create's `opts.timeOfDay`; absent is its link reading).
+    if (this.generation === 2) {
+      createOpts.timeOfDay = rules.timeOfDay;
+    }
+    // Gold's wBattleType (K21; cleanBattleRuleset reads it on a Gen 2 hub
+    // alone), for the LURE BALL's BATTLETYPE_FISH (lib/battle2 Turn.create's
+    // `opts.battleType`; absent reads as no fishing fight).
+    if (this.generation === 2) {
+      createOpts.battleType = rules.battleType;
+    }
+    // Red's TypeEffects order (cleanBattleRuleset reads `chartOrder` on a Gen 1
+    // hub alone, wave 5), which decides a dual type's effectiveness line and
+    // its "doesn't affect" / "missed" -- the last row AdjustDamageForMoveType
+    // applied (lib/battle Turn.create's `opts.chartOrder`; absent is its
+    // product reading).
+    if (this.generation === 1) {
+      createOpts.chartOrder = rules.chartOrder;
+    }
+    const created = this.Turn.attempt(createOpts);
     if (!created.battle) {
       this.log.warn(`mediated battle ${record.id} refused: ${safe(created.reason)}`);
       // Seats are filled and the turn machine still will not fight on this
@@ -3495,8 +3989,15 @@ class Relay {
     // Fighter bags are authoritative after resolve (Turn spends on item use,
     // including NPC auto-pick). Sync the hub sheet and drop holds so we never
     // double-spend with commitBagHolds.
-    if (record.sim.phase !== 'choice') {
+    //
+    // On Gen 3 the sheet also follows the sim after every turn that resolved:
+    // a turn that resolves and opens the next one inside the same call is back
+    // in choice by the time this runs. The older generations keep their
+    // behaviour byte for byte. Twin of Hub:flushBattle.
+    if (record.sim.phase !== 'choice'
+        || (this.generation === 3 && record.bagTurn !== record.sim.turn)) {
       this.syncBagsFromSim(record);
+      record.bagTurn = record.sim.turn;
     }
     const events = record.sim.drainEvents();
     for (const event of events) {
@@ -3667,6 +4168,17 @@ class Relay {
     if (outcome.reason) payload.reason = outcome.reason;
     if (outcome.caught) payload.caught = outcome.caught;
     if (outcome.catcher) payload.catcher = outcome.catcher;
+    /*
+     * Pay Day coins: side a's total on a knockout win (lib/battle3
+     * `_checkOver`; the Gen 1 / Gen 2 referees' `outcome().payDay` from
+     * contract K11 of docs/plans/gen12-referee-gaps-fix.md; none under link
+     * rules), and on Red on an escape too -- paysDay has the rule. A broadcast
+     * is already side a only here: in the three NPC modes every member is a
+     * human seated on side a (openMediatedBattle puts the npc seats alone on
+     * side b). On a run, side a may be the losers list (the referee calls the
+     * side that fled the loser) and is still the side the coins are for.
+     */
+    if (paysDay(this.generation, record.mode, outcome)) payload.payDay = outcome.payDay;
     this.broadcastBattle(record, 'mmo.battle_outcome', payload);
 
     // Rank from the intermediator alone -- no dual mmo.result vote.
@@ -3945,6 +4457,9 @@ class Relay {
 // in six places every time it moves.
 module.exports = {
   Relay, parseLine, presenceOf, PROTOCOL, SPRITE_GATE_MS, DEFAULT_SPRITE,
-  DEFAULT_SPRITE_GEN2, defaultSpriteFor,
+  DEFAULT_SPRITE_GEN2, DEFAULT_SPRITE_GEN3, defaultSpriteFor,
   FRIEND_HOLD_MS, FRIEND_HOLD_PER_NAME, FRIEND_HOLD_MAX,
+  // The learn rules, twin of Hub.lua's M.movesetDeltaOk / M.nextMoves12 /
+  // M.learnTo (exported there for the solo path's referee).
+  movesetDeltaOk, nextMoves12, learnTo,
 };

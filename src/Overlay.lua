@@ -26,6 +26,9 @@ local World = need("World")
 local Gen = need("Gen")
 local Chars = need("Chars")
 local Toast = need("Toast")
+local Gen3 = need("Gen3")
+local Places = need("Places")
+local RegionMap3 = need("RegionMap3")
 
 local M = {}
 M.__index = M
@@ -391,7 +394,7 @@ local function printLabel(font, text, x, y, color)
   love.graphics.print(text, x, y)
 end
 
-function M:drawRoster(font, here, scale, gameX, gameY, game)
+function M:drawRoster(font, here, scale, gameX, gameY, game, viewW)
   scale = tonumber(scale) or 1
   gameX, gameY = tonumber(gameX) or 0, tonumber(gameY) or 0
   local pad = Toast.PAD
@@ -399,7 +402,7 @@ function M:drawRoster(font, here, scale, gameX, gameY, game)
   local step = rowH + Toast.ROW_GAP
   local x = gameX + 3 * scale
   local y = gameY + 2 * scale
-  local maxWidth = VIEW_W * scale - 6 * scale
+  local maxWidth = (viewW or VIEW_W) * scale - 6 * scale
 
   local mine = self:selfName(game)
   if mine and mine ~= "" then
@@ -421,11 +424,14 @@ end
 
 -- A label is only drawn when it is fully on screen; a half-clipped name at
 -- the edge of the playfield reads as a rendering bug.
-local function onScreenWindow(x, y, width, height, gameX, gameY, scale)
+--
+-- `viewW` / `viewH` are the playfield in game pixels: the Game Boy's 160x144
+-- unless a caller says otherwise, which only the Gen 3 arm does (240x160).
+local function onScreenWindow(x, y, width, height, gameX, gameY, scale, viewW, viewH)
   local left = gameX
   local top = gameY
-  local right = gameX + VIEW_W * scale
-  local bottom = gameY + VIEW_H * scale
+  local right = gameX + (viewW or VIEW_W) * scale
+  local bottom = gameY + (viewH or VIEW_H) * scale
   return x >= left and y >= top and (x + width) <= right and (y + height) <= bottom
 end
 
@@ -449,7 +455,8 @@ function M:note(text)
   last.names[#last.names + 1] = text
 end
 
-function M:drawLabel(font, text, centreX, spriteTopY, scale, gameX, gameY, color)
+function M:drawLabel(font, text, centreX, spriteTopY, scale, gameX, gameY, color,
+                     viewW, viewH)
   scale = tonumber(scale) or 1
   gameX, gameY = tonumber(gameX) or 0, tonumber(gameY) or 0
 
@@ -463,7 +470,7 @@ function M:drawLabel(font, text, centreX, spriteTopY, scale, gameX, gameY, color
   -- Noted only when it is actually drawn.  A label clipped at the edge of
   -- the playfield is a label the player cannot read, and a state seam that
   -- reported it anyway would be worse than none.
-  if not onScreenWindow(x, y, width, height, gameX, gameY, scale) then return end
+  if not onScreenWindow(x, y, width, height, gameX, gameY, scale, viewW, viewH) then return end
 
   printLabel(font, text, x, y, color or LABEL_WHITE)
   self:note(text)
@@ -676,7 +683,8 @@ end
 -- Returns false when the mark would be clipped by the playfield edge, which is
 -- drawLabel's rule and for the same reason: half a bubble at the letterbox
 -- reads as a rendering fault, and a mark nobody can read is worse than none.
-function M:drawAlert(centreX, spriteTopY, lift, scale, gameX, gameY, clearance)
+function M:drawAlert(centreX, spriteTopY, lift, scale, gameX, gameY, clearance,
+                     viewW, viewH)
   scale = tonumber(scale) or 1
   gameX, gameY = tonumber(gameX) or 0, tonumber(gameY) or 0
   clearance = tonumber(clearance) or 0
@@ -688,7 +696,7 @@ function M:drawAlert(centreX, spriteTopY, lift, scale, gameX, gameY, clearance)
     - (tonumber(lift) or 0) * scale - clearance
   local x = math.floor(cx - w / 2)
   local y = math.floor(bottom - tail - h)
-  if not onScreenWindow(x, y, w, h + tail, gameX, gameY, scale) then
+  if not onScreenWindow(x, y, w, h + tail, gameX, gameY, scale, viewW, viewH) then
     return false
   end
   cx = x + w / 2
@@ -736,7 +744,11 @@ end
 -- letterbox (`off-screen`), another mod owns the projection (`not-flat`), and
 -- drawn (`waiter`) -- none of which a screenshot distinguishes from "the
 -- bubble is broken".
-function M:drawAlertLayer(font, mapId, playerPx, playerPy, scale, gameX, gameY)
+--
+-- `project` / `viewW` / `viewH` are the Gen 3 arm's: its own camera
+-- (screenOf3) and its 240x160 playfield.  Left out, the Game Boy's.
+function M:drawAlertLayer(font, mapId, playerPx, playerPy, scale, gameX, gameY,
+                          project, viewW, viewH)
   local alert = self.alert
   if not alert then return nil end
   -- The partner is not on this screen, so there is no head to mark.  Asked of
@@ -760,9 +772,14 @@ function M:drawAlertLayer(font, mapId, playerPx, playerPy, scale, gameX, gameY)
   -- They are wearing a nameplate, and the mark has to clear it.
   local clearance = font and (font:getHeight() + LABEL_GAP * scale) or 0
 
-  local centreX, spriteTop = M.screenOf(alert.wx, alert.wy, playerPx, playerPy)
+  local centreX, spriteTop
+  if project then
+    centreX, spriteTop = project(alert.wx, alert.wy)
+  else
+    centreX, spriteTop = M.screenOf(alert.wx, alert.wy, playerPx, playerPy)
+  end
   if not self:drawAlert(centreX, spriteTop, M.alertLift(alert.clock),
-                        scale, gameX, gameY, clearance) then
+                        scale, gameX, gameY, clearance, viewW, viewH) then
     return "off-screen"
   end
   return "waiter"
@@ -979,6 +996,10 @@ function M:draw(game, viewport)
   self.last = { reached = "entered" }
   local last = self.last
   if not (ctx.client and ctx.client:isConnected()) then last.reached = "not-connected" return end
+  -- FireRed / LeafGreen / Emerald: another camera, another screen size, no
+  -- game.stack and no mod.world overworld to read (see draw3).  Decided
+  -- before either is touched.
+  if Gen3.active() then return self:draw3(game, viewport) end
   -- Derive the letterbox when the viewport does not carry a usable one.
   --
   -- render.hud is documented as receiving gameX/gameY/scale, and under the
@@ -1141,6 +1162,381 @@ function M:draw(game, viewport)
   endHud(hudRestore)
 end
 
+-- ------- Gen 3 (FireRed / LeafGreen / Emerald)
+--
+-- The same plates, marks and party screen, on the GBA's camera.
+--
+-- src/core/game3/field_view.lua is the camera: it keeps the player's cell
+-- top-left at (112, 72) of the 240x160 frame (PLAYER_SCREEN_X / _Y, pret's
+-- event_object_movement.c:4992 and field_camera.c:527) -- that is,
+-- camX = floor(px + 8 - viewW / 2) plus the scripted pan -- and draws every
+-- overworld sprite bottom-anchored on its cell (ow_sprites.lua OwSprites.draw:
+-- sy = py - camY + 16 - h), so a 16x32 trainer's frame starts a whole cell
+-- above the tile it stands on.  The render.hud viewport on Gen 3 describes
+-- only the 240x160 UI rect (Display.fit; no dpiX / dpiY), and the world
+-- canvas is presented centred on the same point, at the survey zoom's scale
+-- (src/render/Zoom.lua) -- which is 1:1 with the UI until the player zooms.
+-- So a world pixel lands at
+--
+--   frame x = 120 + (wx - px - 8 - panX) * zoom
+--   frame y =  80 + (wy - py - 8 - panY) * zoom
+--
+-- in the UI rect's own pixels (the player's cell top-left comes out at
+-- (112, 72), as it must), and every label below is placed there and
+-- scaled out to the window the way the Gen 1 plates are.  Plates stay in the
+-- toast face (src/Toast.lua) like Gen 1's and Gen 2's, for the reason given
+-- at the top of this file.
+--
+-- The plate sits over the sprite's *head*, not over its frame: a GBA sheet
+-- has transparent rows above the hair, a different number per graphic, so
+-- the first opaque row of the standing frame is read once per graphic from
+-- the engine's own decoded sheet (headInset3) and the plate hangs above that.
+local GEN3_VIEW_W, GEN3_VIEW_H = Config.GEN3_SCREEN_W, Config.GEN3_SCREEN_H
+local GEN3_SPRITE_H = 32   -- a trainer's frame, when the sheet cannot be asked
+
+-- The engine's module, lazily and only on a Gen 3 boot (Gen3.engine).
+local function engine3(name)
+  return Gen3.engine(name)
+end
+
+-- The survey zoom as a ratio to the fit scale the UI is drawn at: 1 unless
+-- the player zoomed with the ZOOM hotkeys.  src.render.* is shared by every
+-- generation, so this is no cross-generation reach.
+local zoomModule, rendererModule, zoomTried
+-- A named function over the two modules rather than a closure per call: this
+-- is asked every frame the survey zoom is on.
+local function zoomRatio()
+  local S = rendererModule:fitScale()
+  return zoomModule.scale(S) / S
+end
+local function zoom3()
+  if not zoomTried then
+    zoomTried = true
+    local okZ, Zoom = pcall(require, "src.render.Zoom")
+    local okR, Renderer = pcall(require, "src.render.Renderer")
+    if okZ and type(Zoom) == "table" then zoomModule = Zoom end
+    if okR and type(Renderer) == "table" then rendererModule = Renderer end
+  end
+  local Zoom, Renderer = zoomModule, rendererModule
+  if not (Zoom and Renderer) or (tonumber(Zoom.offset) or 0) == 0 then return 1 end
+  local ok, ratio = pcall(zoomRatio)
+  if ok and type(ratio) == "number" and ratio > 0 then return ratio end
+  return 1
+end
+
+-- A perspective (TILT) world is not the flat camera above; the corner list
+-- stands in for the plates there, as it does for Gen 1's voxel pipelines.
+--
+-- Read through Gen3.engine, not package.loaded: the mod sandbox's `package`
+-- shim carries an empty `loaded`, so that read was nil on every live boot and
+-- the plates stayed on under TILT.
+local function tilted3()
+  local Tilt = engine3("src.render.Tilt")
+  if type(Tilt) ~= "table" or type(Tilt.active) ~= "function" then return false end
+  local ok, on = pcall(Tilt.active)
+  return ok and on == true
+end
+
+-- The scripted camera pan (field_camera.c's offset), 0 while walking.
+local function pan3()
+  local FieldView = engine3("src.core.game3.field_view")
+  if type(FieldView) ~= "table" then return 0, 0 end
+  return tonumber(FieldView.cameraPanX) or 0, tonumber(FieldView.cameraPanY) or 0
+end
+
+-- Frame-space centre-x and sprite-top-y for a sprite of height `h` whose
+-- cell top-left is world pixel (wx, wy), with the local player at world
+-- pixel (px, py).  Pure: the suite pins it against numbers worked out from
+-- field_view.lua by hand.
+function M.screenOf3(wx, wy, px, py, h, panX, panY, zoom)
+  h = tonumber(h) or GEN3_SPRITE_H
+  zoom = tonumber(zoom) or 1
+  panX, panY = tonumber(panX) or 0, tonumber(panY) or 0
+  local centreX = GEN3_VIEW_W / 2 + (wx - px - panX) * zoom
+  local top = GEN3_VIEW_H / 2 + (wy + CELL - h - py - CELL / 2 - panY) * zoom
+  return centreX, top
+end
+
+-- The rows of transparent headroom above a graphic's hair in its standing
+-- frame, and the frame's height: (inset, h).  Read off the engine's decoded
+-- sheet once per graphic; (0, 32) when there is no sheet to read (a
+-- headless load, a cache not built yet).
+local heads3 = {}
+local function headInset3(gfxId)
+  local id = tonumber(gfxId)
+  if not id then return 0, GEN3_SPRITE_H end
+  local hit = heads3[id]
+  if hit then return hit[1], hit[2] end
+  local OwSprites = engine3("src.core.game3.ow_sprites")
+  local spr
+  if OwSprites and type(OwSprites.getDraw) == "function" then
+    local ok, s = pcall(OwSprites.getDraw, id)
+    if ok and type(s) == "table" then spr = s end
+  end
+  if not spr then return 0, GEN3_SPRITE_H end
+  local h = tonumber(spr.height) or GEN3_SPRITE_H
+  local w = tonumber(spr.width) or 16
+  local inset = 0
+  local data = spr.imageData
+  if data and type(data.getPixel) == "function" then
+    local ok, found = pcall(function()
+      for y = 0, h - 1 do
+        for x = 0, w - 1 do
+          local _, _, _, a = data:getPixel(x, y)
+          if a and a > 0 then return y end
+        end
+      end
+      return 0
+    end)
+    if ok and type(found) == "number" then inset = found end
+  end
+  heads3[id] = { inset, h }
+  return inset, h
+end
+M.headInset3 = headInset3
+
+-- The local player: world pixel position and the graphic they are drawn
+-- with this frame (whatever look is worn -- src/Cast.lua's wrapper answers
+-- through the same function).
+local function player3(game, current)
+  local P = engine3("src.core.game3.player")
+  local px = P and tonumber(P.px) or (current.x * CELL)
+  local py = P and tonumber(P.py) or (current.y * CELL)
+  local gfx
+  local OwSprites = engine3("src.core.game3.ow_sprites")
+  if OwSprites and type(OwSprites.playerGraphicsId) == "function" then
+    local ok, id = pcall(OwSprites.playerGraphicsId, game, P)
+    if ok then gfx = tonumber(id) end
+  end
+  return px, py, gfx
+end
+
+-- ------- the Gen 3 party screen
+--
+-- Party figures on FireRed/LeafGreen's TOWN MAP and Emerald's wall map or
+-- PokéNav. Indoor maps use their named section; maps without a placeable
+-- section and partners in another region have no marker on this page.
+-- The projection follows the PokéNav's zoom and scroll.
+local REGION_MAP_LAYERS = { region_map = "frlg", rse_region_map = "rse", rse_pokenav = "pokenav" }
+
+-- True while the PokéNav's HOENN MAP is the screen it shows, faded all the
+-- way in.  Asked of the live shell (Pokenav.active): the screen it is on
+-- (menuId), that the map has been put up and not yet taken down (its own
+-- `visible`), and that no fade is running -- so the figures appear once the map
+-- is there to read and is gone before it fades out, never over the main
+-- menu, the condition graphs or MATCH CALL that share the layer.  Only asked
+-- when that layer is on top, which only an Emerald boot ever puts there.
+local function pokenavOnMap()
+  local Pokenav = engine3("src.ui.game3.rse.pokenav.init")
+  if not (Pokenav and type(Pokenav.active) == "function") then return false end
+  local ok, shell = pcall(Pokenav.active)
+  if not (ok and type(shell) == "table") then return false end
+  local onMap = type(Pokenav.MENU) == "table" and Pokenav.MENU.REGION_MAP or "region_map"
+  if shell.menuId ~= onMap or shell.phase ~= "menu" then return false end
+  local screen = shell.screen
+  if not (type(screen) == "table" and screen.visible == true) then return false end
+  if type(shell.fadeActive) == "function" then
+    local okF, fading = pcall(shell.fadeActive, shell)
+    if okF and fading then return false end
+  end
+  return true
+end
+
+-- "frlg" | "rse" | "pokenav" when a region map is the top layer, else nil.
+function M:regionMapState3()
+  local Stack = Gen3.stack()
+  if not (Stack and type(Stack.top) == "function") then return nil end
+  local ok, top = pcall(Stack.top)
+  if not (ok and type(top) == "table") then return nil end
+  local layout = REGION_MAP_LAYERS[top.id]
+  if layout == "pokenav" and not pokenavOnMap() then return nil end
+  return layout
+end
+
+-- Only partners whose map belongs to the displayed region/page are placed.
+function M:regionMapMarks3(game, layout)
+  local out = {}
+  local ctx = self.ctx
+  local party = ctx and ctx.party
+  if not (party and party:has()) then return out end
+  local view = RegionMap3.view(layout or self:regionMapState3())
+  if not view then return out end
+  for _, member in ipairs(party:list()) do
+    if not party:isSelf(member.id) then
+      local player = ctx.roster:get(member.id)
+      local pos = player and RegionMap3.position(game, player, view)
+      if pos then
+        local _, sprite = Chars.gfxForViewer(player.sprite, player.version, player.gender)
+        out[#out + 1] = {
+          id = member.id, name = member.name or player.name or "?",
+          mapId = player.map, place = Places.name(game, player.map) or player.map,
+          region = pos.region, x = pos.x, y = pos.y, sprite = sprite,
+        }
+      end
+    end
+  end
+  -- Two partners on one town remain two figures rather than covering each
+  -- other. Their shared anchor remains the town's cell.
+  if #out == 2 and out[1].x == out[2].x and out[1].y == out[2].y then
+    out[1].x, out[2].x = out[1].x - 5, out[2].x + 5
+  end
+  return out
+end
+
+function M:drawRegionMap3(font, game, layout, scale, gameX, gameY)
+  local last = self.last
+  local marks = self:regionMapMarks3(game, layout)
+  last.drawn = 0
+  last.reached = #marks == 0 and "regionmap-nobody" or "regionmap"
+  local hudRestore = beginHud()
+  love.graphics.setFont(font)
+  for _, mark in ipairs(marks) do
+    local art = mark.sprite and Chars.portrait(mark.sprite)
+    if art then
+      local w, h = art.w or 16, art.h or 32
+      local fit = 16 / math.max(w, h)
+      local top = mark.y - h * fit / 2
+      love.graphics.setColor(1, 1, 1, 1)
+      love.graphics.draw(art.image, art.quad,
+        gameX + (mark.x - w * fit / 2) * scale, gameY + top * scale,
+        0, fit * scale, fit * scale)
+      last.drawn = last.drawn + 1
+      local labelTop = top
+      local header = layout == "pokenav" and 32 or 0
+      if top - LABEL_GAP - font:getHeight() / scale < header then
+        labelTop = mark.y + h * fit / 2 + LABEL_GAP * 2 + font:getHeight() / scale
+      end
+      self:drawLabel(font, mark.name, mark.x, labelTop, scale, gameX, gameY,
+        PARTY_GREEN, GEN3_VIEW_W, GEN3_VIEW_H)
+    end
+  end
+  endHud(hudRestore)
+  return marks
+end
+
+-- ------- the Gen 3 draw
+
+-- The camera a Gen 3 plate is placed through this frame: set once at the top
+-- of each draw3 and read by the two functions below.  Module state rather
+-- than two closures over draw3's locals, because draw3 runs every frame and
+-- a closure is an allocation each time it is made.
+local cam3px, cam3py, cam3panX, cam3panY, cam3zoom = 0, 0, 0, 0, 1
+local cam3overlay, cam3avatars = nil, nil
+
+-- An avatar's plate, placed from its live cell (mid-step: its pixel
+-- position) and its own graphic's head.
+local function headOf3(gfx, wx, wy)
+  local inset, h = headInset3(gfx)
+  local centreX, top = M.screenOf3(wx, wy, cam3px, cam3py, h, cam3panX, cam3panY, cam3zoom)
+  return centreX, top + inset * cam3zoom
+end
+
+-- The partner's "!" rides the same head as their plate.
+local function project3(wx, wy)
+  local alert = cam3overlay and cam3overlay.alert
+  local spawned = cam3avatars and cam3avatars.spawned
+  local av = alert and spawned and spawned[alert.id]
+  return headOf3(av and av.gfx, wx, wy)
+end
+
+function M:draw3(game, viewport)
+  local ctx = self.ctx
+  local last = self.last
+  last.gen3 = true
+  local scale = viewport and tonumber(viewport.scale) or nil
+  local gameX = viewport and tonumber(viewport.gameX) or 0
+  local gameY = viewport and tonumber(viewport.gameY) or 0
+  if not scale or scale <= 0 then
+    local w, h = love.graphics.getDimensions()
+    scale = math.max(1, math.floor(math.min(w / GEN3_VIEW_W, h / GEN3_VIEW_H)))
+    gameX = math.floor((w - GEN3_VIEW_W * scale) / 2)
+    gameY = math.floor((h - GEN3_VIEW_H * scale) / 2)
+    last.derived = true
+  end
+  last.scale, last.gameX, last.gameY = scale, gameX, gameY
+
+  local labelFont = Toast.font(Toast.toastSize(scale))
+  if not labelFont then
+    last.reached = "no-font"
+    return
+  end
+
+  -- The region map is a fullscreen layer, so it is checked before the
+  -- free-roam gate that would otherwise send it home as "not-overworld".
+  local layout = self:regionMapState3()
+  if layout then
+    self:drawRegionMap3(labelFont, game, layout, scale, gameX, gameY)
+    return
+  end
+
+  -- The world, with nothing in front of it: the field phase, no stack layer,
+  -- no module menu, message, fade or battle (Gen.freeRoam's Gen 3 arm).
+  if not Gen.freeRoam(game) then
+    last.reached = "not-overworld"
+    return
+  end
+
+  local current = World.current()
+  if not (current and current.mapId and current.x and current.y) then
+    last.reached = "no-cell"
+    return
+  end
+
+  local here = ctx.avatars:visiblePlayers3(ctx.roster, current.mapId)
+  last.here = #here
+
+  local px, py, selfGfx = player3(game, current)
+  local panX, panY = pan3()
+  local zoom = zoom3()
+  last.zoom = zoom
+
+  local hudRestore = beginHud()
+  love.graphics.setFont(labelFont)
+
+  if tilted3() then
+    last.reached = "roster"
+    if self.alert then last.alert = "not-flat" end
+    self:drawRoster(labelFont, here, scale, gameX, gameY, game, GEN3_VIEW_W)
+    endHud(hudRestore)
+    return
+  end
+
+  local avatars = ctx.avatars
+  cam3px, cam3py, cam3panX, cam3panY, cam3zoom = px, py, panX, panY, zoom
+  cam3overlay, cam3avatars = self, avatars
+
+  if #here == 0 and not self:selfName(game) then
+    last.reached = "nobody-here"
+    last.alert = self:drawAlertLayer(labelFont, current.mapId, px, py, scale,
+                                     gameX, gameY, project3, GEN3_VIEW_W, GEN3_VIEW_H)
+    endHud(hudRestore)
+    return
+  end
+
+  last.reached = "labels"
+  for _, player in ipairs(here) do
+    local ax, ay = avatars:cellOf(player.id)
+    if ax and ay then
+      local av = avatars.spawned and avatars.spawned[player.id]
+      local centreX, top = headOf3(av and av.gfx, ax * CELL, ay * CELL)
+      self:drawLabel(labelFont, self:nameFor(player), centreX, top,
+                     scale, gameX, gameY, self:labelColor(player),
+                     GEN3_VIEW_W, GEN3_VIEW_H)
+    end
+  end
+
+  local mine = self:selfName(game)
+  if mine and mine ~= "" then
+    local centreX, top = headOf3(selfGfx, px, py)
+    self:drawLabel(labelFont, mine, centreX, top, scale, gameX, gameY,
+                   SELF_YELLOW, GEN3_VIEW_W, GEN3_VIEW_H)
+  end
+
+  last.alert = self:drawAlertLayer(labelFont, current.mapId, px, py, scale,
+                                   gameX, gameY, project3, GEN3_VIEW_W, GEN3_VIEW_H)
+  endHud(hudRestore)
+end
+
 -- The party marker: the game's own cursor glyph, 0xED, as its three UTF-8
 -- bytes.  Exported so the suite and the end-to-end driver build the expected
 -- nameplate from the same source the renderer uses rather than each spelling
@@ -1149,6 +1545,7 @@ end
 M.PARTY_MARK = "\226\150\182"   -- U+25B6 BLACK RIGHT-POINTING TRIANGLE
 
 M.VIEW_W, M.VIEW_H, M.CELL = VIEW_W, VIEW_H, CELL
+M.GEN3_VIEW_W, M.GEN3_VIEW_H, M.GEN3_SPRITE_H = GEN3_VIEW_W, GEN3_VIEW_H, GEN3_SPRITE_H
 M.ANCHOR_X, M.ANCHOR_Y = ANCHOR_X, ANCHOR_Y
 M.CAM_X, M.CAM_Y, M.SPRITE_LIFT = CAM_X, CAM_Y, SPRITE_LIFT
 M.PARTY_GREEN = PARTY_GREEN

@@ -15,7 +15,12 @@
  *
  * The modifiers are percents applied one at a time and truncated in between,
  * so an accuracy boost followed by an evasion boost is not commutative with
- * itself at every input. Order here is accuracy first, then evasion.
+ * itself at every input. Order here is accuracy first, then evasion. Each
+ * step is held at 1 the moment it comes out at 0 (CalcHitChance's `.loop`
+ * sets a 0 quotient back to 1 before its second multiply, pokered core.asm
+ * :5348-5414); only the end is held at 255. `evasionMod` is the ratio of the
+ * target's evasion stage reflected over neutral (`c = 14 - EVASIONMOD`) --
+ * the caller's job (Turn `_hitTest`).
  *
  * Edge inputs match Lua: missing accuracy defaults to 255, missing roll
  * defaults to 0 (so a missing roll hits whenever effective accuracy > 0).
@@ -39,8 +44,8 @@ function int(value, fallback) {
 // one multiply. Missing accuracy → MAX (255), matching Lua.
 function effective(accuracy, accuracyMod, evasionMod) {
   const acc = Math.max(0, int(accuracy, MAX));
-  const withAcc = idiv(acc * Math.max(0, int(accuracyMod, 100)), 100);
-  const withEva = idiv(withAcc * Math.max(0, int(evasionMod, 100)), 100);
+  const withAcc = Math.max(MIN, idiv(acc * Math.max(0, int(accuracyMod, 100)), 100));
+  const withEva = Math.max(MIN, idiv(withAcc * Math.max(0, int(evasionMod, 100)), 100));
   return clamp(withEva, MIN, MAX);
 }
 

@@ -7,7 +7,9 @@
  * BattleSim event streams stay in battle_turn.test.js. This file pins the
  * seats a client would notice if the two hosting paths drifted: admit under
  * playerId, duplicate-id refuse, protocol refuse wording, mediated KO /
- * disconnect-forfeit settlement keyed by playerId, and the mmo.relay hard cut.
+ * disconnect-forfeit settlement keyed by playerId, the mmo.relay hard cut,
+ * and the generation lock (PROTOCOL 30: one Gen 3 hub seats FireRed,
+ * LeafGreen and Emerald and refuses Gen 1 / Gen 2, and the other way round).
  *
  * Expected digests come from luajit running
  * tests/drivers/hub_protocol_parity.lua. When luajit is not on PATH the
@@ -25,7 +27,9 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
-const { Relay, PROTOCOL, DEFAULT_SPRITE } = require('./lib/relay.js');
+const {
+  Relay, PROTOCOL, DEFAULT_SPRITE, DEFAULT_SPRITE_GEN2,
+} = require('./lib/relay.js');
 const { createLog } = require('./lib/log.js');
 
 const ROOT = path.join(__dirname, '..');
@@ -218,6 +222,183 @@ function fightItOut(relay, a, b, battleId) {
     if (outcome) break;
   }
   return outcome;
+}
+
+// ------------------------------------------------------------------
+// generation lock (PROTOCOL 20, widened to 3 by PROTOCOL 30)
+// ------------------------------------------------------------------
+//
+// Twins of the Lua driver's generation helpers; the argument for each is
+// written there. Map ids and sprite names are synthetic engine-shaped
+// strings -- nothing here is read off a cart.
+
+const ID_E = 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';
+const ID_F = 'ffffffffffffffffffffffffffffffff';
+
+function makeGenRelay(clock, generation) {
+  const relay = new Relay({
+    maxPlayers: 8,
+    log: quiet,
+    now: clock.now,
+    generation,
+  });
+  relay.forceBattleSeed = 1;
+  return relay;
+}
+
+// `generation` and `version` pass through untouched -- undefined stays
+// absent, which is how the Lua side's nil reaches the hub.
+function dialAs(relay, name, playerId, o) {
+  const peer = { outbox: [], closed: false, remoteAddress: '127.0.0.1' };
+  peer.send = (msg) => peer.outbox.push(msg);
+  peer.close = () => { peer.closed = true; };
+  const ephemeral = relay.accept(peer);
+  relay.handle(ephemeral, {
+    type: 'mmo.hello',
+    proto: PROTOCOL,
+    name,
+    map: o.map || 'PALLET',
+    x: 5,
+    y: 5,
+    facing: 'down',
+    playerId,
+    sprite: o.sprite,
+    generation: o.generation,
+    version: o.version,
+  });
+  return { peer, id: playerId, name, ephemeral };
+}
+
+function slimPresence(p) {
+  if (!p) return { absent: true };
+  return {
+    id: p.id,
+    name: p.name,
+    sprite: p.sprite || '(none)',
+    version: p.version || '(none)',
+    map: p.map || '(none)',
+  };
+}
+
+function slimRoster(players) {
+  return (players || []).map(slimPresence)
+    .sort((x, y) => (x.id < y.id ? -1 : x.id > y.id ? 1 : 0));
+}
+
+function outcomeOf(side) {
+  const refuse = take(side, 'mmo.error');
+  const welcome = take(side, 'mmo.welcome');
+  return {
+    admitted: welcome !== null,
+    refuse: refuse ? refuse.message : '(none)',
+    closed: side.peer.closed === true,
+  };
+}
+
+function runGeneration() {
+  return [
+    {
+      name: 'generation_gen3_hub_seats_every_gen3_cart',
+      result: (() => {
+        const relay = makeGenRelay(makeClock(), 3);
+        const fr = dialAs(relay, 'LEAF', ID_A, {
+          generation: 3, version: 'firered',
+          sprite: 'OBJ_EVENT_GFX_GREEN_NORMAL', map: 'FR_PALLET_TOWN',
+        });
+        const frWelcome = take(fr, 'mmo.welcome');
+        const em = dialAs(relay, 'MAY', ID_B, {
+          generation: 3, version: 'emerald',
+          sprite: 'OBJ_EVENT_GFX_MAY_NORMAL', map: 'EM_LITTLEROOT_TOWN',
+        });
+        const emWelcome = take(em, 'mmo.welcome');
+        const joinAtFr = take(fr, 'mmo.join');
+        const lg = dialAs(relay, 'GREEN', ID_C, {
+          generation: 3, version: 'leafgreen', map: 'FR_VIRIDIAN_CITY',
+        });
+        const lgWelcome = take(lg, 'mmo.welcome');
+        const liar = dialAs(relay, 'LIAR', ID_D, {
+          generation: 3, version: 'red',
+          sprite: 'OBJ_EVENT_GFX_RED_NORMAL', map: 'FR_PALLET_TOWN',
+        });
+        const liarWelcome = take(liar, 'mmo.welcome');
+        const laterAtEm = takeAll(em, 'mmo.join').map((msg) => msg.player);
+        return {
+          generation: relay.generation,
+          frWelcomed: frWelcome !== null,
+          emWelcomed: emWelcome !== null,
+          lgWelcomed: lgWelcome !== null,
+          liarWelcomed: liarWelcome !== null,
+          emSees: slimRoster(emWelcome && emWelcome.players),
+          frSeesJoin: slimPresence(joinAtFr && joinAtFr.player),
+          emSeesLater: slimRoster(laterAtEm),
+          liarSees: slimRoster(liarWelcome && liarWelcome.players),
+          players: relay.playerCount,
+        };
+      })(),
+    },
+    {
+      name: 'generation_gen3_refused_by_gen1_and_gen2_hubs',
+      result: (() => {
+        const gen1 = makeGenRelay(makeClock(), 1);
+        const atGen1 = outcomeOf(dialAs(gen1, 'LEAF', ID_A, {
+          generation: 3, version: 'firered', sprite: 'OBJ_EVENT_GFX_GREEN_NORMAL',
+        }));
+        const gen2 = makeGenRelay(makeClock(), 2);
+        const atGen2 = outcomeOf(dialAs(gen2, 'MAY', ID_B, {
+          generation: 3, version: 'emerald', sprite: 'OBJ_EVENT_GFX_MAY_NORMAL',
+        }));
+        return {
+          atGen1, gen1Players: gen1.playerCount,
+          atGen2, gen2Players: gen2.playerCount,
+        };
+      })(),
+    },
+    {
+      name: 'generation_gen1_and_gen2_refused_by_gen3_hub',
+      result: (() => {
+        const relay = makeGenRelay(makeClock(), 3);
+        const red = outcomeOf(dialAs(relay, 'RED', ID_A, {
+          generation: 1, version: 'red', sprite: DEFAULT_SPRITE,
+        }));
+        const legacy = outcomeOf(dialAs(relay, 'OLD', ID_B, {
+          sprite: DEFAULT_SPRITE,
+        }));
+        const gold = outcomeOf(dialAs(relay, 'GOLD', ID_C, {
+          generation: 2, version: 'gold', sprite: DEFAULT_SPRITE_GEN2,
+        }));
+        return { red, legacy, gold, players: relay.playerCount };
+      })(),
+    },
+    {
+      name: 'generation_unknown_refused_missing_is_gen1',
+      result: (() => {
+        const relay = makeGenRelay(makeClock(), 1);
+        const four = outcomeOf(dialAs(relay, 'FOUR', ID_A, { generation: 4 }));
+        const zero = outcomeOf(dialAs(relay, 'ZERO', ID_B, { generation: 0 }));
+        const text = outcomeOf(dialAs(relay, 'TEXT', ID_C, { generation: '1' }));
+        const yes = outcomeOf(dialAs(relay, 'YES', ID_D, { generation: true }));
+        const legacy = dialAs(relay, 'OLD', ID_E, { sprite: DEFAULT_SPRITE });
+        const legacyOutcome = outcomeOf(legacy);
+        const yellow = dialAs(relay, 'YELLOW', ID_F, {
+          generation: 1, version: 'yellow', sprite: DEFAULT_SPRITE,
+        });
+        const yellowWelcome = take(yellow, 'mmo.welcome');
+        const mixed = dialAs(relay, 'MIXED', ID_A, {
+          generation: 1, version: 'emerald', sprite: DEFAULT_SPRITE,
+        });
+        const mixedWelcome = take(mixed, 'mmo.welcome');
+        const joinsAtLegacy = takeAll(legacy, 'mmo.join').map((msg) => msg.player);
+        return {
+          four, zero, text, yes,
+          legacy: legacyOutcome,
+          yellowWelcomed: yellowWelcome !== null,
+          mixedWelcomed: mixedWelcome !== null,
+          legacySees: slimRoster(joinsAtLegacy),
+          players: relay.playerCount,
+        };
+      })(),
+    },
+  ];
 }
 
 function runJs() {
@@ -734,11 +915,3114 @@ function runJs() {
         };
       })(),
     },
+    ...runGeneration(),
+    ...runGen3(),
+    ...runPayDay3(),
+    ...runFidelity(),
+    ...runFamily2(),
+    ...runGaps(),
+    ...runWave4(),
+    ...runWave5(),
+    ...runWave6(),
+    ...runReview(),
+    ...runRemaining(),
+  ];
+}
+
+// ------------------------------------------------------------------
+// Gen 3 (PROTOCOL 30): twins of the Lua driver's gen3_* scenarios -- a
+// mediated fight on lib/battle3, its opening event stream, and the Gen 3
+// dialect read by lib/sanitize. Absent values are the "(nil)" sentinel on both
+// sides, because a nil vanishes from a Lua table where JSON keeps a null.
+// ------------------------------------------------------------------
+
+const sanitize = require('./lib/sanitize.js');
+
+const CHART3 = [10, 12, 20, 11, 10, 20, 12, 11, 20, -1, -1, 0, 0, 7, 0];
+const POOL3 = ['33:0:40:0:100:35:0:0:0:51:POOL_TAP', '52:4:40:10:100:25:10:0:0:18:POOL_SPARK'];
+
+function move3(o) {
+  const p = o || {};
+  const row = {
+    id: p.id || 'TAP3',
+    num: p.num || 33,
+    pp: p.pp || 20,
+    maxPp: p.maxPp || 20,
+    power: p.power || 90,
+    type: p.type || 0,
+    accuracy: p.accuracy || 100,
+    effect: p.effect || 0,
+    chance: p.chance || 0,
+    target: p.target || 0,
+    priority: p.priority || 0,
+    flags: p.flags || 51,
+  };
+  // Lua's `o.x or default` keeps an explicit 0 only where 0 is not falsy in
+  // Lua -- which is everywhere; mirror that for the fields set to 0 below.
+  for (const key of ['power', 'accuracy', 'flags']) {
+    if (p[key] === 0) row[key] = 0;
+  }
+  if (p.name) row.name = p.name;
+  return row;
+}
+
+function mon3(o) {
+  const p = o || {};
+  const sheet = {
+    generation: 3,
+    species: p.species || 'GAMMA',
+    speciesNum: p.speciesNum || 1,
+    level: p.level || 50,
+    hp: p.hp || 150,
+    maxHp: p.maxHp || p.hp || 150,
+    stats: {
+      atk: p.atk || 120, def: p.def || 80, spe: p.spe || 90, spa: p.spa || 80, spd: p.spd || 80,
+    },
+    types: p.types || [0],
+    ability: p.ability || 0,
+    heldItem: p.heldItem || 0,
+    holdEffect: p.holdEffect || 0,
+    holdEffectParam: p.holdEffectParam || 0,
+    gender: p.gender || 'M',
+    friendship: 70,
+    weight: 300,
+    nature: 0,
+    hiddenPower: { type: 1, power: 50 },
+    beatUp: { atk: 60, def: 60 },
+    moves: p.moves || [move3()],
+  };
+  if (p.catchRate !== undefined) sheet.catchRate = p.catchRate;
+  return sheet;
+}
+
+const orNil = (v) => (v === undefined || v === null ? '(nil)' : v);
+
+const EVENT_KEYS = ['t', 'text', 'amount', 'hp', 'maxHp', 'slot', 'side', 'status',
+  'mon', 'target', 'spread', 'stat', 'stage', 'delta', 'holding', 'confused', 'team'];
+
+function slimEvent(e) {
+  const out = {};
+  for (const k of EVENT_KEYS) out[k] = orNil(e[k]);
+  out.moves = Array.isArray(e.moves) ? e.moves.length : 0;
+  return out;
+}
+
+function dialect3() {
+  const caught = mon3({ species: 'CAUGHT' });
+  delete caught.weight;
+  delete caught.hiddenPower;
+  delete caught.beatUp;
+  caught.ball = 4;
+  caught.personality = 305419896;
+  caught.otId = 4660;
+  caught.ivs = {
+    hp: 31, atk: 0, def: 1, spe: 2, spa: 3, spd: 4,
+  };
+  const noAbility = mon3();
+  delete noAbility.ability;
+  const badGender = mon3();
+  badGender.gender = 'X';
+  const named = mon3({
+    moves: [move3({ name: 'Tap Three' }), move3({
+      id: 'B', num: 182, power: 0, accuracy: 0, effect: 111, target: 16, priority: 3, flags: 0,
+    })],
+  });
+  named.abilityName = 'BLAZE';
+  named.itemName = 'ORAN';
+  named.sleepTurns = 3;
+  named.status = 'SLP';
+  return [
+    ['ruleset', {
+      generation: 3,
+      typeTable: CHART3,
+      movePool: POOL3,
+      terrain: 9,
+      weather: 'SAND',
+      underwater: false,
+      seed: 99,
+      specialTypes: [10, 11],
+    }],
+    ['ruleset', {
+      typeTable: CHART3,
+      movePool: ['7:0:40:0:100:10:0:0:-0:3:X', {
+        id: 'ROW',
+        num: 12,
+        pp: 5,
+        power: 0,
+        accuracy: 0,
+        type: 0,
+        effect: 38,
+        chance: 0,
+        target: 0,
+        priority: 0,
+        flags: 2,
+      }],
+    }],
+    ['ruleset', { typeTable: [0, -1, 10] }],
+    ['ruleset', { typeTable: CHART3, movePool: ['+7:0:40:0:100:10:0:0:0:3:X'] }],
+    ['ruleset', { typeTable: CHART3, weather: 'FOG' }],
+    ['ruleset', { typeTable: CHART3, underwater: 'yes' }],
+    ['ruleset', { movePool: ['999:0:40:0:100:10:0:0:0:3:X'] }],
+    ['mon', named],
+    ['mon', caught],
+    ['mon', noAbility],
+    ['mon', badGender],
+    ['party', { battle: 'b1', mons: [named] }],
+    ['party', { battle: 'b1', mons: [caught] }],
+    ['bag', [{ id: 13, count: 2, name: 'TONIC' }, { id: '1', count: 1 }, { id: 350, count: 1 }]],
+    ['bag', { 13: 2, 22: 1 }],
+    ['bag', [{ id: '0x0D', count: 1 }]],
+    ['bag', [{ id: 5, count: 1 }]],
+    ['bag', [{ id: 13, count: 1 }, { id: '13', count: 1 }]],
+    ['choice', {
+      battle: 'b1', action: 'fight', move: 1, target: 4, pass: 2,
+    }],
+    ['choice', {
+      battle: 'b1', action: 'item', item: '9', dexCaught: true, slot: 0,
+    }],
+    ['choice', {
+      battle: 'b1', action: 'item', item: '9', dexCaught: 1,
+    }],
+    ['event', {
+      battle: 'b1', seq: 3, t: 'stat', slot: 0, side: 'a', text: 'ATK fell', stat: 'atk', stage: -2, delta: -2, amount: 2,
+    }],
+    ['event', {
+      battle: 'b1', seq: 4, t: 'held', slot: 3, side: 'b', mon: 0, amount: 139, holding: 0, text: 'ORAN BERRY',
+    }],
+    ['event', {
+      battle: 'b1', seq: 5, t: 'ball', slot: 0, side: 'a', target: 3, amount: 4, text: '4',
+    }],
+    ['event', {
+      battle: 'b1',
+      seq: 6,
+      t: 'anim',
+      slot: 1,
+      side: 'a',
+      text: 'SWEEP',
+      target: 4,
+      spread: 1,
+      stat: 'hp',
+      stage: 9,
+      delta: -20,
+      holding: 999,
+    }],
+    ['event', {
+      battle: 'b1', seq: 7, t: 'weather', text: 'RAIN', amount: 1,
+    }],
+    ['event', {
+      battle: 'b1',
+      seq: 8,
+      t: 'moves',
+      slot: 0,
+      side: 'a',
+      moves: [move3(), {
+        id: 'OLD', pp: 1, power: 1, accuracy: 1, type: 0, effect: 0, chance: 0,
+      }],
+    }],
+    ['moveset', { battle: 'b1', mon: 0, moves: [move3(), move3({ id: 'NEW', num: 44 })] }],
+  ];
+}
+
+/*
+ * The Gen 3 dialect at the edges where the two twins used to read one message
+ * two ways: a list that is an object, a number LuaJIT's tonumber reads and JS's
+ * Number does not (or the reverse), a choice index that is `true`. The nulls
+ * here are real: the Lua driver spells each as NULL and closes it up the way
+ * src/link/Json.lua's decoder does, because that is all the Lua hub is ever
+ * handed of one. Twin of edges3 in tests/drivers/hub_protocol_parity.lua.
+ */
+function edges3() {
+  const chartHole = [10, 12, 20, null, 11, 10, 20, 12, 11, 20, -1, -1, 0, 0, 7, 0];
+  const chartGap = [10, 12, null, 11, 10, 20, 12, 11, 20, -1, -1, 0, 0, 7, 0];
+  return [
+    ['ruleset', { typeTable: chartHole }],
+    ['ruleset', { typeTable: chartGap }],
+    ['ruleset', { typeTable: CHART3, specialTypes: [10, null, 11] }],
+    ['ruleset', { typeTable: CHART3, movePool: [null, POOL3[0]] }],
+    ['ruleset', { typeTable: CHART3, specialTypes: { a: 1 } }],
+    ['ruleset', { typeTable: CHART3, movePool: { a: 'x' } }],
+    ['ruleset', { typeTable: CHART3, specialTypes: {} }],
+    ['ruleset', { typeTable: CHART3, movePool: { a: null } }],
+    ['ruleset', { typeTable: { a: 10 } }],
+    ['mon', mon3({ types: [null, 10] })],
+    ['mon', mon3({ moves: [move3(), null] })],
+    ['mon', mon3({ heldItem: '1e-9999999' })],
+    ['mon', mon3({ level: '\u00a050' })],
+    ['mon', mon3({ level: ' \t50\n' })],
+    ['mon', mon3({ moves: [move3({ priority: '-0x1' })] })],
+    ['mon', mon3({ ability: '0x1.8p1', holdEffect: '0b11' })],
+    ['party', { battle: 'b1', mons: [mon3(), null] }],
+    ['party', { battle: 'b1', generation: [3], mons: [mon3()] }],
+    ['bag', [{ id: 13, count: 2 }, null]],
+    ['bag', { 13: 2, 22: null }],
+    ['bag', { 13: null }],
+    ['choice', {
+      battle: 'b1', action: 'fight', move: 0, pass: true,
+    }],
+    ['choice', {
+      battle: 'b1', action: 'fight', move: 0, pass: '',
+    }],
+    ['choice', {
+      battle: 'b1', action: 'fight', move: 0, pass: [3],
+    }],
+    ['choice', { battle: 'b1', action: 'switch', slot: true }],
+    ['choice', {
+      battle: 'b1', action: 'fight', move: '0x0', pass: ' 2 ',
+    }],
+    ['moveset', { battle: 'b1', mon: 0, moves: [null, move3()] }],
+    ['moveset', { battle: 'b1', mon: true, moves: [move3()] }],
+    ['event', {
+      battle: 'b1',
+      seq: 9,
+      t: 'anim',
+      slot: 0,
+      side: 'a',
+      text: 'SWEEP',
+      target: true,
+      spread: '',
+      stage: [1],
+      holding: '0x10',
+    }],
+  ];
+}
+
+// Gen 1 / Gen 2 read paths, as they were before Gen 3 had a dialect: a stray
+// `num` on an older row, and Gen 3's choice fields on an older choice, are
+// ignored rather than read -- on both hosting paths. The `stat` case's signed
+// `stage` is the one Gen 3 field an older reader keeps (contract K10 of
+// docs/plans/gen12-referee-gaps-fix.md). Since that plan's wave 5 a Gen 2 hub
+// reads a Metronome pool row's `num` and a choice's `pass` as Gold's own (the
+// Gen 2 pool case keeps its 7, the Gen 2 choice's "far" refuses it). Twin of
+// gen12 in the Lua driver.
+function gen12() {
+  const stray = {
+    id: 'thump', pp: 20, power: 40, accuracy: 255, type: 0, effect: 0, chance: 0, num: 7,
+  };
+  const sheet = {
+    species: 'ALPHA',
+    level: 50,
+    hp: 100,
+    maxHp: 100,
+    stats: {
+      atk: 90, def: 90, spd: 90, spc: 90,
+    },
+    moves: [stray],
+  };
+  const asked = {
+    battle: 'b1', action: 'fight', move: 0, pass: 'far', dexCaught: 1,
+  };
+  return [
+    ['mon', sheet],
+    ['party', { battle: 'b1', mons: [sheet] }, 1],
+    ['ruleset', { chart: CHART, metronomePool: [stray] }, 1],
+    ['ruleset', { chart: CHART, metronomePool: [stray] }, 2],
+    ['ruleset', { chart: CHART, metronomePool: [stray] }],
+    ['choice', asked, 1],
+    ['choice', asked, 2],
+    ['choice', asked],
+    ['event', { battle: 'b1', seq: 1, t: 'ability' }, 1],
+    ['event', {
+      battle: 'b1', seq: 2, t: 'stat', slot: 0, side: 'a', target: 2, stage: 1, delta: 1, holding: 3,
+    }, 2],
+    ['event', {
+      battle: 'b1', seq: 3, t: 'moves', slot: 0, side: 'a', moves: [stray],
+    }, 1],
+    ['moveset', { battle: 'b1', mon: 0, moves: [stray] }, 1],
+  ];
+}
+
+/*
+ * The badge rules' wire (docs/plans/gen3-badge-rules.md K1-K3), each input read
+ * by lib/sanitize under the reader's generation (the third field): a Gen 3
+ * party's badge numbers, a Gen 3 sheet's traded / unfateful (and the retired
+ * fateful, neither copied nor read), the `obey` event and its eight tokens, a
+ * Gold party's badge names, and the Gen 1 / Gen 2 ruleset's typeIds -- an
+ * unreadable list dropped with the ruleset kept, a JSON null closed up first
+ * (the Lua driver spells it NULL). Twin of badgeRules in
+ * tests/drivers/hub_protocol_parity.lua.
+ */
+const OBEY_TOKENS = ['ignores_asleep', 'uses_random_move', 'falls_asleep', 'hits_itself',
+  'loafing', 'wont_obey', 'turned_away', 'pretend_not_notice'];
+
+function badgeRules() {
+  const flagged = (traded, unfateful) => {
+    const sheet = mon3({ species: 'MEW', speciesNum: 151 });
+    if (traded !== undefined) sheet.traded = traded;
+    if (unfateful !== undefined) sheet.unfateful = unfateful;
+    return sheet;
+  };
+  const retired = (fateful) => {
+    const sheet = mon3({ species: 'MEW', speciesNum: 151 });
+    sheet.fateful = fateful;
+    return sheet;
+  };
+  const gold = {
+    species: 'ALPHA',
+    level: 50,
+    hp: 100,
+    maxHp: 100,
+    stats: {
+      atk: 90, def: 90, spe: 90, spa: 90, spd: 90,
+    },
+    moves: [{
+      id: 'thump', pp: 20, power: 40, accuracy: 255, type: 0, effect: 0, chance: 0,
+    }],
+  };
+  const wide = [];
+  for (let i = 1; i <= sanitize.BATTLE_TYPE_MAX + 1; i += 1) wide.push(`T${i}`);
+  const full = wide.slice(0, sanitize.BATTLE_TYPE_MAX);
+  const cases = [
+    ['party', { battle: 'b1', mons: [mon3()], badges: ['1', '3', '8'] }, 3],
+    ['party', {
+      battle: 'b1', mons: [mon3()], badges: ['1', '3', '8', '3', '9', 'bad id!', 5, true, ''],
+    }, 3],
+    ['party', { battle: 'b1', mons: [mon3()], badges: ['bad id!', 7] }, 3],
+    ['party', { battle: 'b1', mons: [flagged(true, true)], badges: ['2'] }, 3],
+    ['mon', flagged(true, true)],
+    ['mon', flagged(false, false)],
+    ['mon', flagged(true, undefined)],
+    ['mon', flagged('yes', undefined)],
+    ['mon', flagged(undefined, 1)],
+    ['mon', flagged(undefined, true)],
+    ['mon', retired(true)],
+    ['mon', retired(1)],
+    ['party', {
+      battle: 'b1', mons: [gold], badges: ['ZEPHYR', 'MINERAL', 'RISING', 'BOULDER', 'EARTH'],
+    }, 2],
+    ['party', { battle: 'b1', mons: [gold], badges: ['ZEPHYR', 'ZEPHYR', 'bad id!'] }, 2],
+    ['ruleset', { chart: CHART, typeIds: ['NORMAL', 'FIRE'] }, 2],
+    ['ruleset', { chart: CHART, typeIds: ['NORMAL', 'PSYCHIC_TYPE'], specialTypes: [1] }, 1],
+    ['ruleset', { chart: CHART, typeIds: full }, 2],
+    ['ruleset', { chart: CHART, typeIds: wide }, 2],
+    ['ruleset', { chart: CHART, typeIds: ['NORMAL', 7] }, 2],
+    ['ruleset', { chart: CHART, typeIds: ['NORMAL', 'BAD TYPE'] }, 2],
+    ['ruleset', { chart: CHART, typeIds: ['NORMAL', 'X'.repeat(41)] }, 2],
+    ['ruleset', { chart: CHART, typeIds: [] }, 2],
+    ['ruleset', { chart: CHART, typeIds: 'NORMAL' }, 2],
+    ['ruleset', { chart: CHART, typeIds: ['NORMAL', 'mymod.FAIRY'], specialTypes: [1] }, 2],
+    ['ruleset', { chart: CHART, typeIds: ['NORMAL', null, 'FIRE'] }, 2],
+    ['ruleset', { chart: CHART, typeIds: [null, null] }, 2],
+    ['ruleset', { chart: CHART, typeIds: ['NORMAL', null, 'BAD TYPE'] }, 2],
+    ['ruleset', { chart: CHART, specialTypes: [1] }, 1],
+    ['ruleset', { chart: CHART }, 2],
+    ['ruleset', { typeTable: CHART3, typeIds: ['NORMAL'] }, 3],
+  ];
+  OBEY_TOKENS.forEach((token, i) => {
+    cases.push(['event', {
+      battle: 'b1', seq: 21 + i, t: 'obey', slot: 0, side: 'a', text: token,
+    }, 3]);
+  });
+  ['LOAFING', 'loafing around', '', 7].forEach((text, i) => {
+    cases.push(['event', {
+      battle: 'b1', seq: 41 + i, t: 'obey', slot: 1, side: 'a', text,
+    }, 3]);
+  });
+  cases.push(['event', {
+    battle: 'b1', seq: 50, t: 'obey', slot: 0, side: 'a',
+  }, 3]);
+  cases.push(['event', {
+    battle: 'b1', seq: 51, t: 'obey', slot: 0, side: 'a', text: 'loafing',
+  }, 2]);
+  return cases;
+}
+
+/*
+ * Gen 3 Pay Day coins and the holders-only exp fact, through the hub (sheet
+ * doc §1 outcome, §7.1 exp). Twins of gen3_coop_wild_payday and
+ * gen3_pvp_payday_absent in the Lua driver: a coop_wild field where ANN's
+ * PAYER scatters coins and BOB's BOOMER takes the wild mon down with it, so
+ * BOB's seat gets the holders-only fact and the outcome carries side a's coins;
+ * then the same Pay Day in a 1v1, which pays nobody.
+ */
+const IDLE3 = {
+  id: 'IDLE', num: 150, effect: 85, power: 0, target: 16, flags: 0,
+};
+
+function slimExp(e) {
+  if (!e) return '(nil)';
+  return {
+    slot: orNil(e.slot),
+    participants: orNil(e.participants),
+    mon: orNil(e.mon),
+    level: orNil(e.level),
+    species: orNil(e.species),
+  };
+}
+
+function slimPaid(msg) {
+  if (!msg) return '(nil)';
+  return {
+    outcome: msg.outcome,
+    reason: orNil(msg.reason),
+    winners: orNil(msg.winners),
+    losers: orNil(msg.losers),
+    payDay: orNil(msg.payDay),
+  };
+}
+
+const PAYDAY_EDGES = [200, 0, 1, 65535, 65536, -3, 1.5, '0x10', ' 7 ', '1e2', true, [3]];
+const PARTICIPANT_EDGES = [0, '0', -1, 1.9, 12, 13, ' 0 '];
+
+function runPayDay3() {
+  return [
+    {
+      name: 'gen3_coop_wild_payday',
+      result: (() => {
+        const relay = makeGenRelay(makeClock(), 3);
+        const a = dialAs(relay, 'ANN', ID_A, {
+          generation: 3, version: 'firered', sprite: 'OBJ_EVENT_GFX_RED_NORMAL', map: 'FR_PALLET_TOWN',
+        });
+        const b = dialAs(relay, 'BOB', ID_B, {
+          generation: 3, version: 'emerald', sprite: 'OBJ_EVENT_GFX_MAY_NORMAL', map: 'EM_LITTLEROOT_TOWN',
+        });
+        const id = 'c1';
+        const opened = relay.openCoopBattle(id, [a.id, b.id], {
+          mode: 'coop_wild', hostId: a.id,
+        }) != null;
+        relay.handle(a.id, { type: 'mmo.battle_ruleset', battle: id, typeTable: CHART3 });
+        relay.handle(a.id, {
+          type: 'mmo.battle_party',
+          battle: id,
+          side: 'a',
+          mons: [mon3({
+            species: 'PAYER',
+            level: 40,
+            spe: 300,
+            atk: 50,
+            moves: [move3({
+              id: 'COINS', num: 6, effect: 34, power: 20, chance: 100,
+            })],
+          })],
+        });
+        relay.handle(b.id, {
+          type: 'mmo.battle_party',
+          battle: id,
+          side: 'a',
+          mons: [
+            mon3({
+              species: 'BOOMER',
+              spe: 200,
+              atk: 999,
+              moves: [move3({
+                id: 'BLAST', num: 153, effect: 7, power: 250,
+              })],
+            }),
+            mon3({
+              species: 'SHARER', heldItem: 182, holdEffect: 25, moves: [move3(IDLE3)],
+            }),
+          ],
+        });
+        relay.handle(a.id, {
+          type: 'mmo.battle_party',
+          battle: id,
+          side: 'b',
+          mons: [mon3({
+            species: 'WILDLING', def: 5, spe: 1, catchRate: 45, moves: [move3(IDLE3)],
+          })],
+        });
+        const record = relay.battles.get(id);
+        const simOpen = !!(record && record.sim);
+        a.peer.outbox = [];
+        b.peer.outbox = [];
+        const exps = [];
+        let outcome = null;
+        for (let turn = 0; turn < 6; turn += 1) {
+          if (!relay.battles.has(id)) break;
+          relay.handle(a.id, {
+            type: 'mmo.battle_choice', battle: id, action: 'fight', move: 0,
+          });
+          relay.handle(b.id, {
+            type: 'mmo.battle_choice', battle: id, action: 'fight', move: 0,
+          });
+          for (const msg of takeAll(a, 'mmo.battle_event')) {
+            if (msg.t === 'exp') exps.push(msg);
+          }
+          outcome = take(a, 'mmo.battle_outcome');
+          if (outcome) break;
+        }
+        const atBob = take(b, 'mmo.battle_outcome');
+        const payEdges = PAYDAY_EDGES.map((v) => {
+          const got = sanitize.cleanBattleOutcome({ battle: 'b1', outcome: 'win', payDay: v }, 3);
+          return { kept: got !== null, payDay: orNil(got && got.payDay) };
+        });
+        const partEdges = PARTICIPANT_EDGES.map((v, i) => {
+          const e = {
+            battle: 'b1', seq: i + 1, t: 'exp', slot: 0, level: 5, participants: v,
+          };
+          return {
+            gen3: orNil((sanitize.cleanBattleEvent(e, 3) || {}).participants),
+            none: orNil((sanitize.cleanBattleEvent(e) || {}).participants),
+          };
+        });
+        return {
+          opened,
+          simOpen,
+          exp: exps.map(slimExp),
+          expRead3: exps.map((e) => slimExp(sanitize.cleanBattleEvent(e, 3))),
+          expRead2: exps.map((e) => slimExp(sanitize.cleanBattleEvent(e, 2))),
+          expRead1: exps.map((e) => slimExp(sanitize.cleanBattleEvent(e, 1))),
+          outcome: slimPaid(outcome),
+          outcomeAtBob: slimPaid(atBob),
+          read3: slimPaid(outcome && sanitize.cleanBattleOutcome(outcome, 3)),
+          readNone: slimPaid(outcome && sanitize.cleanBattleOutcome(outcome)),
+          read2: slimPaid(outcome && sanitize.cleanBattleOutcome(outcome, 2)),
+          read1: slimPaid(outcome && sanitize.cleanBattleOutcome(outcome, 1)),
+          payEdges,
+          partEdges,
+          battleGone: !relay.battles.has(id),
+        };
+      })(),
+    },
+    {
+      name: 'gen3_pvp_payday_absent',
+      result: (() => {
+        const relay = makeGenRelay(makeClock(), 3);
+        const a = dialAs(relay, 'ANN', ID_A, {
+          generation: 3, version: 'firered', sprite: 'OBJ_EVENT_GFX_RED_NORMAL', map: 'FR_PALLET_TOWN',
+        });
+        const b = dialAs(relay, 'BOB', ID_B, {
+          generation: 3, version: 'leafgreen', sprite: 'OBJ_EVENT_GFX_RED_NORMAL', map: 'FR_PALLET_TOWN',
+        });
+        const sess = openFight(relay, a, b);
+        relay.handle(a.id, { type: 'mmo.battle_ruleset', battle: sess.id, typeTable: CHART3 });
+        relay.handle(a.id, {
+          type: 'mmo.battle_party',
+          battle: sess.id,
+          mons: [mon3({
+            species: 'PAYER',
+            level: 40,
+            spe: 300,
+            atk: 400,
+            moves: [move3({
+              id: 'COINS', num: 6, effect: 34, power: 60, chance: 100,
+            })],
+          })],
+        });
+        relay.handle(b.id, {
+          type: 'mmo.battle_party',
+          battle: sess.id,
+          mons: [mon3({
+            species: 'DELTA', hp: 150, def: 5, spe: 1, moves: [move3(IDLE3)],
+          })],
+        });
+        const record = relay.battles.get(sess.id);
+        let outcome = null;
+        for (let turn = 0; turn < 6; turn += 1) {
+          if (!relay.battles.has(sess.id)) break;
+          relay.handle(a.id, {
+            type: 'mmo.battle_choice', battle: sess.id, action: 'fight', move: 0,
+          });
+          relay.handle(b.id, {
+            type: 'mmo.battle_choice', battle: sess.id, action: 'fight', move: 0,
+          });
+          outcome = take(a, 'mmo.battle_outcome') || take(b, 'mmo.battle_outcome');
+          if (outcome) break;
+        }
+        const tally = record && record.sim && record.sim.snapshot().payDay;
+        return {
+          counted: orNil(tally && tally.a),
+          outcome: slimPaid(outcome),
+          battleGone: !relay.battles.has(sess.id),
+        };
+      })(),
+    },
+  ];
+}
+
+function runGen3() {
+  return [
+    {
+      name: 'gen3_mediated_fight',
+      result: (() => {
+        const clock = makeClock();
+        const relay = makeGenRelay(clock, 3);
+        const a = dialAs(relay, 'ANN', ID_A, {
+          generation: 3, version: 'firered', sprite: 'OBJ_EVENT_GFX_RED_NORMAL', map: 'FR_PALLET_TOWN',
+        });
+        const b = dialAs(relay, 'BOB', ID_B, {
+          generation: 3, version: 'emerald', sprite: 'OBJ_EVENT_GFX_MAY_NORMAL', map: 'EM_LITTLEROOT_TOWN',
+        });
+        take(a, 'mmo.welcome');
+        take(b, 'mmo.welcome');
+        takeAll(a, 'mmo.join');
+        takeAll(b, 'mmo.join');
+        const sess = openFight(relay, a, b);
+        a.peer.outbox = [];
+        b.peer.outbox = [];
+        relay.handle(a.id, {
+          type: 'mmo.battle_ruleset',
+          battle: sess.id,
+          generation: 3,
+          typeTable: CHART3,
+          movePool: POOL3,
+          terrain: 3,
+        });
+        const hurt = mon3({
+          atk: 400, def: 400, spe: 300, hp: 100, maxHp: 150, moves: [move3({ power: 200 })],
+        });
+        relay.handle(a.id, {
+          type: 'mmo.battle_party',
+          battle: sess.id,
+          mons: [hurt],
+          bag: [{ id: 13, count: 2, name: 'TONIC' }, { id: '350', count: 1 }],
+        });
+        relay.handle(b.id, {
+          type: 'mmo.battle_party',
+          battle: sess.id,
+          mons: [mon3({
+            species: 'DELTA', hp: 1, def: 5, atk: 10, spe: 1, moves: [move3({ power: 10 })],
+          })],
+        });
+        const record = relay.battles.get(sess.id);
+        const opened = !!record.sim;
+        relay.handle(a.id, {
+          type: 'mmo.battle_choice', battle: sess.id, action: 'item', item: '13', slot: 0,
+        });
+        const held = record.bagHold[a.id];
+        relay.handle(b.id, {
+          type: 'mmo.battle_choice', battle: sess.id, action: 'fight', move: 0,
+        });
+        const bagAfter = {
+          potion: orNil(record.bags.get(a.id)['13']),
+          flute: orNil(record.bags.get(a.id)['350']),
+        };
+        const outcome = fightItOut(relay, a, b, sess.id);
+        return {
+          opened,
+          ruleset: {
+            triples: record.ruleset.typeTable.length / 3,
+            pool: record.ruleset.movePool,
+            terrain: record.ruleset.terrain,
+          },
+          held: orNil(held),
+          bagAfter,
+          outcome: slimOutcome(outcome),
+          battleGone: !relay.battles.has(sess.id),
+        };
+      })(),
+    },
+    {
+      name: 'gen3_event_stream',
+      result: (() => {
+        const clock = makeClock();
+        const relay = makeGenRelay(clock, 3);
+        const a = dialAs(relay, 'ANN', ID_A, {
+          generation: 3, version: 'leafgreen', sprite: 'OBJ_EVENT_GFX_RED_NORMAL', map: 'FR_PALLET_TOWN',
+        });
+        const b = dialAs(relay, 'BOB', ID_B, {
+          generation: 3, version: 'firered', sprite: 'OBJ_EVENT_GFX_RED_NORMAL', map: 'FR_PALLET_TOWN',
+        });
+        const sess = openFight(relay, a, b);
+        relay.handle(a.id, { type: 'mmo.battle_ruleset', battle: sess.id, typeTable: CHART3 });
+        relay.handle(a.id, {
+          type: 'mmo.battle_party',
+          battle: sess.id,
+          mons: [
+            mon3({
+              ability: 22, types: [10], moves: [move3({ type: 10, effect: 4, chance: 100 })],
+            }),
+            mon3({ species: 'ZETA', ability: 2, types: [11] }),
+          ],
+        });
+        relay.handle(b.id, {
+          type: 'mmo.battle_party',
+          battle: sess.id,
+          mons: [mon3({
+            species: 'ETA', ability: 45, types: [12], heldItem: 139, holdEffect: 1, holdEffectParam: 10,
+          })],
+        });
+        const events = [];
+        for (let i = 0; i < 3; i += 1) {
+          if (!relay.battles.has(sess.id)) break;
+          for (const msg of takeAll(a, 'mmo.battle_event')) events.push(slimEvent(msg));
+          relay.handle(a.id, {
+            type: 'mmo.battle_choice', battle: sess.id, action: 'fight', move: 0,
+          });
+          relay.handle(b.id, {
+            type: 'mmo.battle_choice', battle: sess.id, action: 'fight', move: 0,
+          });
+        }
+        for (const msg of takeAll(a, 'mmo.battle_event')) events.push(slimEvent(msg));
+        return { events, count: events.length };
+      })(),
+    },
+    {
+      name: 'gen3_dialect',
+      result: (() => {
+        const cases = dialect3().map(([kind, input]) => {
+          let got;
+          if (kind === 'ruleset') got = sanitize.cleanBattleRuleset(input, 3);
+          else if (kind === 'mon') got = sanitize.cleanBattleMon(input);
+          else if (kind === 'party') got = sanitize.cleanBattleParty(input, 3);
+          else if (kind === 'bag') got = sanitize.cleanBattleBag(input, 3);
+          else if (kind === 'choice') got = sanitize.cleanBattleChoice(input, 3);
+          else if (kind === 'event') got = sanitize.cleanBattleEvent(input);
+          else if (kind === 'moveset') got = sanitize.cleanBattleMoveset(input, 3);
+          return { kind, got: orNil(got) };
+        });
+        return { cases };
+      })(),
+    },
+    {
+      name: 'gen3_wire_edges',
+      result: (() => {
+        const cases = edges3().map(([kind, input]) => {
+          let got;
+          if (kind === 'ruleset') got = sanitize.cleanBattleRuleset(input, 3);
+          else if (kind === 'mon') got = sanitize.cleanBattleMon(input);
+          else if (kind === 'party') got = sanitize.cleanBattleParty(input, 3);
+          else if (kind === 'bag') got = sanitize.cleanBattleBag(input, 3);
+          else if (kind === 'choice') got = sanitize.cleanBattleChoice(input, 3);
+          else if (kind === 'event') got = sanitize.cleanBattleEvent(input);
+          else if (kind === 'moveset') got = sanitize.cleanBattleMoveset(input, 3);
+          return { kind, got: orNil(got) };
+        });
+        return { cases };
+      })(),
+    },
+    {
+      name: 'gen12_read_paths',
+      result: (() => {
+        const cases = gen12().map(([kind, input, gen]) => {
+          let got;
+          if (kind === 'ruleset') got = sanitize.cleanBattleRuleset(input, gen);
+          else if (kind === 'mon') got = sanitize.cleanBattleMon(input);
+          else if (kind === 'party') got = sanitize.cleanBattleParty(input, gen);
+          else if (kind === 'choice') got = sanitize.cleanBattleChoice(input, gen);
+          else if (kind === 'event') got = sanitize.cleanBattleEvent(input, gen);
+          else if (kind === 'moveset') got = sanitize.cleanBattleMoveset(input, gen);
+          return { kind, got: orNil(got) };
+        });
+        return { cases };
+      })(),
+    },
+    {
+      name: 'badge_rules_dialect',
+      result: (() => {
+        const cases = badgeRules().map(([kind, input, gen]) => {
+          let got;
+          if (kind === 'ruleset') got = sanitize.cleanBattleRuleset(input, gen);
+          else if (kind === 'mon') got = sanitize.cleanBattleMon(input);
+          else if (kind === 'party') got = sanitize.cleanBattleParty(input, gen);
+          else if (kind === 'event') got = sanitize.cleanBattleEvent(input, gen);
+          return { kind, got: orNil(got) };
+        });
+        return { cases };
+      })(),
+    },
+  ];
+}
+
+/*
+ * The referee-fidelity wire (docs/plans/gen12-referee-fidelity.md K1-K3), each
+ * input read by lib/sanitize under the reader's generation (the third field; a
+ * mon is read with none): K1 `traded` on Gen 1 and Gen 2 sheets (true kept,
+ * false and null absent, anything else refuses); K2 Gold's held-item data at
+ * and past each bound, ignored on a Gen 1 sheet and never reaching a Gen 3 one;
+ * K3 Gold's `held` event (id text, 0 / 1 amount, dropped fields keep the event),
+ * refused by a Gen 1 reader, with Gen 3's `held` unchanged. Twin of fidelity()
+ * in tests/drivers/hub_protocol_parity.lua -- same cases, same order.
+ */
+function sheet12(gen, extra) {
+  const sheet = {
+    species: 'ALPHA',
+    level: 50,
+    hp: 100,
+    maxHp: 100,
+    stats: gen === 2
+      ? {
+        atk: 90, def: 90, spe: 90, spa: 90, spd: 90,
+      }
+      : {
+        atk: 90, def: 90, spd: 90, spc: 90,
+      },
+    moves: [{
+      id: 'thump', pp: 20, power: 40, accuracy: 255, type: 0, effect: 0, chance: 0,
+    }],
+  };
+  return { ...sheet, ...(extra || {}) };
+}
+
+function fidelity() {
+  const held = {
+    heldItem: 'LEFTOVERS', holdEffect: 'HELD_LEFTOVERS', holdParam: 10, itemName: 'LEFTOVERS',
+  };
+  const gen3Held = {
+    battle: 'b1', seq: 80, t: 'held', slot: 3, side: 'b', mon: 0, amount: 139, holding: 0, text: 'ORAN BERRY',
+  };
+  const held2 = (extra) => ({
+    battle: 'b1', seq: 60, t: 'held', slot: 0, side: 'a', mon: 0, text: 'LEFTOVERS', amount: 1, ...(extra || {}),
+  });
+  const gen3Extra = { ...mon3({ heldItem: 139, holdEffect: 1, holdEffectParam: 10 }), holdParam: 5, mail: true };
+  return [
+    // K1
+    ['mon', sheet12(1, { traded: true })],
+    ['mon', sheet12(1, { traded: false })],
+    ['mon', sheet12(1, { traded: 'yes' })],
+    ['mon', sheet12(1, { traded: 1 })],
+    ['mon', sheet12(1, { traded: null })],
+    ['mon', sheet12(1, { traded: true, unfateful: true })],
+    ['mon', sheet12(1, { generation: 1, traded: true })],
+    ['mon', sheet12(2, { traded: true })],
+    ['mon', sheet12(2, { traded: false })],
+    ['mon', sheet12(2, { traded: 'true' })],
+    ['mon', sheet12(2, { traded: 0 })],
+    ['mon', sheet12(2, { generation: 2, traded: true, unfateful: true })],
+    ['party', { battle: 'b1', mons: [sheet12(1, { traded: true })] }, 1],
+    ['party', { battle: 'b1', mons: [sheet12(1, { traded: 'yes' })] }, 1],
+    ['party', { battle: 'b1', mons: [sheet12(2, { traded: true })] }, 2],
+    // K2 on a Gold sheet
+    ['mon', sheet12(2, held)],
+    ['mon', sheet12(2, { ...held, mail: true })],
+    ['mon', sheet12(2, { ...held, mail: false })],
+    ['mon', sheet12(2, { ...held, mail: 'yes' })],
+    ['mon', sheet12(2, { ...held, mail: 1 })],
+    ['mon', sheet12(2, { ...held, mail: null })],
+    ['mon', sheet12(2, { heldItem: 'POLKADOT_BOW', holdEffect: `HELD_${'X'.repeat(27)}` })],
+    ['mon', sheet12(2, { holdEffect: `HELD_${'X'.repeat(28)}` })],
+    ['mon', sheet12(2, { holdEffect: 'LEFTOVERS' })],
+    ['mon', sheet12(2, { holdEffect: 'HELD_leftovers' })],
+    ['mon', sheet12(2, { holdEffect: 'HELD_' })],
+    ['mon', sheet12(2, { holdEffect: 'HELD_LEFT OVERS' })],
+    ['mon', sheet12(2, { holdEffect: 7 })],
+    ['mon', sheet12(2, { holdParam: 0 })],
+    ['mon', sheet12(2, { holdParam: 255 })],
+    ['mon', sheet12(2, { holdParam: 256 })],
+    ['mon', sheet12(2, { holdParam: -1 })],
+    ['mon', sheet12(2, { holdParam: '12' })],
+    ['mon', sheet12(2, { holdParam: 3.7 })],
+    ['mon', sheet12(2, { holdParam: true })],
+    ['mon', sheet12(2, { holdParam: '' })],
+    ['mon', sheet12(2, { itemName: 'MYSTERYBERRY' })],
+    ['mon', sheet12(2, { itemName: 'KINGS ROCK OF OLD' })],
+    ['mon', sheet12(2, { itemName: 'Pink*Bow' })],
+    ['mon', sheet12(2, { itemName: '@@@' })],
+    ['mon', sheet12(2, { itemName: 5 })],
+    // K2 on a Gen 1 sheet: not its dialect, so ignored rather than refused
+    ['mon', sheet12(1, { ...held, mail: true })],
+    ['mon', sheet12(1, {
+      holdEffect: 7, holdParam: 999, itemName: 5, mail: 'yes',
+    })],
+    ['mon', sheet12(1, { generation: 1, holdEffect: 'HELD_LEFTOVERS', mail: true })],
+    // K2 never reaches a Gen 3 sheet
+    ['mon', gen3Extra],
+    ['mon', mon3({ holdEffect: 'HELD_LEFTOVERS' })],
+    // K1 + K2 through a party, stamped by the hub's generation
+    ['party', { battle: 'b1', mons: [sheet12(2, { ...held, traded: true, mail: true })] }, 2],
+    ['party', { battle: 'b1', mons: [sheet12(2, { holdEffect: 'LEFTOVERS' })] }, 2],
+    ['party', { battle: 'b1', mons: [sheet12(1, held)] }, 1],
+    // K3
+    ['event', held2(), 2],
+    ['event', held2({ seq: 61, text: 'BERRY', amount: 0 }), 2],
+    ['event', held2({ seq: 62, amount: 2 }), 2],
+    ['event', held2({ seq: 63, amount: -1 }), 2],
+    ['event', held2({ seq: 64, amount: '1' }), 2],
+    ['event', held2({ seq: 65, amount: true }), 2],
+    ['event', held2({ seq: 66, amount: 0.5 }), 2],
+    ['event', held2({ seq: 67, text: 'bad id!' }), 2],
+    ['event', held2({ seq: 68, text: 7 }), 2],
+    ['event', held2({ seq: 69, text: 'GOLD BERRY' }), 2],
+    ['event', held2({
+      seq: 70, holding: 3, target: 1, mon: 6,
+    }), 2],
+    ['event', held2({ seq: 71 }), 1],
+    ['event', gen3Held, 3],
+    ['event', gen3Held],
+    ['event', gen3Held, 2],
+    ['event', {
+      battle: 'b1', seq: 72, t: 'item', slot: 0, side: 'a', text: 'POTION', amount: 5,
+    }, 2],
+    ['event', {
+      battle: 'b1', seq: 73, t: 'ability', slot: 0, side: 'a',
+    }, 2],
+  ];
+}
+
+function runFidelity() {
+  return [
+    {
+      name: 'referee_fidelity_dialect',
+      result: (() => {
+        const cases = fidelity().map(([kind, input, gen]) => {
+          let got;
+          if (kind === 'mon') got = sanitize.cleanBattleMon(input);
+          else if (kind === 'party') got = sanitize.cleanBattleParty(input, gen);
+          else if (kind === 'event') got = sanitize.cleanBattleEvent(input, gen);
+          return { kind, got: orNil(got) };
+        });
+        return { cases };
+      })(),
+    },
+  ];
+}
+
+// Gold's cart lineage on a fighter entry (contract K6 of
+// docs/plans/gen12-referee-fidelity.md). Twin of the Lua driver's
+// gen2_cart_family_stamp; the argument is written there. The digest is the
+// entries the referee is handed -- Turn.attempt here, Turn.create there.
+function sheet2() {
+  return {
+    species: 'ALPHA',
+    level: 50,
+    hp: 300,
+    maxHp: 300,
+    stats: {
+      atk: 100, def: 100, spe: 50, spa: 50, spd: 100,
+    },
+    moves: [{
+      id: 'thump', pp: 20, power: 20, accuracy: 255, type: 0, effect: 0, chance: 0,
+    }],
+  };
+}
+
+function familyFight(generation, versions, mode) {
+  const relay = makeGenRelay(makeClock(), generation);
+  const seen = {};
+  const real = relay.Turn;
+  relay.Turn = Object.assign(Object.create(real), {
+    attempt: (opts) => {
+      seen.opts = opts;
+      return real.attempt(opts);
+    },
+  });
+  const ids = [ID_A, ID_B, ID_C, ID_D];
+  const sprite = generation === 2 ? DEFAULT_SPRITE_GEN2 : DEFAULT_SPRITE;
+  const players = versions.map((version, i) => dialAs(relay, `P${i + 1}`, ids[i], {
+    generation, version: version !== '(none)' ? version : undefined, sprite,
+  }));
+  const memberIds = players.map((p) => p.id);
+  const opts = { mode, hostId: memberIds[0] };
+  if (mode === 'coop_pvp') {
+    opts.sides = { a: [memberIds[0], memberIds[1]], b: [memberIds[2], memberIds[3]] };
+  }
+  relay.openCoopBattle('kf', memberIds, opts);
+  const record = relay.battles.get('kf');
+  const sheet = () => (generation === 2 ? sheet2() : mon());
+  relay.handle(players[0].id, { type: 'mmo.battle_ruleset', battle: 'kf', chart: CHART });
+  for (const p of players) {
+    const msg = { type: 'mmo.battle_party', battle: 'kf', mons: [sheet()] };
+    if (mode === 'coop_npc') msg.side = 'a';
+    relay.handle(p.id, msg);
+  }
+  if (mode === 'coop_npc') {
+    relay.handle(players[0].id, {
+      type: 'mmo.battle_party', battle: 'kf', side: 'b', mons: [sheet(), sheet()],
+    });
+  }
+  const npcIds = (record && record.npcIds) || [];
+  const entries = [];
+  for (const side of ['a', 'b']) {
+    for (const entry of (seen.opts && seen.opts.sides[side]) || []) {
+      entries.push({
+        side,
+        seat: npcIds.includes(entry.playerId) ? 'npc' : entry.playerId,
+        family: entry.family === undefined || entry.family === null ? '(nil)' : entry.family,
+      });
+    }
+  }
+  return { opened: !!(record && record.sim), entries };
+}
+
+function runFamily2() {
+  return [
+    {
+      name: 'gen2_cart_family_stamp',
+      result: {
+        gold: familyFight(2, ['crystal', 'silver'], 'coop_npc'),
+        bare: familyFight(2, ['gold', '(none)'], 'coop_npc'),
+        spar: familyFight(2, ['crystal', 'gold', 'silver', 'crystal'], 'coop_pvp'),
+        kanto: familyFight(1, ['red', 'yellow'], 'coop_npc'),
+      },
+    },
+  ];
+}
+
+/*
+ * The referee-gap wire (docs/plans/gen12-referee-gaps-fix.md K7-K11, K13),
+ * each input read by lib/sanitize under the reader's generation (the third
+ * field; a mon is read with none, as the hub reads a caught sheet): K7's
+ * base / dvs / statExp blocks, K8's ppUps and Gold priority, K9's moveset
+ * level / stats / maxHp, K10's signed stage for an older reader, K11's payDay
+ * per reader (payEdges12) and on a run outcome, K13's 40-character id refusal
+ * and its 64-character map-id twin, and K14's Gold happiness. Twin of gaps()
+ * in tests/drivers/hub_protocol_parity.lua -- same cases, same order; the
+ * argument for each is written there.
+ */
+function k7(gen) {
+  if (gen === 2) {
+    return {
+      base: {
+        hp: 41, atk: 52, def: 63, spe: 74, spa: 85, spd: 96,
+      },
+      dvs: {
+        atk: 12, def: 7, spe: 15, spc: 3,
+      },
+      statExp: {
+        hp: 1000, atk: 2000, def: 0, spe: 65535, spc: 7,
+      },
+    };
+  }
+  return {
+    base: {
+      hp: 41, atk: 52, def: 63, spd: 74, spc: 85,
+    },
+    dvs: {
+      atk: 12, def: 7, spd: 15, spc: 3,
+    },
+    statExp: {
+      hp: 1000, atk: 2000, def: 0, spd: 65535, spc: 7,
+    },
+  };
+}
+
+function row12(id, extra) {
+  return {
+    id, pp: 20, power: 40, accuracy: 255, type: 0, effect: 0, chance: 0, ...(extra || {}),
+  };
+}
+
+const GROWN1 = {
+  atk: 91, def: 92, spd: 93, spc: 94,
+};
+const GROWN2 = {
+  atk: 91, def: 92, spe: 93, spa: 94, spd: 95,
+};
+
+function statEvent(seq, stage) {
+  return {
+    battle: 'b1', seq, t: 'stat', slot: 0, side: 'a', amount: 2, text: 'ATK fell', stage,
+  };
+}
+
+function gaps() {
+  const B1 = {
+    hp: 41, atk: 52, def: 63, spd: 74, spc: 85,
+  };
+  const thump = row12('thump');
+  return [
+    // K7
+    ['mon', sheet12(1, k7(1))],
+    ['mon', sheet12(2, k7(2))],
+    ['mon', sheet12(2, { ...k7(2), generation: 2 })],
+    ['mon', sheet12(1, {
+      base: {
+        hp: 0, atk: 255, def: 1, spd: 2, spc: 3,
+      },
+    })],
+    ['mon', sheet12(1, { base: { ...B1, atk: 256 } })],
+    ['mon', sheet12(1, { base: { ...B1, hp: -1 } })],
+    ['mon', sheet12(1, {
+      base: {
+        atk: 52, def: 63, spd: 74, spc: 85,
+      },
+    })],
+    ['mon', sheet12(2, { base: B1 })],
+    ['mon', sheet12(1, { base: [41, 52, 63, 74, 85] })],
+    ['mon', sheet12(1, { base: '41' })],
+    ['mon', sheet12(1, { base: null, dvs: null, statExp: null })],
+    ['mon', sheet12(1, {
+      dvs: {
+        atk: 15, def: 0, spd: '7', spc: 3.9,
+      },
+    })],
+    ['mon', sheet12(1, {
+      dvs: {
+        atk: 16, def: 0, spd: 7, spc: 3,
+      },
+    })],
+    ['mon', sheet12(1, {
+      dvs: {
+        atk: true, def: 0, spd: 7, spc: 3,
+      },
+    })],
+    ['mon', sheet12(1, {
+      dvs: {
+        atk: '0x10', def: 0, spd: 7, spc: 3,
+      },
+    })],
+    ['mon', sheet12(1, {
+      dvs: {
+        atk: ' 9 ', def: 0, spd: 7, spc: 3,
+      },
+    })],
+    ['mon', sheet12(2, {
+      dvs: {
+        atk: 1, def: 2, spd: 3, spc: 4,
+      },
+    })],
+    ['mon', sheet12(2, {
+      dvs: {
+        atk: 1, def: 2, spe: 3, spc: 4, spa: 9, hp: 5,
+      },
+    })],
+    ['mon', sheet12(2, {
+      statExp: {
+        hp: 1, atk: 2, def: 3, spe: 4, spa: 5, spd: 6,
+      },
+    })],
+    ['mon', sheet12(1, {
+      statExp: {
+        hp: 65535, atk: 0, def: 1, spd: 2, spc: 3,
+      },
+    })],
+    ['mon', sheet12(1, {
+      statExp: {
+        hp: 65536, atk: 0, def: 1, spd: 2, spc: 3,
+      },
+    })],
+    ['mon', sheet12(1, {
+      statExp: {
+        atk: 0, def: 1, spd: 2, spc: 3,
+      },
+    })],
+    ['mon', { ...sheet12(1, k7(2)), generation: 1 }],
+    ['mon', { ...mon3(), ...k7(2) }],
+    ['mon', {
+      ...mon3(), base: 'x', dvs: 99, statExp: true,
+    }],
+    ['party', { battle: 'b1', mons: [sheet12(2, k7(2))] }, 2],
+    ['party', { battle: 'b1', mons: [sheet12(1, k7(2))] }, 1],
+    ['outcome', {
+      battle: 'b1', outcome: 'win', reason: 'catch', caught: sheet12(1, k7(1)),
+    }, 1],
+    ['outcome', {
+      battle: 'b1', outcome: 'win', reason: 'catch', caught: sheet12(1, { dvs: { atk: 99 } }),
+    }, 1],
+    // K8
+    ['move', row12('m', { ppUps: 0 }), 1],
+    ['move', row12('m', { ppUps: 3 }), 2],
+    ['move', row12('m', { ppUps: 4 }), 1],
+    ['move', row12('m', { ppUps: -1 }), 2],
+    ['move', row12('m', { ppUps: '2' }), 1],
+    ['move', row12('m', { ppUps: 1.5 }), 1],
+    ['move', row12('m', { ppUps: true }), 1],
+    ['move', row12('m', { ppUps: null }), 1],
+    ['move', row12('m', { priority: 0 }), 2],
+    ['move', row12('m', { priority: 255 }), 2],
+    ['move', row12('m', { priority: 256 }), 2],
+    ['move', row12('m', { priority: -1 }), 2],
+    ['move', row12('m', { priority: 'fast' }), 2],
+    ['move', row12('m', { priority: '3' }), 2],
+    ['move', row12('m', { priority: 3 }), 1],
+    ['move', row12('m', { priority: 'fast' }), 1],
+    ['move', row12('m', { priority: 3, ppUps: 2 })],
+    ['move', { ...move3(), ppUps: 3, priority: 2 }, 3],
+    ['ruleset', { chart: CHART, metronomePool: [row12('m', { priority: 2, ppUps: 0 })] }, 2],
+    ['ruleset', { chart: CHART, metronomePool: [row12('m', { priority: 2, ppUps: 0 })] }, 1],
+    ['ruleset', { chart: CHART, metronomePool: [row12('m', { ppUps: 9 })] }, 2],
+    ['event', {
+      battle: 'b1', seq: 4, t: 'moves', slot: 0, side: 'a', moves: [row12('m', { priority: 3, ppUps: 1 })],
+    }, 2],
+    ['event', {
+      battle: 'b1', seq: 5, t: 'moves', slot: 0, side: 'a', moves: [row12('m', { priority: 3, ppUps: 1 })],
+    }, 1],
+    ['mon', sheet12(2, { moves: [row12('m', { priority: 3, ppUps: 3 })] })],
+    ['mon', sheet12(2, { moves: [row12('m', { priority: 300 })] })],
+    ['mon', sheet12(1, { moves: [row12('m', { priority: 300 })] })],
+    // K9
+    ['moveset', {
+      battle: 'b1', mon: 0, moves: [thump], level: 51, stats: GROWN1, maxHp: 140,
+    }, 1],
+    ['moveset', {
+      battle: 'b1', mon: 1, moves: [thump], level: 51, stats: GROWN2, maxHp: 140,
+    }, 2],
+    ['moveset', {
+      battle: 'b1', mon: 0, moves: [thump], stats: GROWN1,
+    }, 2],
+    ['moveset', {
+      battle: 'b1', mon: 0, moves: [thump], level: 0,
+    }, 1],
+    ['moveset', {
+      battle: 'b1', mon: 0, moves: [thump], level: 101,
+    }, 1],
+    ['moveset', {
+      battle: 'b1', mon: 0, moves: [thump], level: '50',
+    }, 1],
+    ['moveset', {
+      battle: 'b1', mon: 0, moves: [thump], level: true,
+    }, 2],
+    ['moveset', {
+      battle: 'b1', mon: 0, moves: [thump], maxHp: 0,
+    }, 1],
+    ['moveset', {
+      battle: 'b1', mon: 0, moves: [thump], maxHp: 1000,
+    }, 2],
+    ['moveset', {
+      battle: 'b1', mon: 0, moves: [thump], stats: { atk: 91, def: 92, spd: 93 },
+    }, 1],
+    ['moveset', {
+      battle: 'b1', mon: 0, moves: [thump], stats: { ...GROWN1, atk: 0 },
+    }, 1],
+    ['moveset', {
+      battle: 'b1', mon: 0, moves: [thump], level: 51, stats: null, maxHp: null,
+    }, 1],
+    ['moveset', {
+      battle: 'b1', mon: 0, moves: [move3()], level: 51, stats: GROWN2, maxHp: 140,
+    }, 3],
+    ['moveset', {
+      battle: 'b1', mon: 0, moves: [thump], level: 51, stats: GROWN1, maxHp: 140,
+    }],
+    // K10
+    ['event', statEvent(10, -6), 1],
+    ['event', statEvent(11, 6), 1],
+    ['event', statEvent(12, -7), 1],
+    ['event', statEvent(13, 7), 2],
+    ['event', statEvent(14, '-2'), 2],
+    ['event', statEvent(15, true), 1],
+    ['event', statEvent(16, 2.5), 1],
+    ['event', statEvent(17, -1), 2],
+    ['event', statEvent(18, -3), 3],
+    ['event', statEvent(19, -3)],
+    // K13
+    ['id', 'i'.repeat(40)],
+    ['id', 'i'.repeat(41)],
+    ['id', 'i'.repeat(100)],
+    ['id', 'a-b_C9'],
+    ['id', ''],
+    ['id', 'a b'],
+    ['reconnect', { battle: 'b'.repeat(40) }],
+    ['reconnect', { battle: 'b'.repeat(41) }],
+    ['move', row12('m'.repeat(40)), 1],
+    ['move', row12('m'.repeat(41)), 1],
+    ['mon', sheet12(1, { speciesId: 'S'.repeat(41) })],
+    ['mon', sheet12(2, { heldItem: 'H'.repeat(41) })],
+    ['event', {
+      battle: 'b1', seq: 20, t: 'item', slot: 0, side: 'a', text: 'I'.repeat(41),
+    }, 1],
+    ['choice', { battle: 'b1', action: 'item', item: 'I'.repeat(41) }, 1],
+    ['outcome', { battle: 'b1', outcome: 'win', catcher: 'c'.repeat(41) }, 1],
+    ['party', { battle: 'p'.repeat(41), mons: [sheet12(1)] }, 1],
+    // K13's twin: a map id refused past 64 characters, never cut
+    ['mapId', 'M'.repeat(64)],
+    ['mapId', 'M'.repeat(65)],
+    ['mapId', 'M'.repeat(200)],
+    ['mapId', 'FR_PALLET_TOWN'],
+    ['mapId', 'route-1.2'],
+    ['mapId', ''],
+    ['mapId', '../secret'],
+    ['mapId', 'a b'],
+    ['mapId', 64],
+    // K14
+    ['mon', sheet12(2, { happiness: 0 })],
+    ['mon', sheet12(2, { happiness: 70 })],
+    ['mon', sheet12(2, { happiness: 255 })],
+    ['mon', sheet12(2, { happiness: 256 })],
+    ['mon', sheet12(2, { happiness: -1 })],
+    ['mon', sheet12(2, { happiness: '70' })],
+    ['mon', sheet12(2, { happiness: 70.9 })],
+    ['mon', sheet12(2, { happiness: ' 9 ' })],
+    ['mon', sheet12(2, { happiness: '0x10' })],
+    ['mon', sheet12(2, { happiness: true })],
+    ['mon', sheet12(2, { happiness: 'fond' })],
+    ['mon', sheet12(2, { happiness: [70] })],
+    ['mon', sheet12(2, { happiness: null })],
+    ['mon', sheet12(2, { ...k7(2), happiness: 200, generation: 2 })],
+    ['mon', sheet12(1, { happiness: 70 })],
+    ['mon', sheet12(1, { happiness: 'fond' })],
+    ['mon', { ...mon3(), happiness: 70 }],
+    ['party', { battle: 'b1', mons: [sheet12(2, { happiness: 200 })] }, 2],
+    ['party', { battle: 'b1', mons: [sheet12(2, { happiness: 300 })] }, 2],
+    ['outcome', {
+      battle: 'b1', outcome: 'win', reason: 'catch', caught: sheet12(2, { happiness: 70 }),
+    }, 2],
+    // K11 on an escape: every reader keeps a run outcome's coins
+    ['outcome', {
+      battle: 'b1', outcome: 'win', winners: ['nw1a'], losers: [ID_A], reason: 'run', payDay: 350,
+    }, 1],
+    ['outcome', {
+      battle: 'b1', outcome: 'win', winners: ['nw1a'], losers: [ID_A], reason: 'run', payDay: 350,
+    }, 2],
+    ['outcome', {
+      battle: 'b1', outcome: 'win', winners: ['nw1a'], losers: [ID_A], reason: 'run', payDay: 350,
+    }, 3],
+    ['outcome', {
+      battle: 'b1', outcome: 'win', winners: [ID_A], losers: ['nw1a'], reason: 'run', payDay: 350,
+    }],
+  ];
+}
+
+const PAYDAY12_EDGES = [200, 0, 1, 65535, 65536, 999999, 1000000, -3, 1.5, '0x10', ' 7 ', '1e2',
+  true, [3]];
+
+function readGap(kind, input, gen) {
+  if (kind === 'mon') return sanitize.cleanBattleMon(input);
+  if (kind === 'party') return sanitize.cleanBattleParty(input, gen);
+  if (kind === 'move') return sanitize.cleanBattleMove(input, gen);
+  if (kind === 'ruleset') return sanitize.cleanBattleRuleset(input, gen);
+  if (kind === 'event') return sanitize.cleanBattleEvent(input, gen);
+  if (kind === 'moveset') return sanitize.cleanBattleMoveset(input, gen);
+  if (kind === 'outcome') return sanitize.cleanBattleOutcome(input, gen);
+  if (kind === 'choice') return sanitize.cleanBattleChoice(input, gen);
+  if (kind === 'reconnect') return sanitize.cleanBattleReconnect(input);
+  if (kind === 'id') return sanitize.cleanId(input);
+  if (kind === 'mapId') return sanitize.cleanMapId(input);
+  return undefined;
+}
+
+/*
+ * A mid-fight level-up reaches the referee (contract K9), and a learn keeps
+ * highCrit / PP Ups / Gold priority (K8): twin of levelFight / levelFight3 in
+ * the Lua driver, whose header argues each step. A wild fight: a fight against
+ * the computer is the only kind the message is heard in (relay LEARN_MODES;
+ * k9_pvp_dropped has the link fights). The sim's levelUp is a stub
+ * recording each call; the hub's own rows are set first so the digest never
+ * leans on how either sim's copyMove spells a field it was not given.
+ */
+function slimMoves12(moves) {
+  return (moves || []).map((m) => ({
+    id: m.id,
+    pp: orNil(m.pp),
+    power: orNil(m.power),
+    highCrit: orNil(m.highCrit),
+    ppUps: orNil(m.ppUps),
+    priority: orNil(m.priority),
+  }));
+}
+
+function levelFight(generation) {
+  const relay = makeGenRelay(makeClock(), generation);
+  const sprite = generation === 2 ? DEFAULT_SPRITE_GEN2 : DEFAULT_SPRITE;
+  const a = dialAs(relay, 'ANN', ID_A, { generation, sprite });
+  const sess = { id: 'lv' };
+  relay.openCoopBattle(sess.id, [a.id], { mode: 'wild', hostId: a.id });
+  relay.handle(a.id, { type: 'mmo.battle_ruleset', battle: sess.id, chart: CHART });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: sess.id, side: 'a', mons: [sheet12(generation)],
+  });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: sess.id, side: 'b', mons: [sheet12(generation)],
+  });
+  const record = relay.battles.get(sess.id);
+  if (!record || !record.sim) return { opened: false };
+  const calls = [];
+  record.sim.levelUp = (playerId, index, level, stats, maxHp) => {
+    calls.push({
+      playerId, index, level: orNil(level), stats: orNil(stats), maxHp: orNil(maxHp),
+    });
+  };
+  const gold = generation === 2;
+  const live = record.sim.byId.get(a.id).mons[0];
+  live.moves = [
+    row12('slash', {
+      pp: 7, power: 70, highCrit: true, ppUps: 1, priority: gold ? 1 : undefined,
+    }),
+    row12('thump', { pp: 9, highCrit: false }),
+  ];
+  const steps = [];
+  const send = (extra) => {
+    relay.handle(a.id, {
+      type: 'mmo.battle_moveset', battle: sess.id, mon: 0, ...extra,
+    });
+    steps.push({ calls: calls.length, moves: slimMoves12(live.moves) });
+  };
+  const four = [row12('slash'), row12('thump'), row12('swap'), row12('extra')];
+  send({
+    moves: [row12('slash', { pp: 99, power: 999 }), row12('thump')],
+    level: 51,
+    stats: gold ? GROWN2 : GROWN1,
+    maxHp: 140,
+  });
+  send({
+    moves: [row12('slash'), row12('thump'),
+      row12('learnt', { ppUps: 2, priority: 3, highCrit: true })],
+    level: 52,
+  });
+  send({ moves: [row12('slash'), row12('thump'), row12('swap', { ppUps: 0 })] });
+  send({ moves: [row12('aaa'), row12('bbb'), row12('swap')], level: 53 });
+  live.transformed = true;
+  send({ moves: four, level: 54, maxHp: 150 });
+  live.transformed = false;
+  send({ moves: four, level: 0 });
+  record.sim.levelUp = false;
+  send({ moves: four, level: 55 });
+  return { opened: true, calls, steps };
+}
+
+function levelFight3() {
+  const relay = makeGenRelay(makeClock(), 3);
+  const a = dialAs(relay, 'ANN', ID_A, {
+    generation: 3, version: 'firered', sprite: 'OBJ_EVENT_GFX_RED_NORMAL', map: 'FR_PALLET_TOWN',
+  });
+  const sess = { id: 'lv3' };
+  relay.openCoopBattle(sess.id, [a.id], { mode: 'wild', hostId: a.id });
+  relay.handle(a.id, { type: 'mmo.battle_ruleset', battle: sess.id, typeTable: CHART3 });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: sess.id, side: 'a', mons: [mon3()],
+  });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: sess.id, side: 'b', mons: [mon3({ catchRate: 45 })],
+  });
+  const record = relay.battles.get(sess.id);
+  if (!record || !record.sim) return { opened: false };
+  let calls = 0;
+  record.sim.levelUp = () => { calls += 1; };
+  relay.handle(a.id, {
+    type: 'mmo.battle_moveset',
+    battle: sess.id,
+    mon: 0,
+    moves: [move3(), move3({ id: 'NEW3', num: 44 })],
+    level: 51,
+    stats: GROWN2,
+    maxHp: 140,
+  });
+  const ids = record.sim.byId.get(a.id).mons[0].moves.map((m) => m.id);
+  return { opened: true, calls, moves: ids };
+}
+
+/*
+ * Pay Day on a Gen 1 / Gen 2 outcome (contract K11): the hubs copy the
+ * referee's outcome().payDay onto the broadcast in the NPC modes alone, and
+ * only a positive count -- and on an escape (reason `run`) only a Red hub does
+ * (pokered pays after a Teleport / Whirlwind / Roar / POKE DOLL escape; Gold
+ * calls every escape a draw and Gen 3 pays only on a win -- paysDay). The
+ * referee's outcome is a stub; a stub run names the side that fled the loser.
+ * Twin of paidFight in the Lua driver.
+ */
+function paidFight(generation, mode, coins, reason) {
+  const relay = makeGenRelay(makeClock(), generation);
+  let a;
+  let b;
+  if (generation === 3) {
+    a = dialAs(relay, 'ANN', ID_A, {
+      generation: 3, version: 'firered', sprite: 'OBJ_EVENT_GFX_RED_NORMAL', map: 'FR_PALLET_TOWN',
+    });
+    b = dialAs(relay, 'BOB', ID_B, {
+      generation: 3, version: 'emerald', sprite: 'OBJ_EVENT_GFX_MAY_NORMAL', map: 'EM_LITTLEROOT_TOWN',
+    });
+  } else {
+    const sprite = generation === 2 ? DEFAULT_SPRITE_GEN2 : DEFAULT_SPRITE;
+    a = dialAs(relay, 'ANN', ID_A, { generation, sprite });
+    b = dialAs(relay, 'BOB', ID_B, { generation, sprite });
+  }
+  const sheet = (extra) => (generation === 3 ? mon3(extra) : sheet12(generation, extra));
+  let id;
+  const solo = mode === 'wild';
+  if (mode === '1v1') {
+    id = openFight(relay, a, b).id;
+    uploadReady(relay, a, b, id, [sheet12(generation)], [sheet12(generation)]);
+  } else {
+    id = 'w1';
+    relay.openCoopBattle(id, solo ? [a.id] : [a.id, b.id], { mode, hostId: a.id });
+    if (generation === 3) {
+      relay.handle(a.id, { type: 'mmo.battle_ruleset', battle: id, typeTable: CHART3 });
+    } else {
+      relay.handle(a.id, { type: 'mmo.battle_ruleset', battle: id, chart: CHART });
+    }
+    relay.handle(a.id, {
+      type: 'mmo.battle_party', battle: id, side: 'a', mons: [sheet()],
+    });
+    if (!solo) {
+      relay.handle(b.id, {
+        type: 'mmo.battle_party', battle: id, side: 'a', mons: [sheet()],
+      });
+    }
+    relay.handle(a.id, {
+      type: 'mmo.battle_party', battle: id, side: 'b', mons: [sheet({ catchRate: 45 })],
+    });
+  }
+  const record = relay.battles.get(id);
+  if (!record || !record.sim) return { opened: false };
+  a.peer.outbox = [];
+  b.peer.outbox = [];
+  let verdict = {
+    outcome: 'win', winners: [a.id], losers: [b.id], reason: 'ko', payDay: coins,
+  };
+  if (reason === 'run') {
+    const wild = record.npcIds && record.npcIds[0];
+    verdict = {
+      outcome: 'win',
+      winners: [wild || b.id],
+      losers: mode === '1v1' || solo ? [a.id] : [a.id, b.id],
+      reason: 'run',
+      payDay: coins,
+    };
+  }
+  record.sim.outcome = () => verdict;
+  relay.flushBattle(record);
+  const outcome = take(a, 'mmo.battle_outcome');
+  return {
+    opened: true,
+    outcome: slimPaid(outcome),
+    read1: slimPaid(outcome && sanitize.cleanBattleOutcome(outcome, 1)),
+    read2: slimPaid(outcome && sanitize.cleanBattleOutcome(outcome, 2)),
+    read3: slimPaid(outcome && sanitize.cleanBattleOutcome(outcome, 3)),
+    readNone: slimPaid(outcome && sanitize.cleanBattleOutcome(outcome)),
+    battleGone: !relay.battles.has(id),
+  };
+}
+
+/*
+ * K13's twin on the roster: a map id past 64 characters leaves its player
+ * unplaced on both hubs, in a hello's welcome / join and on a step. Twin of
+ * map_id_bound in the Lua driver.
+ */
+function slimStep(msg) {
+  if (!msg) return '(nil)';
+  return {
+    id: msg.id, map: msg.map || '(none)', x: orNil(msg.x), y: orNil(msg.y),
+  };
+}
+
+function mapIdBound() {
+  const relay = makeGenRelay(makeClock(), 1);
+  const edge = 'M'.repeat(64);
+  const long = 'M'.repeat(65);
+  const a = dialAs(relay, 'ANN', ID_A, { map: long, sprite: DEFAULT_SPRITE });
+  const aWelcome = take(a, 'mmo.welcome');
+  const b = dialAs(relay, 'BOB', ID_B, { map: edge, sprite: DEFAULT_SPRITE });
+  const bWelcome = take(b, 'mmo.welcome');
+  const joinAtA = take(a, 'mmo.join');
+  const steps = [];
+  for (const map of [edge, long, 'ROUTE_1', 'M'.repeat(200), '../secret']) {
+    relay.handle(a.id, {
+      type: 'mmo.move', map, x: 3, y: 4, facing: 'up',
+    });
+    steps.push(slimStep(take(b, 'mmo.move')));
+  }
+  return {
+    aWelcomed: aWelcome !== null,
+    bWelcomed: bWelcome !== null,
+    bSees: slimRoster(bWelcome && bWelcome.players),
+    aSeesJoin: slimPresence(joinAtA && joinAtA.player),
+    steps,
+  };
+}
+
+/*
+ * A learn on a transformed battler (Red and Gold, real referees): written into
+ * the party list put aside at Transform (`preTransform.moves`) so the
+ * switch-out gives it back; Red also overwrites the copied moves (pokered
+ * LearnMove), Gold leaves them (pokecrystal LearnMove). Twin of
+ * transformLearn in the Lua driver.
+ */
+function slimRows(moves) {
+  return (moves || []).map((m) => ({ id: m.id, pp: orNil(m.pp) }));
+}
+
+function transformLearn(generation) {
+  const relay = makeGenRelay(makeClock(), generation);
+  const sprite = generation === 2 ? DEFAULT_SPRITE_GEN2 : DEFAULT_SPRITE;
+  const a = dialAs(relay, 'ANN', ID_A, { generation, sprite });
+  const id = 't1';
+  relay.openCoopBattle(id, [a.id], { mode: 'wild', hostId: a.id });
+  relay.handle(a.id, { type: 'mmo.battle_ruleset', battle: id, chart: CHART });
+  const mv = (moveId, effect, power) => row12(moveId, { pp: 10, power: power || 0, effect: effect || 0 });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party',
+    battle: id,
+    side: 'a',
+    mons: [
+      sheet12(generation, { species: 'COPYCAT', moves: [mv('TRANSFORM', 57), mv('TACKLE', 0, 1)] }),
+      sheet12(generation, { species: 'BENCH', moves: [mv('TACKLE', 0, 1)] }),
+    ],
+  });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party',
+    battle: id,
+    side: 'b',
+    mons: [sheet12(generation, { species: 'FOE', moves: [mv('GROWL'), mv('HUSH')] })],
+  });
+  const record = relay.battles.get(id);
+  if (!record || !record.sim) return { opened: false };
+  relay.handle(a.id, {
+    type: 'mmo.battle_choice', battle: id, action: 'fight', move: 0,
+  });
+  const live = record.sim.byId.get(a.id).mons[0];
+  const look = () => {
+    const saved = live.preTransform;
+    return {
+      transformed: live.transformed === true,
+      battle: slimRows(live.moves),
+      party: saved ? slimRows(saved.moves) : '(none)',
+      separate: saved && saved.moves ? saved.moves[0] !== live.moves[0] : '(n/a)',
+    };
+  };
+  const steps = [look()];
+  relay.handle(a.id, {
+    type: 'mmo.battle_moveset',
+    battle: id,
+    mon: 0,
+    moves: [mv('TRANSFORM', 57), mv('TACKLE', 0, 1), mv('LEARNT', 0, 40)],
+  });
+  steps.push(look());
+  relay.handle(a.id, {
+    type: 'mmo.battle_moveset', battle: id, mon: 0, moves: [mv('AAA'), mv('BBB'), mv('CCC')],
+  });
+  steps.push(look());
+  relay.handle(a.id, {
+    type: 'mmo.battle_choice', battle: id, action: 'switch', slot: 1,
+  });
+  steps.push(look());
+  return { opened: true, steps };
+}
+
+function runGaps() {
+  return [
+    {
+      name: 'referee_gaps_dialect',
+      result: (() => {
+        const cases = gaps().map(([kind, input, gen]) => ({ kind, got: orNil(readGap(kind, input, gen)) }));
+        const payEdges12 = PAYDAY12_EDGES.map((v) => {
+          const row = {};
+          for (const reader of [1, 2, 3, 'none']) {
+            const got = sanitize.cleanBattleOutcome({ battle: 'b1', outcome: 'win', payDay: v },
+              reader !== 'none' ? reader : undefined);
+            row[`r${reader}`] = orNil(got && got.payDay);
+          }
+          return row;
+        });
+        return { cases, payEdges12 };
+      })(),
+    },
+    {
+      name: 'levelup_moveset_forward',
+      result: { red: levelFight(1), gold: levelFight(2), gen3: levelFight3() },
+    },
+    {
+      name: 'gen12_payday_forward',
+      result: {
+        redWild: paidFight(1, 'coop_wild', 350),
+        goldWild: paidFight(2, 'wild', 99999),
+        goldNone: paidFight(2, 'coop_wild', 0),
+        red1v1: paidFight(1, '1v1', 350),
+        redWildRun: paidFight(1, 'wild', 350, 'run'),
+        redCoopRun: paidFight(1, 'coop_wild', 350, 'run'),
+        redRunNone: paidFight(1, 'wild', 0, 'run'),
+        red1v1Run: paidFight(1, '1v1', 350, 'run'),
+        goldWildRun: paidFight(2, 'wild', 350, 'run'),
+        goldCoopRun: paidFight(2, 'coop_wild', 350, 'run'),
+        gen3WildRun: paidFight(3, 'wild', 350, 'run'),
+        gen3WildKo: paidFight(3, 'wild', 350),
+      },
+    },
+    { name: 'map_id_bound', result: mapIdBound() },
+    { name: 'transformed_learn', result: { red: transformLearn(1), gold: transformLearn(2) } },
+  ];
+}
+
+/*
+ * Wave 4 of docs/plans/gen12-referee-gaps-fix.md, the wire: Red's MIMIC pick on
+ * a Gen 1 choice (`mimic`) and Gold's wTimeOfDay on a Gen 2 ruleset
+ * (`timeOfDay`). Twin of wave4 in the Lua driver.
+ */
+function wave4() {
+  const fight = (extra) => ({ battle: 'b1', action: 'fight', move: 0, ...extra });
+  const rules = (extra) => ({ chart: CHART, ...extra });
+  return [
+    ['choice', fight({ mimic: 0 }), 1],
+    ['choice', fight({ mimic: 3 }), 1],
+    ['choice', fight({ mimic: 4 }), 1],
+    ['choice', fight({ mimic: -1 }), 1],
+    ['choice', fight({ mimic: '2' }), 1],
+    ['choice', fight({ mimic: ' 1 ' }), 1],
+    ['choice', fight({ mimic: '0x1' }), 1],
+    ['choice', fight({ mimic: 1.5 }), 1],
+    ['choice', fight({ mimic: true }), 1],
+    ['choice', fight({ mimic: 'one' }), 1],
+    ['choice', fight({ mimic: [1] }), 1],
+    ['choice', fight({ mimic: null }), 1],
+    ['choice', {
+      battle: 'b1', action: 'switch', slot: 1, mimic: 2,
+    }, 1],
+    ['choice', { battle: 'b1', action: 'run', mimic: 7 }, 1],
+    ['choice', fight({ mimic: 2 }), 2],
+    ['choice', fight({ mimic: 9 }), 2],
+    ['choice', fight({ mimic: 2 }), 3],
+    ['choice', fight({ mimic: 9 }), 3],
+    ['choice', fight({ mimic: 2 })],
+    ['choice', fight({ mimic: 9 })],
+    ['ruleset', rules({ timeOfDay: 'morn' }), 2],
+    ['ruleset', rules({ timeOfDay: 'day' }), 2],
+    ['ruleset', rules({ timeOfDay: 'nite' }), 2],
+    ['ruleset', rules({ timeOfDay: 'NITE' }), 2],
+    ['ruleset', rules({ timeOfDay: 'night' }), 2],
+    ['ruleset', rules({ timeOfDay: 'eve' }), 2],
+    ['ruleset', rules({ timeOfDay: 'darkness' }), 2],
+    ['ruleset', rules({ timeOfDay: '' }), 2],
+    ['ruleset', rules({ timeOfDay: 2 }), 2],
+    ['ruleset', rules({ timeOfDay: true }), 2],
+    ['ruleset', rules({ timeOfDay: ['nite'] }), 2],
+    ['ruleset', rules({ timeOfDay: null }), 2],
+    ['ruleset', rules({ timeOfDay: 'day', metronomePool: [row12('m', { priority: 1 })] }), 2],
+    ['ruleset', rules({ timeOfDay: 'nite' }), 1],
+    ['ruleset', rules({ timeOfDay: 'evening' }), 1],
+    ['ruleset', rules({ timeOfDay: 'nite' })],
+    ['ruleset', rules({ timeOfDay: 'evening' })],
+    ['ruleset', { typeTable: CHART3, timeOfDay: 'nite' }, 3],
+    ['ruleset', { typeTable: CHART3, timeOfDay: 'evening' }, 3],
+  ];
+}
+
+/*
+ * Wave 4, the hubs and the real referees: a learn is judged against the PARTY
+ * list and reaches the battle list only as the cart's LearnMove does
+ * (learnTo); Red's MIMIC pick reaches the referee off the wire; Gold's
+ * wTimeOfDay reaches its referee off a Gen 2 ruleset. Twin of
+ * overlay_learn_and_time in the Lua driver, whose header argues each step.
+ */
+function overlayHub(generation, id, aMoves) {
+  const relay = makeGenRelay(makeClock(), generation);
+  const sprite = generation === 2 ? DEFAULT_SPRITE_GEN2 : DEFAULT_SPRITE;
+  const a = dialAs(relay, 'ANN', ID_A, { generation, sprite });
+  relay.openCoopBattle(id, [a.id], { mode: 'wild', hostId: a.id });
+  relay.handle(a.id, { type: 'mmo.battle_ruleset', battle: id, chart: CHART });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party',
+    battle: id,
+    side: 'a',
+    mons: [
+      sheet12(generation, { species: 'COPYCAT', moves: aMoves }),
+      sheet12(generation, { species: 'BENCH', moves: [row12('TACKLE', { pp: 10, power: 1 })] }),
+    ],
+  });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party',
+    battle: id,
+    side: 'b',
+    mons: [sheet12(generation, {
+      species: 'FOE',
+      moves: [row12('GROWL', { pp: 10, power: 0 }), row12('HUSH', { pp: 10, power: 0 })],
+    })],
+  });
+  return { relay, a, record: relay.battles.get(id) };
+}
+
+function ovMove(moveId, effect, power) {
+  return row12(moveId, { pp: 10, power: power || 0, effect: effect || 0 });
+}
+
+function lookOverlay(live) {
+  const saved = live.preTransform;
+  const mimic = live.preMimic;
+  const kept = [];
+  if (mimic && typeof mimic === 'object') {
+    for (let i = 1; i <= 4; i += 1) {
+      if (mimic[i]) kept.push(`${i}:${mimic[i].id}`);
+    }
+  }
+  return {
+    transformed: live.transformed === true,
+    battle: slimRows(live.moves),
+    party: saved ? slimRows(saved.moves) : '(none)',
+    mimic: kept,
+  };
+}
+
+function mimicLearn(generation, pick) {
+  const id = 'm1';
+  const { relay, a, record } = overlayHub(generation, id,
+    [ovMove('MIMIC', 82), ovMove('TACKLE', 0, 1)]);
+  if (!record || !record.sim) return { opened: false };
+  const choice = {
+    type: 'mmo.battle_choice', battle: id, action: 'fight', move: 0,
+  };
+  if (pick !== undefined) choice.mimic = pick;
+  relay.handle(a.id, choice);
+  const live = record.sim.byId.get(a.id).mons[0];
+  const steps = [lookOverlay(live)];
+  const send = (moves) => {
+    relay.handle(a.id, {
+      type: 'mmo.battle_moveset', battle: id, mon: 0, moves,
+    });
+    steps.push(lookOverlay(live));
+  };
+  send([ovMove('MIMIC', 82), ovMove('TACKLE', 0, 1)]);
+  send([ovMove(live.moves[0].id), ovMove('TACKLE', 0, 1), ovMove('LEARNT', 0, 40)]);
+  send([ovMove('MIMIC', 82), ovMove('TACKLE', 0, 1), ovMove('LEARNT', 0, 40)]);
+  relay.handle(a.id, {
+    type: 'mmo.battle_choice', battle: id, action: 'switch', slot: 1,
+  });
+  steps.push(lookOverlay(live));
+  return { opened: true, steps };
+}
+
+function transformResend(generation, mimicFirst) {
+  const id = 't2';
+  const moves = mimicFirst
+    ? [ovMove('MIMIC', 82), ovMove('TRANSFORM', 57), ovMove('TACKLE', 0, 1)]
+    : [ovMove('TRANSFORM', 57), ovMove('TACKLE', 0, 1)];
+  const { relay, a, record } = overlayHub(generation, id, moves);
+  if (!record || !record.sim) return { opened: false };
+  if (mimicFirst) {
+    relay.handle(a.id, {
+      type: 'mmo.battle_choice', battle: id, action: 'fight', move: 0, mimic: 1,
+    });
+  }
+  relay.handle(a.id, {
+    type: 'mmo.battle_choice', battle: id, action: 'fight', move: mimicFirst ? 1 : 0,
+  });
+  const live = record.sim.byId.get(a.id).mons[0];
+  const steps = [lookOverlay(live)];
+  const own = [...moves];
+  relay.handle(a.id, {
+    type: 'mmo.battle_moveset', battle: id, mon: 0, moves: own,
+  });
+  steps.push(lookOverlay(live));
+  own.push(ovMove('LEARNT', 0, 40));
+  relay.handle(a.id, {
+    type: 'mmo.battle_moveset', battle: id, mon: 0, moves: own,
+  });
+  steps.push(lookOverlay(live));
+  relay.handle(a.id, {
+    type: 'mmo.battle_choice', battle: id, action: 'switch', slot: 1,
+  });
+  steps.push(lookOverlay(live));
+  return { opened: true, steps };
+}
+
+function synthLearn(generation, transformed) {
+  const { learnTo } = require('./lib/relay.js');
+  const mon = transformed
+    ? {
+      transformed: true,
+      moves: [ovMove('COPY')],
+      preTransform: { moves: [row12('HUSH', { pp: 4 }), ovMove('TACKLE', 0, 1)] },
+    }
+    : { moves: [row12('HUSH', { pp: 4 }), ovMove('TACKLE', 0, 1)] };
+  mon.preMimic = { 1: ovMove('MIMIC', 82) };
+  mon.preMimic[1].pp = 9;
+  const steps = [];
+  const tryLearn = (moves) => {
+    steps.push({ applied: learnTo(generation, mon, moves), state: lookOverlay(mon) });
+  };
+  tryLearn([ovMove('MIMIC', 82), ovMove('TACKLE', 0, 1)]);
+  tryLearn([ovMove('NEW'), ovMove('BBB')]);
+  tryLearn([ovMove('MIMIC', 82), ovMove('TACKLE', 0, 1), ovMove('LEARNT', 0, 40)]);
+  return steps;
+}
+
+function timeHeal(generation, timeOfDay) {
+  const relay = makeGenRelay(makeClock(), generation);
+  const sprite = generation === 2 ? DEFAULT_SPRITE_GEN2 : DEFAULT_SPRITE;
+  const a = dialAs(relay, 'ANN', ID_A, { generation, sprite });
+  const id = 'h1';
+  relay.openCoopBattle(id, [a.id], { mode: 'wild', hostId: a.id });
+  relay.handle(a.id, {
+    type: 'mmo.battle_ruleset', battle: id, chart: CHART, timeOfDay,
+  });
+  const record = relay.battles.get(id);
+  const kept = record && record.ruleset ? orNil(record.ruleset.timeOfDay) : '(no ruleset)';
+  relay.handle(a.id, {
+    type: 'mmo.battle_party',
+    battle: id,
+    side: 'a',
+    mons: [sheet12(generation, { species: 'MOTH', hp: 40, moves: [ovMove('MOONLIGHT', 130)] })],
+  });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party',
+    battle: id,
+    side: 'b',
+    mons: [sheet12(generation, { species: 'FOE', moves: [ovMove('HUSH')] })],
+  });
+  if (!record || !record.sim) return { opened: false, kept };
+  relay.handle(a.id, {
+    type: 'mmo.battle_choice', battle: id, action: 'fight', move: 0,
+  });
+  return {
+    opened: true,
+    kept,
+    simTime: orNil(record.sim.timeOfDay),
+    hp: record.sim.byId.get(a.id).mons[0].hp,
+  };
+}
+
+function runWave4() {
+  return [
+    {
+      name: 'referee_gaps_wave4_dialect',
+      result: wave4().map(([kind, input, gen]) => ({ kind, got: orNil(readGap(kind, input, gen)) })),
+    },
+    {
+      name: 'overlay_learn_and_time',
+      result: {
+        redMimicPick: mimicLearn(1, 1),
+        redMimicNone: mimicLearn(1, undefined),
+        goldMimic: mimicLearn(2, 1),
+        redTransform: transformResend(1, false),
+        goldTransform: transformResend(2, false),
+        redMimicTransform: transformResend(1, true),
+        redSynth: synthLearn(1, false),
+        goldSynth: synthLearn(2, false),
+        redSynthT: synthLearn(1, true),
+        goldSynthT: synthLearn(2, true),
+        goldNite: timeHeal(2, 'nite'),
+        goldDay: timeHeal(2, 'day'),
+        goldMorn: timeHeal(2, 'morn'),
+        goldNone: timeHeal(2, undefined),
+        goldBad: timeHeal(2, 'evening'),
+        redNite: timeHeal(1, 'nite'),
+        redBad: timeHeal(1, 'evening'),
+      },
+    },
+  ];
+}
+
+// ------------------------------------------------------------------
+// Wave 5 of docs/plans/gen12-referee-gaps-fix.md, the wire: Red's `chartOrder`
+// on a Gen 1 ruleset, Gold's K15 `base.gender`, Gold's BATON PASS `pass` on a
+// Gen 2 choice, a Gold Metronome pool row's `num`. Twin of
+// referee_gaps_wave5_dialect in the Lua driver, whose header argues each case;
+// the Lua driver's NULL is a real null here, and `orderLen` reports a long
+// list by its length.
+// ------------------------------------------------------------------
+
+function wave5() {
+  const rules = (extra) => ({ chart: CHART, ...extra });
+  const fight = (extra) => ({
+    battle: 'b1', action: 'fight', move: 0, ...extra,
+  });
+  const B2 = {
+    hp: 41, atk: 52, def: 63, spe: 74, spa: 85, spd: 96,
+  };
+  const B1 = {
+    hp: 41, atk: 52, def: 63, spd: 74, spc: 85,
+  };
+  const gold = (gender) => sheet12(2, { base: { ...B2, gender } });
+  const pooled = (extra) => rules({ metronomePool: [row12('m', extra)] });
+  const long = [];
+  for (let i = 1; i <= 514; i += 1) long.push(i % 20);
+  const first = (n) => long.slice(0, n);
+  return [
+    // chartOrder
+    ['ruleset', rules({ chartOrder: [0, 1, 1, 0] }), 1],
+    ['ruleset', rules({ chartOrder: [19, 19] }), 1],
+    ['ruleset', rules({ chartOrder: [1, 0, 1, 0] }), 1],
+    ['ruleset', rules({ chartOrder: [20, 0] }), 1],
+    ['ruleset', rules({ chartOrder: [-1, 0] }), 1],
+    ['ruleset', rules({ chartOrder: [0, 1, 1] }), 1],
+    ['ruleset', rules({ chartOrder: [] }), 1],
+    ['ruleset', rules({ chartOrder: [0, null, 1] }), 1],
+    ['ruleset', rules({ chartOrder: [0, null, 1, 1] }), 1],
+    ['ruleset', rules({ chartOrder: [null, null] }), 1],
+    ['ruleset', rules({ chartOrder: ['1', 0] }), 1],
+    ['ruleset', rules({ chartOrder: [' 1 ', 0] }), 1],
+    ['ruleset', rules({ chartOrder: ['0x1', 0] }), 1],
+    ['ruleset', rules({ chartOrder: [1.5, 0] }), 1],
+    ['ruleset', rules({ chartOrder: [true, 0] }), 1],
+    ['ruleset', rules({ chartOrder: ['one', 0] }), 1],
+    ['ruleset', rules({ chartOrder: [[1], 0] }), 1],
+    ['ruleset', rules({ chartOrder: { a: 1 } }), 1],
+    ['ruleset', rules({ chartOrder: '0,1' }), 1],
+    ['ruleset', rules({ chartOrder: 7 }), 1],
+    ['ruleset', rules({ chartOrder: null }), 1],
+    ['ruleset', rules({
+      chartOrder: [0, 1], metronomePool: [row12('m', { num: 7 })], typeIds: ['NORMAL', 'FIGHTING'],
+    }), 1],
+    ['ruleset', rules({ chartOrder: [0, 1] }), 2],
+    ['ruleset', rules({ chartOrder: [0, 1, 1] }), 2],
+    ['ruleset', rules({ chartOrder: [0, 1] })],
+    ['ruleset', rules({ chartOrder: 'bad' })],
+    ['ruleset', { typeTable: CHART3, chartOrder: [0, 1] }, 3],
+    ['ruleset', { typeTable: CHART3, chartOrder: 'bad' }, 3],
+    ['orderLen', rules({ chartOrder: first(512) }), 1],
+    ['orderLen', rules({ chartOrder: first(513) }), 1],
+    ['orderLen', rules({ chartOrder: first(514) }), 1],
+    ['orderLen', rules({ chartOrder: first(164) }), 1],
+    // K15 base.gender
+    ['mon', gold(0)],
+    ['mon', gold(127)],
+    ['mon', gold(254)],
+    ['mon', gold(255)],
+    ['mon', gold(256)],
+    ['mon', gold(-1)],
+    ['mon', gold('31')],
+    ['mon', gold(' 9 ')],
+    ['mon', gold('0x1f')],
+    ['mon', gold(31.9)],
+    ['mon', gold(true)],
+    ['mon', gold('male')],
+    ['mon', gold([31])],
+    ['mon', gold(null)],
+    ['mon', sheet12(2, { ...k7(2), base: { ...B2, gender: 31 }, generation: 2 })],
+    ['mon', sheet12(2, { base: { gender: 31 } })],
+    ['mon', sheet12(1, { base: { ...B1, gender: 254 } })],
+    ['mon', sheet12(1, { base: { ...B1, gender: 'male' } })],
+    ['mon', { ...mon3(), base: { ...B2, gender: 31 } }],
+    ['party', { battle: 'b1', mons: [gold(31)] }, 2],
+    ['party', { battle: 'b1', mons: [gold(300)] }, 2],
+    ['outcome', {
+      battle: 'b1', outcome: 'win', reason: 'catch', caught: gold(31),
+    }, 2],
+    // Gold's BATON PASS successor
+    ['choice', fight({ pass: 0 }), 2],
+    ['choice', fight({ pass: 5 }), 2],
+    ['choice', fight({ pass: 6 }), 2],
+    ['choice', fight({ pass: -1 }), 2],
+    ['choice', fight({ pass: '2' }), 2],
+    ['choice', fight({ pass: ' 1 ' }), 2],
+    ['choice', fight({ pass: 1.5 }), 2],
+    ['choice', fight({ pass: true }), 2],
+    ['choice', fight({ pass: 'two' }), 2],
+    ['choice', fight({ pass: [1] }), 2],
+    ['choice', fight({ pass: null }), 2],
+    ['choice', fight({ pass: 2, dexCaught: true }), 2],
+    ['choice', {
+      battle: 'b1', action: 'switch', slot: 1, pass: 2,
+    }, 2],
+    ['choice', fight({ pass: 2 }), 1],
+    ['choice', fight({ pass: 9 }), 1],
+    ['choice', fight({ pass: 2, mimic: 1 }), 1],
+    ['choice', fight({ pass: 2 }), 3],
+    ['choice', fight({ pass: 9 }), 3],
+    ['choice', fight({ pass: 2 })],
+    ['choice', fight({ pass: 9 })],
+    // Gold Metronome pool `num`
+    ['ruleset', pooled({ num: 1 }), 2],
+    ['ruleset', pooled({ num: 251 }), 2],
+    ['ruleset', pooled({ num: 252 }), 2],
+    ['ruleset', pooled({ num: 0 }), 2],
+    ['ruleset', pooled({ num: -1 }), 2],
+    ['ruleset', pooled({ num: '7' }), 2],
+    ['ruleset', pooled({ num: 7.5 }), 2],
+    ['ruleset', pooled({ num: true }), 2],
+    ['ruleset', pooled({ num: 'x' }), 2],
+    ['ruleset', pooled({ num: [7] }), 2],
+    ['ruleset', pooled({ num: null }), 2],
+    ['ruleset', pooled({ num: 7, priority: 2, ppUps: 1 }), 2],
+    ['ruleset', rules({ metronomePool: [row12('a', { num: 3 }), row12('b')] }), 2],
+    ['ruleset', pooled({ num: 7 }), 1],
+    ['ruleset', pooled({ num: 999 }), 1],
+    ['ruleset', pooled({ num: 7 })],
+    ['ruleset', pooled({ num: 999 })],
+    // the Gen 1 / Gen 2 pool read as a list on both twins
+    ['ruleset', rules({ metronomePool: [row12('a', { num: 3 }), null, row12('b')] }), 2],
+    ['ruleset', rules({ metronomePool: [null] }), 1],
+    ['ruleset', rules({ metronomePool: [] }), 1],
+    ['ruleset', rules({ metronomePool: { a: row12('a') } }), 2],
+    ['ruleset', rules({ metronomePool: 'rows' }), 1],
+  ];
+}
+
+function readWave5(kind, input, gen) {
+  if (kind === 'orderLen') {
+    const read = sanitize.cleanBattleRuleset(input, gen);
+    if (!read) return '(refused)';
+    return read.chartOrder ? read.chartOrder.length : '(no order)';
+  }
+  return readGap(kind, input, gen);
+}
+
+/*
+ * Wave 5, the hubs and the real referees: Red's chartOrder decides "doesn't
+ * affect" vs "missed" (a Gen 2 hub keeps none), Gold's `pass` picks BATON
+ * PASS's successor, K15's gender decides ATTRACT, and a pool row's `num`
+ * decides what METRONOME calls. Twin of wave5_hub_fields in the Lua driver,
+ * whose header argues each step.
+ */
+function wave5Hub(generation, id, rules, aMons, bMons) {
+  const relay = makeGenRelay(makeClock(), generation);
+  const sprite = generation === 2 ? DEFAULT_SPRITE_GEN2 : DEFAULT_SPRITE;
+  const a = dialAs(relay, 'ANN', ID_A, { generation, sprite });
+  relay.openCoopBattle(id, [a.id], { mode: 'wild', hostId: a.id });
+  relay.handle(a.id, { type: 'mmo.battle_ruleset', battle: id, ...rules });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: id, side: 'a', mons: aMons,
+  });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: id, side: 'b', mons: bMons,
+  });
+  a.peer.outbox.length = 0;
+  return { relay, a, record: relay.battles.get(id) };
+}
+
+// The lines of `user`'s own move, from its "<USER> used" line up to the next
+// "used" line (the Lua driver's msgTexts).
+// Matched on the plain line (plainBattleLine: K17's name marks gone, K18's
+// breaks spaces); the digest keeps the line as it was sent. Twin of the Lua
+// driver's msgTexts.
+function msgTexts(player, user) {
+  const out = [];
+  let on = false;
+  for (const msg of takeAll(player, 'mmo.battle_event')) {
+    if (msg.t === 'msg') {
+      const plain = sanitize.plainBattleLine(msg.text);
+      if (plain.includes(' used ')) on = plain.startsWith(`${user} `);
+      if (on) out.push(msg.text);
+    }
+  }
+  return out;
+}
+
+const IMMUNE_CHART = [[0, 200], [100, 100]];
+
+function foeHp(sim) {
+  for (const fighter of sim.fighters) {
+    if (fighter.side === 'b') {
+      const live = fighter.active ? fighter.mons[fighter.active - 1] : null;
+      return orNil(live && live.hp);
+    }
+  }
+  return '(no foe)';
+}
+
+function redOrder(generation, order) {
+  const id = 'co';
+  const { relay, a, record } = wave5Hub(generation, id, { chart: IMMUNE_CHART, chartOrder: order }, [
+    sheet12(generation, { species: 'TAPPER', moves: [row12('TAP', { pp: 10, power: 40 })] }),
+  ], [
+    sheet12(generation, { species: 'DUO', types: [0, 1], moves: [row12('HUSH', { pp: 10, power: 0 })] }),
+  ]);
+  const kept = record && record.ruleset ? orNil(record.ruleset.chartOrder) : '(no ruleset)';
+  if (!record || !record.sim) return { opened: false, kept };
+  const rows = record.sim.chartRows ? record.sim.chartRows.length : 0;
+  relay.handle(a.id, {
+    type: 'mmo.battle_choice', battle: id, action: 'fight', move: 0,
+  });
+  return {
+    opened: true, kept, rows, texts: msgTexts(a, 'TAPPER'), foeHp: foeHp(record.sim),
+  };
+}
+
+function goldPass(pass) {
+  const id = 'bp';
+  const sheet = (species, moves) => sheet12(2, { species, moves });
+  const { relay, a, record } = wave5Hub(2, id, { chart: CHART }, [
+    sheet('PASSER', [row12('BATON_PASS', { pp: 10, power: 0, effect: 134 })]),
+    sheet('BENCH1', [row12('TAP', { pp: 10, power: 1 })]),
+    sheet('BENCH2', [row12('TAP', { pp: 10, power: 1 })]),
+  ], [sheet('FOE', [row12('HUSH', { pp: 10, power: 0 })])]);
+  if (!record || !record.sim) return { opened: false };
+  relay.handle(a.id, {
+    type: 'mmo.battle_choice', battle: id, action: 'fight', move: 0, pass,
+  });
+  const fighter = record.sim.byId.get(a.id);
+  return {
+    opened: true,
+    turn: record.sim.turn,
+    active: fighter.mons[fighter.active - 1].species,
+    texts: msgTexts(a, 'PASSER'),
+  };
+}
+
+function goldAttract(mine, theirs) {
+  const id = 'at';
+  const sheet = (species, gender, moves) => {
+    const extra = k7(2);
+    if (gender !== undefined) extra.base = { ...extra.base, gender };
+    return sheet12(2, { ...extra, species, moves });
+  };
+  const { relay, a, record } = wave5Hub(2, id, { chart: CHART }, [
+    sheet('CHARMER', mine, [row12('ATTRACT', { pp: 15, power: 0, effect: 133 })]),
+  ], [sheet('FOE', theirs, [row12('HUSH', { pp: 10, power: 0 })])]);
+  if (!record || !record.sim) return { opened: false };
+  const live = record.sim.byId.get(a.id).mons[0];
+  const held = live.base ? orNil(live.base.gender) : '(no base)';
+  relay.handle(a.id, {
+    type: 'mmo.battle_choice', battle: id, action: 'fight', move: 0,
+  });
+  return { opened: true, gender: held, texts: msgTexts(a, 'CHARMER') };
+}
+
+function goldMetronome(numbered) {
+  const id = 'mt';
+  const poolRow = (moveId, num) => row12(moveId, { pp: 10, power: 0, num: numbered ? num : undefined });
+  const { relay, a, record } = wave5Hub(2, id, {
+    chart: CHART,
+    metronomePool: [poolRow('CALLED_A', 200), poolRow('CALLED_B', 7)],
+  }, [
+    sheet12(2, { species: 'WAGGLER', moves: [row12('METRONOME', { pp: 10, power: 0, effect: 83 })] }),
+  ], [
+    sheet12(2, { species: 'FOE', moves: [row12('HUSH', { pp: 10, power: 0 })] }),
+  ]);
+  if (!record || !record.sim) return { opened: false };
+  const nums = (record.ruleset.metronomePool || []).map((entry) => orNil(entry.num));
+  relay.handle(a.id, {
+    type: 'mmo.battle_choice', battle: id, action: 'fight', move: 0,
+  });
+  return { opened: true, nums, texts: msgTexts(a, 'WAGGLER') };
+}
+
+function runWave5() {
+  return [
+    {
+      name: 'referee_gaps_wave5_dialect',
+      result: wave5().map(([kind, input, gen]) => ({ kind, got: orNil(readWave5(kind, input, gen)) })),
+    },
+    {
+      name: 'wave5_hub_fields',
+      result: {
+        redImmuneLast: redOrder(1, [0, 1, 0, 0]),
+        redSuperLast: redOrder(1, [0, 0, 0, 1]),
+        redNoOrder: redOrder(1, undefined),
+        redBadOrder: redOrder(1, [0, 0, 0]),
+        goldOrderIgnored: redOrder(2, [0, 0, 0, 1]),
+        goldPassBench2: goldPass(2),
+        goldPassNone: goldPass(undefined),
+        goldPassNobody: goldPass(4),
+        goldPassPastMax: goldPass(6),
+        goldAttractMF: goldAttract(0, 254),
+        goldAttractMM: goldAttract(0, 0),
+        goldAttractNone: goldAttract(undefined, undefined),
+        goldMetronomeNum: goldMetronome(true),
+        goldMetronomePlace: goldMetronome(false),
+      },
+    },
+  ];
+}
+
+// ------------------------------------------------------------------
+// Wave 6 of docs/plans/gen12-referee-gaps-fix.md, the wire: a Red / Gold
+// reader's `msg` with the carts' battle glyphs (cleanBattleText), `ppUps` on
+// an older `moves` event's rows, chart / specialTypes nulls closed up, and an
+// NPC party's Red `aiMods` and Red / Gold `name`. Twin of
+// referee_gaps_wave6_dialect in the Lua driver, whose header argues each case.
+// The Lua driver's strings are the bytes a hub is handed; each one here is what
+// Node's UTF-8 decoding makes of those bytes (`dec` for the ones that are not
+// valid UTF-8, where a stray sequence becomes U+FFFD), so each row pins one
+// byte stream through both readers. NULL there is a real null here.
+// ------------------------------------------------------------------
+
+const dec = (hex) => Buffer.from(hex, 'hex').toString('utf8');
+
+function wave6() {
+  const line = (text, t) => ({
+    battle: 'b1', seq: 1, t: t || 'msg', text,
+  });
+  const rules = (extra) => ({ chart: CHART, ...extra });
+  const party = (extra, gen) => ({ battle: 'b1', mons: [sheet12(gen || 1)], ...extra });
+  const movesEvent = (rows) => ({
+    battle: 'b1', seq: 2, t: 'moves', slot: 0, side: 'a', mon: 0, moves: rows,
+  });
+  const texts = [
+    'Both POKéMON will faint in 3 turns!',
+    'Enemy POKéMON\'s LIGHT SCREEN fell!',
+    'ALPHA ignored orders…sleeping!',
+    'COOLTRAINER♂ used X ATTACK on JR.TRAINER♀!',
+    'TWINS AMY & MAY used an item',
+    '  POKé  …\té  ',
+    dec('e2c3a958'),
+    dec('e280c3a9'),
+    dec('c345a9'),
+    `${dec('f09f9880')} HI`,
+    'POKÉMON',
+    'POKèMON',
+    'é'.repeat(70),
+    `${'A'.repeat(59)}éB`,
+    '#MON <PKMN> @ \\ _ ~ ¥',
+  ];
+  const cases = [];
+  for (const gen of [1, 2, 3, undefined]) {
+    for (const text of texts) cases.push(['event', line(text), gen]);
+  }
+  return [
+    ...cases,
+    // other kinds keep cleanText
+    ['event', line('COOLTRAINER♂', 'chose'), 1],
+    ['event', line('POKéMON', 'send'), 2],
+    ['event', line('Wild POKéMON fled!', 'run'), 2],
+    // ppUps on the older `moves` event
+    ['event', movesEvent([row12('TAP', { pp: 0, maxPp: 35, ppUps: 3 }),
+      row12('HUSH', { ppUps: 4 }), row12('ZAP', { ppUps: '2' }),
+      row12('NAP', { ppUps: null })]), 1],
+    ['event', movesEvent([row12('TAP', {
+      pp: 0, maxPp: 35, ppUps: 3, priority: 2,
+    }), row12('HUSH', { ppUps: -1 })]), 2],
+    // chart nulls (rows and cells)
+    ['ruleset', { chart: [[100, null, 50], [0, 200]] }, 1],
+    ['ruleset', { chart: [null, [100, 50], [0, 200]] }, 2],
+    ['ruleset', { chart: [[100, 50], null] }],
+    ['ruleset', { chart: [[null, null]] }, 1],
+    ['ruleset', { chart: [null] }, 1],
+    ['ruleset', { chart: [[100, 50], { a: 1 }] }, 1],
+    ['ruleset', { chart: { a: [100] } }, 2],
+    ['ruleset', { chart: [[true, 100]] }, 1],
+    ['ruleset', { chart: [['100', ' 50 ']] }, 2],
+    ['ruleset', { chart: [['', 50]] }, 1],
+    ['ruleset', { chart: [[[100], 50]] }, 1],
+    ['ruleset', { chart: [['0x10', 50]] }, 1],
+    // specialTypes nulls
+    ['ruleset', rules({ specialTypes: [1, null, 0] }), 1],
+    ['ruleset', rules({ specialTypes: [null] }), 2],
+    ['ruleset', rules({ specialTypes: [] }), 1],
+    ['ruleset', rules({ specialTypes: {} }), 2],
+    ['ruleset', rules({ specialTypes: { a: 1 } }), 1],
+    ['ruleset', rules({ specialTypes: { a: null } }), 2],
+    ['ruleset', rules({ specialTypes: [true] }), 1],
+    ['ruleset', rules({ specialTypes: [[1]] }), 2],
+    ['ruleset', rules({ specialTypes: [''] }), 1],
+    ['ruleset', rules({ specialTypes: ['1', ' 0 '] }), 2],
+    ['ruleset', rules({ specialTypes: '1' }), 1],
+    ['ruleset', rules({ specialTypes: [1, null, 0] })],
+    // Red aiMods
+    ['npc', party({ aiMods: [1, 2, 3] }), 1],
+    ['npc', party({ aiMods: [] }), 1],
+    ['npc', party({ aiMods: [1, null, 3] }), 1],
+    ['npc', party({ aiMods: [null] }), 1],
+    ['npc', party({ aiMods: [4, 4] }), 1],
+    ['npc', party({ aiMods: [0] }), 1],
+    ['npc', party({ aiMods: [5] }), 1],
+    ['npc', party({ aiMods: [-1] }), 1],
+    ['npc', party({ aiMods: ['2', ' 3 '] }), 1],
+    ['npc', party({ aiMods: ['0x2'] }), 1],
+    ['npc', party({ aiMods: [1.5] }), 1],
+    ['npc', party({ aiMods: [true] }), 1],
+    ['npc', party({ aiMods: [[1]] }), 1],
+    ['npc', party({ aiMods: [''] }), 1],
+    ['npc', party({ aiMods: [1, 2, 3, 4, 1, 2, 3, 4] }), 1],
+    ['npc', party({ aiMods: [1, 2, 3, 4, 1, 2, 3, 4, 1] }), 1],
+    ['npc', party({ aiMods: [1, 2, 3, 4, null, 1, 2, 3, 4] }), 1],
+    ['npc', party({ aiMods: { a: 1 } }), 1],
+    ['npc', party({ aiMods: { a: null } }), 1],
+    ['npc', party({ aiMods: '1,2' }), 1],
+    ['npc', party({ aiMods: 3 }), 1],
+    ['npc', party({ aiMods: null }), 1],
+    ['npc', party({ aiMods: [1, 2], generation: 1 })],
+    ['npc', party({ aiMods: [9], generation: 1 })],
+    ['npc', party({ aiMods: [1, 2] })],
+    ['npc', party({ aiMods: [9] })],
+    ['npc', party({ aiMods: [1, 2] }, 2), 2],
+    ['npc', party({ aiMods: [9] }, 2), 2],
+    ['npc', { battle: 'b1', mons: [mon3()], aiMods: [1] }, 3],
+    ['npc', { battle: 'b1', mons: [mon3()], aiMods: [9] }, 3],
+    // the NPC seat's display name
+    ['npc', party({ name: 'COOLTRAINER♂' }), 1],
+    ['npc', party({ name: 'POKéMANIAC', aiMods: [1] }), 1],
+    ['npc', party({ name: 'JR.TRAINER♀' }), 1],
+    ['npc', party({ name: 'FIREBREATHER WALT' }, 2), 2],
+    ['npc', party({ name: 'TWINS AMY & MAY' }, 2), 2],
+    ['npc', party({ name: 'SWIMMER♂ HAROLD' }, 2), 2],
+    ['npc', party({ name: 'FIREBREATHER ABCDEFGHIJ' }, 2), 2],
+    ['npc', party({ name: 'FIREBREATHER ABCDEFGHIJK' }, 2), 2],
+    ['npc', party({ name: 'é'.repeat(30) }, 2), 2],
+    ['npc', party({ name: '  RIVAL   BLUE  ' }), 1],
+    ['npc', party({ name: 'BUG_CATCHER<PK>#' }), 1],
+    ['npc', party({ name: '' }), 1],
+    ['npc', party({ name: '   ' }), 1],
+    ['npc', party({ name: dec('f09f9880') }), 1],
+    ['npc', party({ name: dec('c3') }), 1],
+    ['npc', party({ name: 42 }), 1],
+    ['npc', party({ name: ['A'] }), 1],
+    ['npc', party({ name: true }), 1],
+    ['npc', party({ name: null }), 1],
+    ['npc', party({ name: 'ROCKET', generation: 2 }, 2)],
+    ['npc', party({ name: 'ROCKET' })],
+    ['npc', { battle: 'b1', mons: [mon3()], name: 'LEADER' }, 3],
+  ];
+}
+
+function readWave6(kind, input, gen) {
+  if (kind === 'event') return sanitize.cleanBattleEvent(input, gen);
+  if (kind === 'ruleset') return sanitize.cleanBattleRuleset(input, gen);
+  if (kind === 'npc') {
+    const read = sanitize.cleanBattleParty(input, gen);
+    if (!read) return '(refused)';
+    return { name: orNil(read.name), aiMods: orNil(read.aiMods) };
+  }
+  return undefined;
+}
+
+/*
+ * Wave 6, the hubs and the real referees: an NPC party's `name` and Red
+ * `aiMods` reach the referee on every seat the trainer is dealt across and
+ * nowhere else, and the trainer's opening X item prints the cart's AI item line
+ * with the seat's name in it, read whole by a Red / Gold client. Twin of
+ * wave6_hub_fields in the Lua driver, whose header argues each fight.
+ */
+function npcFight(generation, mode, sideB, sideA, humans = 1) {
+  const relay = makeGenRelay(makeClock(), generation);
+  const seen = {};
+  const real = relay.Turn;
+  relay.Turn = Object.assign(Object.create(real), {
+    attempt: (opts) => {
+      seen.opts = opts;
+      return real.attempt(opts);
+    },
+  });
+  const sprite = generation === 2 ? DEFAULT_SPRITE_GEN2 : DEFAULT_SPRITE;
+  const ids = [ID_A, ID_B];
+  const names = ['ANN', 'BOB'];
+  const players = [];
+  for (let i = 0; i < humans; i += 1) {
+    players.push(dialAs(relay, names[i], ids[i], { generation, sprite }));
+  }
+  const memberIds = players.map((p) => p.id);
+  const id = 'nf';
+  relay.openCoopBattle(id, memberIds, { mode, hostId: memberIds[0] });
+  relay.handle(players[0].id, { type: 'mmo.battle_ruleset', battle: id, chart: CHART });
+  for (const p of players) {
+    relay.handle(p.id, {
+      type: 'mmo.battle_party',
+      battle: id,
+      side: 'a',
+      mons: [sheet12(generation, { species: 'HERO' })],
+      ...(sideA || {}),
+    });
+  }
+  relay.handle(players[0].id, {
+    type: 'mmo.battle_party',
+    battle: id,
+    side: 'b',
+    mons: [sheet12(generation, { species: 'FOE' }), sheet12(generation, { species: 'FOE' })],
+    ...(sideB || {}),
+  });
+  const record = relay.battles.get(id);
+  const npcIds = (record && record.npcIds) || [];
+  const entries = [];
+  for (const side of ['a', 'b']) {
+    for (const entry of (seen.opts && seen.opts.sides[side]) || []) {
+      const fighter = record && record.sim ? record.sim.byId.get(entry.playerId) : null;
+      entries.push({
+        side,
+        seat: npcIds.includes(entry.playerId) ? 'npc' : entry.playerId,
+        name: orNil(entry.name),
+        aiMods: orNil(entry.aiMods),
+        simName: fighter ? orNil(fighter.name) : '(no sim)',
+        simAiMods: fighter ? orNil(fighter.aiMods) : '(no sim)',
+      });
+    }
+  }
+  const out = { opened: !!(record && record.sim), entries };
+  if (out.opened && humans === 1) {
+    players[0].peer.outbox.length = 0;
+    relay.handle(players[0].id, {
+      type: 'mmo.battle_choice', battle: id, action: 'fight', move: 0,
+    });
+    out.lines = takeAll(players[0], 'mmo.battle_event')
+      .filter((msg) => msg.t === 'msg' && sanitize.plainBattleLine(msg.text).includes(' used ')
+        && !sanitize.plainBattleLine(msg.text).startsWith('HERO'))
+      .map((msg) => {
+        const read = sanitize.cleanBattleEvent(msg, generation);
+        return { sent: msg.text, read: read ? orNil(read.text) : '(refused)' };
+      });
+  }
+  return out;
+}
+
+function runWave6() {
+  const xItem = [{ id: 'X_ATTACK', count: 1 }];
+  return [
+    {
+      name: 'referee_gaps_wave6_dialect',
+      result: wave6().map(([kind, input, gen]) => ({ kind, got: orNil(readWave6(kind, input, gen)) })),
+    },
+    {
+      name: 'wave6_hub_fields',
+      result: {
+        redNamed: npcFight(1, 'coop_npc', { name: 'COOLTRAINER♂', aiMods: [1, 3], bag: xItem }),
+        redUnnamed: npcFight(1, 'coop_npc', { bag: xItem }),
+        redBadName: npcFight(1, 'coop_npc', { name: 42, aiMods: [], bag: xItem }),
+        redBadMods: npcFight(1, 'coop_npc', { name: 'LASS', aiMods: [9] }),
+        redTwoSeats: npcFight(1, 'coop_npc', { name: 'JR.TRAINER♀', aiMods: [1] }, undefined, 2),
+        redHumanClaims: npcFight(1, 'coop_npc', { name: 'LASS' }, { name: 'MALLORY', aiMods: [2] }),
+        redWild: npcFight(1, 'wild', { name: 'WILD', aiMods: [1] }),
+        goldNamed: npcFight(2, 'coop_npc', { name: 'TWINS AMY & MAY', aiMods: [1], bag: xItem }),
+      },
+    },
+  ];
+}
+
+/*
+ * The review's fixes (FX-W of docs/plans/gen12-referee-gaps-fix.md): twins of
+ * k9_pvp_dropped, basepp_kept and review_twin_readings in the Lua driver,
+ * whose header argues each. In short: no cart levels or learns in a link
+ * battle, so both hubs drop `mmo.battle_moveset` whole in a 1v1 and a
+ * coop_pvp (LEARN_MODES); a kept row keeps the Red referee's `basePp`
+ * (nextMoves12); and the twins read a monster's out-of-range `generation`
+ * and every value LuaJIT's tonumber says nil to alike (cleanInt is luaInt).
+ */
+function pvpSnap(live) {
+  const keys = Object.keys(live.stats || {}).sort();
+  const parts = [String(live.level), String(live.hp), String(live.maxHp)];
+  for (const k of keys) parts.push(`${k}=${live.stats[k]}`);
+  for (const m of live.moves || []) parts.push(`${m.id}:${m.power}`);
+  return parts.join(',');
+}
+
+function pvpForgery(generation, mode) {
+  const relay = makeGenRelay(makeClock(), generation);
+  const sprite = generation === 2 ? DEFAULT_SPRITE_GEN2 : DEFAULT_SPRITE;
+  const a = dialAs(relay, 'ANN', ID_A, { generation, sprite });
+  const b = dialAs(relay, 'BOB', ID_B, { generation, sprite });
+  let id;
+  if (mode === '1v1') {
+    id = openFight(relay, a, b).id;
+    uploadReady(relay, a, b, id, [sheet12(generation)], [sheet12(generation)]);
+  } else {
+    const c = dialAs(relay, 'CAL', ID_C, { generation, sprite });
+    const d = dialAs(relay, 'DEE', ID_D, { generation, sprite });
+    id = 'kp';
+    relay.openCoopBattle(id, [a.id, b.id, c.id, d.id], {
+      mode: 'coop_pvp', hostId: a.id, sides: { a: [a.id, b.id], b: [c.id, d.id] },
+    });
+    relay.handle(a.id, { type: 'mmo.battle_ruleset', battle: id, chart: CHART });
+    for (const who of [a, b, c, d]) {
+      relay.handle(who.id, { type: 'mmo.battle_party', battle: id, mons: [sheet12(generation)] });
+    }
+  }
+  const record = relay.battles.get(id);
+  if (!record || !record.sim) return { opened: false };
+  const live = record.sim.byId.get(a.id).mons[0];
+  const forged = generation === 2
+    ? {
+      atk: 999, def: 999, spe: 999, spa: 999, spd: 999,
+    }
+    : {
+      atk: 999, def: 999, spd: 999, spc: 999,
+    };
+  const nuke = row12('NUKE', { power: 250 });
+  const steps = [pvpSnap(live)];
+  const send = (extra) => {
+    relay.handle(a.id, {
+      type: 'mmo.battle_moveset', battle: id, mon: 0, ...extra,
+    });
+    steps.push(pvpSnap(live));
+  };
+  send({ moves: [row12('thump')], stats: forged, maxHp: 999 });
+  send({
+    moves: [row12('thump')], level: 100, stats: forged, maxHp: 999,
+  });
+  send({ moves: [row12('thump'), nuke] });
+  send({ moves: [nuke] });
+  const applied = relay.applyBattleMoveset(record, { id: a.id }, {
+    mon: 0, moves: [row12('thump'), nuke], level: 100, stats: forged, maxHp: 999,
+  });
+  steps.push(pvpSnap(live));
+  return {
+    opened: true, mode: record.mode, applied, steps,
+  };
+}
+
+function pvpForgery3() {
+  const relay = makeGenRelay(makeClock(), 3);
+  const a = dialAs(relay, 'ANN', ID_A, {
+    generation: 3, version: 'firered', sprite: 'OBJ_EVENT_GFX_RED_NORMAL', map: 'FR_PALLET_TOWN',
+  });
+  const b = dialAs(relay, 'BOB', ID_B, {
+    generation: 3, version: 'emerald', sprite: 'OBJ_EVENT_GFX_MAY_NORMAL', map: 'EM_LITTLEROOT_TOWN',
+  });
+  const sess = openFight(relay, a, b);
+  relay.handle(a.id, { type: 'mmo.battle_ruleset', battle: sess.id, typeTable: CHART3 });
+  relay.handle(a.id, { type: 'mmo.battle_party', battle: sess.id, mons: [mon3()] });
+  relay.handle(b.id, { type: 'mmo.battle_party', battle: sess.id, mons: [mon3()] });
+  const record = relay.battles.get(sess.id);
+  if (!record || !record.sim) return { opened: false };
+  relay.handle(a.id, {
+    type: 'mmo.battle_moveset',
+    battle: sess.id,
+    mon: 0,
+    moves: [move3(), move3({
+      id: 'NUKE3', num: 120, power: 250, priority: 5,
+    })],
+  });
+  const fighter = record.sim.byId.get(a.id);
+  return {
+    opened: true,
+    moves: fighter.mons[0].moves.map((m) => `${m.id}:${m.power}`),
+    battlerKept: fighter.b.moves === fighter.mons[0].moves,
+  };
+}
+
+function basePpKept() {
+  const relay = makeGenRelay(makeClock(), 1);
+  const a = dialAs(relay, 'ANN', ID_A, { generation: 1, sprite: DEFAULT_SPRITE });
+  const id = 'bp';
+  relay.openCoopBattle(id, [a.id], { mode: 'wild', hostId: a.id });
+  relay.handle(a.id, { type: 'mmo.battle_ruleset', battle: id, chart: CHART });
+  const stated = row12('thump', { pp: 35, maxPp: 42, ppUps: 1 });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: id, side: 'a', mons: [sheet12(1, { moves: [stated] })],
+  });
+  relay.handle(a.id, {
+    type: 'mmo.battle_party', battle: id, side: 'b', mons: [sheet12(1)],
+  });
+  const record = relay.battles.get(id);
+  if (!record || !record.sim) return { opened: false };
+  const live = record.sim.byId.get(a.id).mons[0];
+  const look = () => ({
+    level: live.level,
+    rows: live.moves.map((m) => ({
+      id: m.id,
+      pp: orNil(m.pp),
+      maxPp: orNil(m.maxPp),
+      basePp: orNil(m.basePp),
+      ppUps: orNil(m.ppUps),
+    })),
+  });
+  const steps = [look()];
+  relay.handle(a.id, {
+    type: 'mmo.battle_moveset', battle: id, mon: 0, moves: [stated], level: 51,
+  });
+  steps.push(look());
+  relay.handle(a.id, {
+    type: 'mmo.battle_moveset',
+    battle: id,
+    mon: 0,
+    moves: [row12('thump'), row12('NEW', { pp: 10, maxPp: 10 })],
+  });
+  steps.push(look());
+  return { opened: true, steps };
+}
+
+function reviewReadings() {
+  const oneRow = (extra) => [row12('m', extra)];
+  const cases = [];
+  const add = (kind, input, gen) => cases.push([kind, input, gen]);
+  for (const g of [6, -6, 0, 4, 'day', true, {}, [2], 1.5, '2', 2, null]) {
+    add('party', { battle: 'b1', mons: [sheet12(2, { generation: g })] });
+    add('party', { battle: 'b1', generation: 1, mons: [sheet12(1, { generation: g })] });
+  }
+  const odd = [true, false, null, '', ' ', [5], {}, '0x1p4', ' 7 ', '0b11', '+9', '9.', 7.9, '1e1', 'nan'];
+  for (const v of odd) {
+    for (const gen of [1, 2]) add('move', row12('m', { maxPp: v }), gen);
+    add('move', row12('m', { pp: v }), 1);
+    add('move', row12('m', { power: v }), 2);
+    add('move', row12('m', { accuracy: v }), 1);
+    add('move', row12('m', { type: v }), 2);
+    add('move', row12('m', { effect: v }), 1);
+    add('move', row12('m', { chance: v }), 2);
+    add('mon', sheet12(1, { level: v }));
+    add('mon', sheet12(2, { hp: v }));
+    add('mon', sheet12(1, { maxHp: v }));
+    add('mon', sheet12(2, {
+      stats: {
+        atk: v, def: 90, spe: 90, spa: 90, spd: 90,
+      },
+    }));
+    add('mon', sheet12(1, { slot: v }));
+    add('mon', sheet12(1, { baseSpd: v }));
+    add('mon', sheet12(2, { catchRate: v }));
+    add('moveset', { battle: 'b1', mon: v, moves: oneRow() }, 1);
+    add('choice', { battle: 'b1', action: 'fight', move: v }, 2);
+    add('choice', { battle: 'b1', action: 'switch', slot: v }, 1);
+    add('event', {
+      battle: 'b1', seq: v, t: 'msg', text: 'HI',
+    }, 1);
+    add('event', {
+      battle: 'b1', seq: 1, t: 'damage', slot: v, amount: 3,
+    }, 2);
+    add('event', {
+      battle: 'b1', seq: 1, t: 'damage', slot: 0, amount: v,
+    }, 1);
+    add('event', {
+      battle: 'b1', seq: 1, t: 'damage', slot: 0, hp: v, maxHp: 50,
+    }, 2);
+    add('event', {
+      battle: 'b1', seq: 1, t: 'exp', slot: 0, level: v,
+    }, 1);
+    add('ruleset', { chart: CHART, seed: v }, 1);
+    add('party', { battle: 'b1', mons: [sheet12(1)], bag: [{ id: 'POTION', count: v }] }, 1);
+    add('party', { battle: 'b1', mons: [sheet12(2)], badges: v }, 2);
+  }
+  return cases.map(([kind, input, gen]) => ({ kind, got: orNil(readGap(kind, input, gen)) }));
+}
+
+function runReview() {
+  return [
+    {
+      name: 'k9_pvp_dropped',
+      result: {
+        red1v1: pvpForgery(1, '1v1'),
+        redCoopPvp: pvpForgery(1, 'coop_pvp'),
+        gold1v1: pvpForgery(2, '1v1'),
+        goldCoopPvp: pvpForgery(2, 'coop_pvp'),
+        gen31v1: pvpForgery3(),
+      },
+    },
+    { name: 'basepp_kept', result: basePpKept() },
+    { name: 'review_twin_readings', result: reviewReadings() },
+  ];
+}
+
+/*
+ * Contracts K16-K18 and K21 of docs/plans/gen12-referee-remaining-gaps.md, the
+ * wire: a Red / Gold `msg`'s `^a` / `^b` name marks and `\n` breaks, cut at
+ * BATTLE_LINE_MAX (and `^` in no name); an NPC party's Red `aiClass` and Gold
+ * `trainerItems` / `aiFlags` / `itemSwitch` / `baseReward`; Gold's sheet
+ * `weight` and ruleset `battleType`. Twin of remaining_gaps_dialect in the Lua
+ * driver, whose header argues each case. NULL there is a real null here.
+ */
+function remainingGaps() {
+  const line = (text, t) => ({
+    battle: 'b1', seq: 1, t: t || 'msg', text,
+  });
+  const party = (extra, gen) => ({ battle: 'b1', mons: [sheet12(gen || 1)], ...extra });
+  const sheet = (gen, extra) => ({ ...sheet12(gen, { generation: gen }), ...extra });
+  const exp = {
+    battle: 'b1', seq: 1, t: 'exp', species: '^bFOE\n', level: 5, participants: 1,
+  };
+  const texts = [
+    '^bRATTATA used\nTACKLE!',
+    '^aPIKA\'s\nattack missed!',
+    'Wild ^bPIDGEY\nfled!',
+    '  ^bX \n  used \n\n Y ! \n ',
+    '\n\nX\n',
+    '^cX ^^aY ^',
+    '^AX ^',
+    '^a^bX',
+    '^a\nX',
+    'A\r\nB\tC',
+    `${'A'.repeat(78)}^bXY`,
+    `${'A'.repeat(79)}^bXY`,
+    `${'A'.repeat(79)} B`,
+    `${'A'.repeat(79)}\nB`,
+    'X'.repeat(81),
+  ];
+  const cases = [];
+  for (const gen of [1, 2, 3, undefined]) {
+    for (const text of texts) cases.push(['event', line(text), gen]);
+  }
+  const blackbelt = {
+    uses: 2, chance: 64, item: 'X_ATTACK', bogus: 1,
+  };
+  return [
+    ...cases,
+    // every other kind's text is a name: no mark, no break
+    ['event', line('^aANN\nX', 'run'), 1],
+    ['event', line('^bFOE\nX', 'send'), 2],
+    ['event', line('^aANN\nX', 'chose'), 2],
+    ['event', exp, 1],
+    ['event', exp, 2],
+    ['event', exp, 3],
+    // Red aiClass
+    ['npc', party({ aiClass: blackbelt }), 1],
+    ['npc', party({
+      aiClass: {
+        uses: 2, switchChance: 20, chance: 128, item: 'SUPER_POTION', hpBelow: 4,
+      },
+    }), 1],
+    ['npc', party({
+      aiClass: {
+        uses: 1, item: 'HYPER_POTION', hpBelow: 10, switchBelow: 5, switch: false,
+      },
+    }), 1],
+    ['npc', party({ aiClass: { uses: '5', onStatus: true, item: 'FULL_HEAL' } }), 1],
+    ['npc', party({ aiClass: { uses: 3, chance: 256, switch: true } }), 1],
+    ['npc', party({ aiClass: { uses: 3, chance: null } }), 1],
+    ['npc', party({ aiClass: { uses: 1.5 } }), 1],
+    ['npc', party({ aiClass: { uses: ' 2 ' } }), 1],
+    ['npc', party({ aiClass: { uses: '0x2' } }), 1],
+    ['npc', party({ aiClass: null }), 1],
+    ['npc', party({ aiClass: {} }), 1],
+    ['npc', party({ aiClass: { chance: 64 } }), 1],
+    ['npc', party({ aiClass: { uses: 0 } }), 1],
+    ['npc', party({ aiClass: { uses: 256 } }), 1],
+    ['npc', party({ aiClass: { uses: true } }), 1],
+    ['npc', party({ aiClass: { uses: '' } }), 1],
+    ['npc', party({ aiClass: { uses: 1, chance: 257 } }), 1],
+    ['npc', party({ aiClass: { uses: 1, chance: -1 } }), 1],
+    ['npc', party({ aiClass: { uses: 1, switchChance: 300 } }), 1],
+    ['npc', party({ aiClass: { uses: 1, hpBelow: 0 } }), 1],
+    ['npc', party({ aiClass: { uses: 1, switchBelow: 256 } }), 1],
+    ['npc', party({ aiClass: { uses: 1, item: 'X ATTACK' } }), 1],
+    ['npc', party({ aiClass: { uses: 1, item: 7 } }), 1],
+    ['npc', party({ aiClass: { uses: 1, item: 'X'.repeat(41) } }), 1],
+    ['npc', party({ aiClass: { uses: 1, switch: 1 } }), 1],
+    ['npc', party({ aiClass: { uses: 1, onStatus: 'yes' } }), 1],
+    ['npc', party({ aiClass: [3] }), 1],
+    ['npc', party({ aiClass: 'GenericAI' }), 1],
+    ['npc', party({ aiClass: 3 }), 1],
+    ['npc', party({ aiClass: { uses: 0 } }, 2), 2],
+    ['npc', party({ aiClass: { uses: 2 }, generation: 1 })],
+    ['npc', party({ aiClass: { uses: 0 } })],
+    ['npc', { battle: 'b1', mons: [mon3()], aiClass: { uses: 0 } }, 3],
+    // Gold's four
+    ['npc', party({
+      trainerItems: ['FULL_HEAL', 'POTION'], aiFlags: 0, itemSwitch: 513, baseReward: 25,
+    }, 2), 2],
+    ['npc', party({ trainerItems: [] }, 2), 2],
+    ['npc', party({ trainerItems: [null, 'POTION'] }, 2), 2],
+    ['npc', party({ trainerItems: ['NO_ITEM', 'POTION'] }, 2), 2],
+    ['npc', party({ trainerItems: { a: null } }, 2), 2],
+    ['npc', party({ aiFlags: 65535, itemSwitch: '4', baseReward: 255 }, 2), 2],
+    ['npc', party({
+      aiFlags: null, itemSwitch: null, baseReward: null, trainerItems: null,
+    }, 2), 2],
+    ['npc', party({ trainerItems: ['A', 'B', 'C'] }, 2), 2],
+    ['npc', party({ trainerItems: ['FULL HEAL'] }, 2), 2],
+    ['npc', party({ trainerItems: [7] }, 2), 2],
+    ['npc', party({ trainerItems: { a: 'POTION' } }, 2), 2],
+    ['npc', party({ trainerItems: 'POTION' }, 2), 2],
+    ['npc', party({ aiFlags: 65536 }, 2), 2],
+    ['npc', party({ aiFlags: -1 }, 2), 2],
+    ['npc', party({ aiFlags: true }, 2), 2],
+    ['npc', party({ itemSwitch: [1] }, 2), 2],
+    ['npc', party({ itemSwitch: '' }, 2), 2],
+    ['npc', party({ baseReward: 256 }, 2), 2],
+    ['npc', party({ baseReward: 'x' }, 2), 2],
+    ['npc', party({
+      trainerItems: ['A', 'B', 'C'], aiFlags: -1, itemSwitch: -1, baseReward: -1,
+    }), 1],
+    ['npc', party({ trainerItems: ['A', 'B', 'C'], aiFlags: -1, generation: 2 }, 2)],
+    ['npc', {
+      battle: 'b1', mons: [mon3()], trainerItems: [7], aiFlags: -1,
+    }, 3],
+    // `^` in a trainer name
+    ['npc', party({ name: '^bLASS^' }), 1],
+    ['npc', party({ name: '^aTWINS AMY & MAY\n' }, 2), 2],
+    // Gold's sheet weight; a Red sheet's is no field
+    ['mon', sheet(2, { weight: 0 })],
+    ['mon', sheet(2, { weight: 4600 })],
+    ['mon', sheet(2, { weight: 65535 })],
+    ['mon', sheet(2, { weight: '300' })],
+    ['mon', sheet(2, { weight: null })],
+    ['mon', sheet(2, { weight: 65536 })],
+    ['mon', sheet(2, { weight: -1 })],
+    ['mon', sheet(2, { weight: true })],
+    ['mon', sheet(2, { weight: 'heavy' })],
+    ['mon', sheet(2, { weight: [300] })],
+    ['mon', sheet(1, { weight: 300 })],
+    ['mon', sheet(1, { weight: 70000 })],
+    ['mon', sheet(1, { weight: 'heavy' })],
+    // `^` in a monster's name
+    ['mon', sheet(1, { species: '^aFOE\n' })],
+    ['mon', sheet(2, { species: '^bFOE^' })],
+    ['mon', mon3({ species: '^aGAMMA' })],
+    // Gold's ruleset battleType
+    ['ruleset', { chart: CHART, battleType: 0 }, 2],
+    ['ruleset', { chart: CHART, battleType: 4 }, 2],
+    ['ruleset', { chart: CHART, battleType: 255 }, 2],
+    ['ruleset', { chart: CHART, battleType: '4' }, 2],
+    ['ruleset', { chart: CHART, battleType: null }, 2],
+    ['ruleset', { chart: CHART, battleType: 256 }, 2],
+    ['ruleset', { chart: CHART, battleType: -1 }, 2],
+    ['ruleset', { chart: CHART, battleType: true }, 2],
+    ['ruleset', { chart: CHART, battleType: 'FISH' }, 2],
+    ['ruleset', { chart: CHART, battleType: [4] }, 2],
+    ['ruleset', { chart: CHART, battleType: 'FISH' }, 1],
+    ['ruleset', { chart: CHART, battleType: 4 }],
+  ];
+}
+
+function readRemaining(kind, input, gen) {
+  if (kind === 'event') return sanitize.cleanBattleEvent(input, gen);
+  if (kind === 'ruleset') return sanitize.cleanBattleRuleset(input, gen);
+  if (kind === 'mon') {
+    const read = sanitize.cleanBattleMon(input);
+    if (!read) return '(refused)';
+    return { species: orNil(read.species), weight: orNil(read.weight) };
+  }
+  if (kind === 'npc') {
+    const read = sanitize.cleanBattleParty(input, gen);
+    if (!read) return '(refused)';
+    return {
+      name: orNil(read.name),
+      aiMods: orNil(read.aiMods),
+      aiClass: orNil(read.aiClass),
+      trainerItems: orNil(read.trainerItems),
+      aiFlags: orNil(read.aiFlags),
+      itemSwitch: orNil(read.itemSwitch),
+      baseReward: orNil(read.baseReward),
+    };
+  }
+  return undefined;
+}
+
+/*
+ * K16 / K21, the hubs and the real referees: what each hub hands Turn.create
+ * (each roster entry's K16 fields, first monster's name and every monster's
+ * weight; the ruleset's battleType) beside what the referee kept. No turn is
+ * played. Twin of remaining_gaps_hub_fields in the Lua driver, whose header
+ * argues each fight.
+ */
+const weightsOf = (mons) => (mons || []).map((m) => orNil(m.weight));
+
+function factsFight(generation, mode, o = {}) {
+  const relay = makeGenRelay(makeClock(), generation);
+  const seen = {};
+  const real = relay.Turn;
+  relay.Turn = Object.assign(Object.create(real), {
+    attempt: (opts) => {
+      seen.opts = opts;
+      return real.attempt(opts);
+    },
+  });
+  const sprite = generation === 2 ? DEFAULT_SPRITE_GEN2 : DEFAULT_SPRITE;
+  const ids = [ID_A, ID_B];
+  const names = o.names || ['ANN', 'BOB'];
+  const players = [];
+  for (let i = 0; i < (o.humans || 1); i += 1) {
+    players.push(dialAs(relay, names[i], ids[i], { generation, sprite }));
+  }
+  const memberIds = players.map((p) => p.id);
+  const id = 'rg';
+  relay.openCoopBattle(id, memberIds, { mode, hostId: memberIds[0] });
+  relay.handle(players[0].id, {
+    type: 'mmo.battle_ruleset', battle: id, chart: CHART, ...(o.rules || {}),
+  });
+  for (const p of players) {
+    relay.handle(p.id, {
+      type: 'mmo.battle_party',
+      battle: id,
+      side: 'a',
+      mons: [sheet12(generation, { species: 'HERO' })],
+      ...(o.sideA || {}),
+    });
+  }
+  relay.handle(players[0].id, {
+    type: 'mmo.battle_party',
+    battle: id,
+    side: 'b',
+    mons: [sheet12(generation, { species: 'FOE', ...(o.foe || {}) }), sheet12(generation, { species: 'FOE' })],
+    ...(o.sideB || {}),
+  });
+  const record = relay.battles.get(id);
+  const sim = record ? record.sim : null;
+  const npcIds = (record && record.npcIds) || [];
+  const entries = [];
+  for (const side of ['a', 'b']) {
+    for (const entry of (seen.opts && seen.opts.sides[side]) || []) {
+      const fighter = sim ? sim.byId.get(entry.playerId) : null;
+      entries.push({
+        side,
+        seat: npcIds.includes(entry.playerId) ? 'npc' : entry.playerId,
+        name: orNil(entry.name),
+        aiClass: orNil(entry.aiClass),
+        trainerItems: orNil(entry.trainerItems),
+        aiFlags: orNil(entry.aiFlags),
+        itemSwitch: orNil(entry.itemSwitch),
+        baseReward: orNil(entry.baseReward),
+        species: orNil(entry.mons && entry.mons[0] && entry.mons[0].species),
+        weights: weightsOf(entry.mons),
+        simWeights: fighter ? weightsOf(fighter.mons) : '(no sim)',
+        // A later wave's own fields (`o.extra`), beside the K16 / K21 ones.
+        ...(o.extra ? o.extra(entry, fighter) : {}),
+      });
+    }
+  }
+  return {
+    opened: !!sim,
+    battleType: seen.opts ? orNil(seen.opts.battleType) : '(no create)',
+    simBattleType: sim ? orNil(sim.battleType) : '(no sim)',
+    entries,
+  };
+}
+
+/*
+ * Wave 2 of docs/plans/gen12-referee-remaining-gaps.md, the wire: K22's
+ * `quiet` on an `anim` (a Red / Gold reader keeps exactly true, on `anim`
+ * alone), K17's side-word marks `^A` / `^B` (kept, cut and dropped as `^a` /
+ * `^b`), K23's Gold `countSpeciesTypes` on an NPC party (1..2 chart indices,
+ * refusing the party otherwise; other readers neither copy nor refuse). Twin of
+ * remaining_gaps_wave2_dialect in the Lua driver. NULL there is a real null here.
+ */
+function remainingWave2() {
+  const anim = (extra) => ({
+    battle: 'b1', seq: 1, t: 'anim', slot: 3, side: 'b', text: 'ABSORB', ...extra,
+  });
+  const line = (text) => ({
+    battle: 'b1', seq: 1, t: 'msg', text,
+  });
+  const party = (extra, gen) => ({ battle: 'b1', mons: [sheet12(gen || 1)], ...extra });
+  const cases = [];
+  for (const gen of [1, 2, 3, undefined]) {
+    for (const quiet of [true, false, 1, 'true', null, [true]]) cases.push(['event', anim({ quiet }), gen]);
+    cases.push(['event', anim({
+      text: 'TELEPORT', slot: 0, side: 'a', quiet: true,
+    }), gen]);
+    cases.push(['event', anim({ text: 'SLIDE_DOWN_ANIM', quiet: true }), gen]);
+    cases.push(['event', { ...line('^bX\nused Y!'), quiet: true }, gen]);
+    for (const text of [
+      '^APOKéMON\'s\nLIGHT SCREEN fell!',
+      '^BPOKéMON\'s\nREFLECT faded!',
+      '^C ^^BY ^',
+      '^A',
+      '^B\nX',
+      '^A^aX',
+      `${'A'.repeat(78)}^BXY`,
+      `${'A'.repeat(79)}^AXY`,
+    ]) {
+      cases.push(['event', line(text), gen]);
+    }
+  }
+  return [
+    ...cases,
+    ['npc', party({ countSpeciesTypes: [3, 7] }, 2), 2],
+    ['npc', party({ countSpeciesTypes: [0, 0] }, 2), 2],
+    ['npc', party({ countSpeciesTypes: ['19'] }, 2), 2],
+    ['npc', party({ countSpeciesTypes: [null, 4] }, 2), 2],
+    ['npc', party({ countSpeciesTypes: null }, 2), 2],
+    ['npc', party({ countSpeciesTypes: [1.5, '0x2'] }, 2), 2],
+    ['npc', party({ countSpeciesTypes: [] }, 2), 2],
+    ['npc', party({ countSpeciesTypes: { a: null } }, 2), 2],
+    ['npc', party({ countSpeciesTypes: [1, 2, 3] }, 2), 2],
+    ['npc', party({ countSpeciesTypes: [20] }, 2), 2],
+    ['npc', party({ countSpeciesTypes: [-1] }, 2), 2],
+    ['npc', party({ countSpeciesTypes: [true] }, 2), 2],
+    ['npc', party({ countSpeciesTypes: ['x'] }, 2), 2],
+    ['npc', party({ countSpeciesTypes: [[1]] }, 2), 2],
+    ['npc', party({ countSpeciesTypes: { a: 1 } }, 2), 2],
+    ['npc', party({ countSpeciesTypes: 'FIRE' }, 2), 2],
+    ['npc', party({ countSpeciesTypes: 7 }, 2), 2],
+    ['npc', party({ countSpeciesTypes: [1, 2, 3] }), 1],
+    ['npc', party({ countSpeciesTypes: [1, 2, 3] })],
+    ['npc', party({ countSpeciesTypes: [1, 2], generation: 2 }, 2)],
+    ['npc', { battle: 'b1', mons: [mon3()], countSpeciesTypes: [1, 2, 3] }, 3],
+  ];
+}
+
+function readWave2(kind, input, gen) {
+  if (kind === 'event') return sanitize.cleanBattleEvent(input, gen);
+  if (kind === 'npc') {
+    const read = sanitize.cleanBattleParty(input, gen);
+    if (!read) return '(refused)';
+    return { countSpeciesTypes: orNil(read.countSpeciesTypes), trainerItems: orNil(read.trainerItems) };
+  }
+  return undefined;
+}
+
+/*
+ * K23, the hubs: `countSpeciesTypes` handed to the Gold referee's Turn.create
+ * on the NPC seat dealt the whole party, and nowhere else. Twin of
+ * remaining_gaps_wave2_hub in the Lua driver, whose header argues each fight.
+ */
+function runWave2Hub() {
+  const count = (entry) => ({ countSpeciesTypes: orNil(entry.countSpeciesTypes) });
+  const stated = { countSpeciesTypes: [2, 0] };
+  return {
+    goldOneSeat: factsFight(2, 'coop_npc', { sideB: stated, extra: count }),
+    goldTwoSeats: factsFight(2, 'coop_npc', { humans: 2, sideB: stated, extra: count }),
+    goldHumanClaims: factsFight(2, 'coop_npc', { sideA: stated, extra: count }),
+    goldBadCount: factsFight(2, 'coop_npc', { sideB: { countSpeciesTypes: [1, 2, 3] }, extra: count }),
+    redIgnores: factsFight(1, 'coop_npc', { sideB: { countSpeciesTypes: [1, 2, 3] }, extra: count }),
+  };
+}
+
+function runRemaining() {
+  const blackbelt = { uses: 2, chance: 32, item: 'X_ATTACK' };
+  const gold4 = {
+    trainerItems: ['FULL_HEAL', 'POTION'], aiFlags: 0, itemSwitch: 513, baseReward: 0,
+  };
+  return [
+    {
+      name: 'remaining_gaps_dialect',
+      result: remainingGaps().map(([kind, input, gen]) => ({ kind, got: orNil(readRemaining(kind, input, gen)) })),
+    },
+    {
+      name: 'remaining_gaps_hub_fields',
+      result: {
+        redClass: factsFight(1, 'coop_npc', { sideB: { name: 'BLACKBELT', aiClass: blackbelt } }),
+        redTwoSeats: factsFight(1, 'coop_npc', {
+          humans: 2, sideB: { aiClass: { uses: 3, chance: 64, switch: true } },
+        }),
+        redHumanClaims: factsFight(1, 'coop_npc', { sideA: { aiClass: blackbelt, ...gold4 } }),
+        redBadClass: factsFight(1, 'coop_npc', { sideB: { aiClass: { uses: 0 } } }),
+        redIgnoresGold: factsFight(1, 'coop_npc', { sideB: gold4 }),
+        redWild: factsFight(1, 'wild', { rules: { battleType: 4 }, foe: { weight: 300 } }),
+        goldFacts: factsFight(2, 'coop_npc', {
+          rules: { battleType: 0 }, sideB: { name: 'TWINS AMY & MAY', aiClass: blackbelt, ...gold4 },
+        }),
+        goldTwoSeats: factsFight(2, 'coop_npc', { humans: 2, sideB: gold4 }),
+        goldHumanClaims: factsFight(2, 'coop_npc', { sideA: gold4 }),
+        goldBadItems: factsFight(2, 'coop_npc', { sideB: { trainerItems: ['A', 'B', 'C'] } }),
+        goldWildFish: factsFight(2, 'wild', { rules: { battleType: 4 }, foe: { weight: 4600 } }),
+        goldWildPlain: factsFight(2, 'wild'),
+        goldBadType: factsFight(2, 'wild', { rules: { battleType: 256 } }),
+        caretNames: factsFight(1, 'coop_npc', {
+          names: ['^aANN'], sideB: { name: '^bLASS' }, foe: { species: '^aFOE' },
+        }),
+      },
+    },
+    {
+      name: 'remaining_gaps_wave2_dialect',
+      result: remainingWave2().map(([kind, input, gen]) => ({ kind, got: orNil(readWave2(kind, input, gen)) })),
+    },
+    { name: 'remaining_gaps_wave2_hub', result: runWave2Hub() },
   ];
 }
 
 function runLua() {
-  const luajit = spawnSync('luajit', [DRIVER, ROOT], { encoding: 'utf8' });
+  const luajit = spawnSync('luajit', [DRIVER, ROOT],
+    { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
   if (luajit.error || luajit.status !== 0) return null;
   return JSON.parse(luajit.stdout);
 }
@@ -756,7 +4040,7 @@ const fixture = fs.existsSync(FIXTURE)
 const byName = (runs) => new Map(runs.map((entry) => [entry.name, entry]));
 
 test('the hub parity scenarios are all present on both sides', () => {
-  assert.ok(jsRuns.length >= 11, 'the JS half built every scenario');
+  assert.ok(jsRuns.length >= 17, 'the JS half built every scenario');
   assert.ok(
     luaRuns || fixture,
     'neither luajit nor tests/fixtures/hub_protocol_parity.json is available -- '

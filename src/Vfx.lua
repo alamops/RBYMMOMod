@@ -119,6 +119,14 @@ M.PALETTES = {
   DEBUFF   = palette({ 0.88, 0.84, 0.95 },    { 0.55, 0.48, 0.73 }, { 0.27, 0.22, 0.41 }),
   REVIVE   = palette({ 1, 1, 0.90 },          { 1, 0.90, 0.42 },    { 0.85, 0.62, 0.12 }),
   ESCAPE   = palette({ 1, 1, 1 },             { 0.86, 0.86, 0.90 }, { 0.55, 0.55, 0.62 }),
+
+  -- Nor these: Gen 3's general animations (M.GENERAL_LOOK3) -- a monster's
+  -- cold sweat, the Safari's bait, a POKeBLOCK, an anger mark.  Original
+  -- colours, picked for what the clip shows, not taken from the cart.
+  FEAR      = palette({ 0.90, 1, 1 },         { 0.36, 0.78, 0.84 }, { 0.12, 0.42, 0.52 }),
+  BAIT      = palette({ 1, 0.93, 0.78 },      { 0.80, 0.58, 0.32 }, { 0.48, 0.32, 0.16 }),
+  POKEBLOCK = palette({ 1, 0.92, 0.96 },      { 0.94, 0.48, 0.70 }, { 0.62, 0.20, 0.42 }),
+  ANGER     = palette({ 1, 0.86, 0.80 },      { 0.92, 0.22, 0.18 }, { 0.56, 0.08, 0.08 }),
 }
 
 M.DEFAULT_PALETTE = "NORMAL"
@@ -812,6 +820,11 @@ M.CHARGE_STYLE = {
   SKULL_BASH   = { style = "shine", palette = "NORMAL", delivery = "self", scale = 1.10 },
   RAZOR_WIND   = { style = "gust", palette = "NORMAL", delivery = "self", scale = 1.10 },
   SKY_ATTACK   = { style = "shine", palette = "FLYING", delivery = "self", scale = 1.20 },
+  -- Gen 3's two new semi-invulnerable turns. Names no Gen 1 or Gen 2 move
+  -- carries, so these two rows are dead weight on those carts rather than a
+  -- change to anything they draw.
+  DIVE         = { style = "splash", palette = "WATER", delivery = "self", scale = 1.15 },
+  BOUNCE       = { style = "gust", palette = "FLYING", delivery = "self", scale = 1.15 },
 }
 
 -- Moves that fire once per hit of a multi-hit or that a client sees twice in a
@@ -1100,6 +1113,131 @@ function M.forStatus(status)
     entry.intensity or 0.8, entry.duration)
 end
 
+-- The look of a status animation the Red referee names by its battle_anims
+-- id (BattleSim Turn `_statusAnim`, wave 5): the sleeping monster's SLP_ANIM /
+-- SLP_PLAYER_ANIM (pokered CheckPlayerStatusConditions / CheckEnemyStatus
+-- Conditions, every turn it sleeps), the confused one's CONF_ANIM /
+-- CONF_PLAYER_ANIM (behind IsConfusedText), and BURN_PSN_ANIM, the residual
+-- burn or poison tick (HandlePoisonBurnLeechSeed) -- worn in the colours of
+-- the condition doing it, `status` (the seat's token: BRN, else poison).
+-- The arena draws these where the classic page plays the engine's clip.  nil
+-- for any other id.
+local STATUS_ANIM_LOOK = {
+  SLP_ANIM = "SLP", SLP_PLAYER_ANIM = "SLP",
+  CONF_ANIM = "confusion", CONF_PLAYER_ANIM = "confusion",
+}
+
+-- ...and every other cart animation the Red / Gold referees name by id
+-- (contract K20 of docs/plans/gen12-referee-remaining-gaps.md): one row per
+-- id, `{ style, palette, scale?, intensity? }`, worn on the seat the `anim`
+-- event names.  A string row borrows a condition's look (`M.forStatus`).
+-- Ids the classic page plays through the engine's own clip and the arena has
+-- no particle for are simply absent; an id on no list is skipped (nil), as
+-- every unknown `_ANIM` always has been.
+--
+--   Red (pokered constants/move_constants.asm, data/moves/animations.asm):
+--     STATUS_AFFECTED_ANIM  EnemyFlashAnim, SE_SHOW_MON_PIC -- a FLY or
+--                           charge cut short (or released) brings the
+--                           monster back into view (core.asm
+--                           `.FlyOrChargeEffect`); the arena's emerge is the
+--                           screens' (`clearVanishAt`), this is the shimmer
+--                           on it.
+--     XSTATITEM_ANIM        XStatItemAnim, SE_SPIRAL_BALLS_INWARD -- an X
+--                           item on the user's seat: a gathering shimmer in
+--                           the stat board's colours (the `stat` event behind
+--                           it draws the arrows).  Also ChargeEffect's and
+--                           BideEffect's own turn-1 clip (contract K22), with
+--                           no item behind it: the same plain look, and the
+--                           screens' bag-look takeover (`dropItemLook`) runs
+--                           only behind an `item` event on that seat.
+--     BLOCKBALL_ANIM        TossBallAnimation's `.BlockBall`, after TOSS_ANIM
+--                           in a trainer fight: the trainer knocks the ball
+--                           away -- a small knock where it was stopped (the
+--                           screens wear it on the seat the ball was thrown
+--                           at, and close the throw).
+--     SLIDE_DOWN_ANIM       ChargeEffect's DIG turn: the monster sinks out of
+--                           sight -- a ground rumble under the screens' dig
+--                           vanish, which STATUS_AFFECTED_ANIM or DIG's
+--                           release undoes, as FLY's.
+--     SHRINKING_SQUARE_ANIM ThrashPetalDanceEffect's on a THRASH / PETAL
+--                           DANCE's first turn (ShrinkingSquareAnim: the
+--                           light-screen palette and
+--                           SUBANIM_0_CIRCLE_1_SQUARE_CLOSING over the user):
+--                           a short pulse closing in on the user's seat.
+--   ENEMY_HUD_SHAKE_ANIM and SHAKE_SCREEN_ANIM (PoisonEffect's and
+--   FreezeBurnParalyzeEffect's on a side-effect status) are motion, not
+--   particles: the screens shake a seat's plate or the whole field for them
+--   (MediatedBattle / CoopBattle `startAnim`, Battlefield.fxPlateShake), and
+--   they have no row here.  Nor do the slow / light screen shakes the cart's
+--   PlayApplyingAttackAnimation runs behind them and behind the square
+--   (MediatedBattle.followShake, Battlefield.FX_FOLLOW_SHAKE).
+--   Gold (pokecrystal / pokegold constants/move_constants.asm, ANIM_<X> sent
+--   as <X>_ANIM): the residual and condition clips of engine/battle/core.asm
+--   (ResidualDamage's PSN / BRN / SAP / IN_NIGHTMARE, HandleWeather's
+--   IN_SANDSTORM, HandleWrap's IN_WHIRLPOOL, the attraction check's IN_LOVE,
+--   the thaw / paralysis checks' FRZ / PAR), and the after-anims
+--   (BATTLE_AFTERANIMS: MISS, BattleCommand_StatDownAnim's ENEMY_STAT_DOWN /
+--   WOBBLE pair, the DAMAGE pair, HIT_CONFUSION; PLAYER_STAT_DOWN, which no
+--   routine plays, keeps the drop's look).  The curse tick plays
+--   ANIM_IN_NIGHTMARE on the carts; UNDER_CURSE is kept for a referee that
+--   names it apart.
+local POISON_NAME = "PSN"
+M.CART_ANIM_LOOK = {
+  -- Red
+  STATUS_AFFECTED_ANIM = { style = "sparkle", palette = "NORMAL", scale = 0.75, intensity = 0.6 },
+  XSTATITEM_ANIM       = { style = "sparkle", palette = "BUFF",   scale = 0.9,  intensity = 0.9 },
+  BLOCKBALL_ANIM       = { style = "impact",  palette = "NORMAL", scale = 0.6,  intensity = 0.7 },
+  SLIDE_DOWN_ANIM      = { style = "quake",   palette = "GROUND", scale = 0.9,  intensity = 0.85 },
+  SHRINKING_SQUARE_ANIM = { style = "psi",    palette = "NORMAL", scale = 0.7,  intensity = 0.75,
+                            duration = 0.35 },
+  -- Gold: the conditions
+  BRN_ANIM = "BRN", PSN_ANIM = POISON_NAME, FRZ_ANIM = "FRZ", PAR_ANIM = "PAR",
+  SAP_ANIM             = { style = "swarm",   palette = "GRASS" },
+  IN_LOVE_ANIM         = { style = "shine",   palette = "FAIRY" },
+  IN_SANDSTORM_ANIM    = { style = "rock",    palette = "ROCK" },
+  IN_NIGHTMARE_ANIM    = { style = "shadow",  palette = "GHOST" },
+  IN_WHIRLPOOL_ANIM    = { style = "splash",  palette = "WATER" },
+  UNDER_CURSE_ANIM     = { style = "spirit",  palette = "GHOST" },
+  -- Gold: the after-anims
+  MISS_ANIM            = { style = "gust",    palette = "ESCAPE", scale = 0.6, intensity = 0.5 },
+  ENEMY_STAT_DOWN_ANIM  = { style = "debuff", palette = "DEBUFF", scale = 1, intensity = 0.95 },
+  WOBBLE_ANIM           = { style = "debuff", palette = "DEBUFF", scale = 1, intensity = 0.95 },
+  PLAYER_STAT_DOWN_ANIM = { style = "debuff", palette = "DEBUFF", scale = 1, intensity = 0.95 },
+  ENEMY_DAMAGE_ANIM    = { style = "impact",  palette = "NORMAL", scale = 0.85, intensity = 0.8 },
+  PLAYER_DAMAGE_ANIM   = { style = "impact",  palette = "NORMAL", scale = 0.85, intensity = 0.8 },
+  HIT_CONFUSION_ANIM   = { style = "impact",  palette = "PSYCHIC" },
+}
+
+function M.forStatusAnim(anim, status)
+  if type(anim) ~= "string" then return nil end
+  local key = STATUS_ANIM_LOOK[anim]
+  if anim == "BURN_PSN_ANIM" then
+    key = (status == "BRN" or status == "burn") and "BRN"
+      or ((status == "TOX" or status == "toxic") and "TOX" or "PSN")
+  end
+  if not key then
+    local look = M.CART_ANIM_LOOK[anim]
+    if type(look) == "string" then
+      key = look
+      -- A Gold poison tick on a badly poisoned monster wears TOXIC's look.
+      if look == POISON_NAME and (status == "TOX" or status == "toxic") then key = "TOX" end
+    elseif type(look) == "table" then
+      return specOf(look.style, look.palette, "burst", look.scale or 0.85,
+        look.intensity or 0.8, look.duration)
+    else
+      -- A `_PLAYER_` variant of an id listed once (`<X>_PLAYER_ANIM`, the
+      -- naming K20 gives a clip the cart plays from the player's side) wears
+      -- the same look as `<X>_ANIM`.
+      local base = anim:match("^(.+)_PLAYER_ANIM$")
+      if base and M.CART_ANIM_LOOK[base .. "_ANIM"] ~= nil then
+        return M.forStatusAnim(base .. "_ANIM", status)
+      end
+    end
+  end
+  if not key then return nil end
+  return M.forStatus(key)
+end
+
 -- A stat stage moving: arrows up for a rise, arrows down for a drop, and the
 -- count of them is the size of the change (a Growl is one arrow, a Screech is
 -- two). `delta` is the stage change the `stat` event carried.
@@ -1122,6 +1260,664 @@ function M.forImpact(spec)
   local pal = (type(spec) == "table" and spec.palette) or M.DEFAULT_PALETTE
   if not M.PALETTES[pal] then pal = M.DEFAULT_PALETTE end
   return specOf("impact", pal, "burst", 0.85, 0.8, nil)
+end
+
+-- ------------------------------------------------------------------
+-- Gen 3 (FireRed / LeafGreen / Emerald)
+-- ------------------------------------------------------------------
+--
+-- **A separate door, never a change to the Gen 1 / Gen 2 one.** A Gen 3 move
+-- arrives as a sheet row (docs/plans/gen3-battle-sheet.md, C4): the type is a
+-- pret `TYPE_*` *number*, not a registry id string; the effect is a pret
+-- `EFFECT_*` number; the target is a `MOVE_TARGET_*` bit mask. None of those
+-- mean anything to `M.forMove`, and teaching it to read numbers would change
+-- what it answers for a Gen 1 caller that ever passed one. So Gen 3 has its own
+-- entry points -- `forMove3`, `forItem3` -- and its own override tables, and
+-- every table above keeps answering exactly what it answered before.
+--
+-- **Still never nil, and never a blank.** 354 moves resolve like this, in
+-- order: an explicit Gen 3 entry (`MOVE_STYLE3`), else the Gen 1 / Gen 2 entry
+-- for the same move (the ROM names Gen 3 carries for the classic moves are the
+-- old twelve-character spellings -- SOLARBEAM, SELFDESTRUCT -- so those rows
+-- already match; `GEN3_MOVE_ALIAS` folds the pret constant spellings a caller
+-- may hold instead), else the move's *shape* read off its effect and target
+-- (a self boost plays on the user, a stat drop is a falling-arrow gesture at the
+-- target, a spread move plays across the field), else its type. A move this
+-- file has never heard of still wears its type's colours at its power's weight.
+--
+-- The numbers below are pret's own enums (include/constants/pokemon.h TYPE_*,
+-- battle_move_effects.h EFFECT_*, battle.h MOVE_TARGET_*): public constants,
+-- the same ones src/BattleSim3 branches on. No ROM value is read or kept here.
+
+-- pret TYPE_*: 0..17, MYSTERY (???, Curse's type) at 9.
+M.GEN3_TYPES = {
+  [0] = "NORMAL", [1] = "FIGHTING", [2] = "FLYING", [3] = "POISON",
+  [4] = "GROUND", [5] = "ROCK", [6] = "BUG", [7] = "GHOST", [8] = "STEEL",
+  [9] = "MYSTERY", [10] = "FIRE", [11] = "WATER", [12] = "GRASS",
+  [13] = "ELECTRIC", [14] = "PSYCHIC", [15] = "ICE", [16] = "DRAGON",
+  [17] = "DARK",
+}
+
+-- The type key a Gen 3 row names: a pret number, or a name the caller already
+-- resolved (the cart's own gTypeNames text is upper-case and one word, so it is
+-- already a key). nil for anything else.
+function M.gen3TypeKey(value)
+  local n = tonumber(value)
+  if n then return M.GEN3_TYPES[floor(n)] end
+  if type(value) == "string" and value ~= "" then return M.typeKey(value) end
+  return nil
+end
+
+-- pret constant spellings -> the catalogue's key for the same move. The cart's
+-- own move names are the twelve-character ones the tables above already use;
+-- these are only the ones a caller holding a pret `MOVE_*` token would spell
+-- differently.
+M.GEN3_MOVE_ALIAS = {
+  SOLAR_BEAM = "SOLARBEAM", SELF_DESTRUCT = "SELFDESTRUCT",
+  POISON_POWDER = "POISONPOWDER", ANCIENT_POWER = "ANCIENTPOWER",
+  SONIC_BOOM = "SONICBOOM", SOFT_BOILED = "SOFTBOILED",
+  SMOKE_SCREEN = "SMOKESCREEN", CONVERSION_2 = "CONVERSION2",
+  DRAGON_BREATH = "DRAGONBREATH", FEATHER_DANCE = "FEATHERDANCE",
+  GRASS_WHISTLE = "GRASSWHISTLE",
+}
+
+-- The catalogue key for a Gen 3 move id: the engine's own constant name
+-- (Moves.constName upper-cases the ROM name and turns spaces and hyphens into
+-- underscores, so WILL-O-WISP is WILL_O_WISP), folded through the alias table.
+-- A display name a caller passes instead is folded the same way.
+function M.moveKey3(moveId)
+  local id = upperId(moveId)
+  if not id then return nil end
+  id = id:gsub("[%s%-]+", "_")
+  return M.GEN3_MOVE_ALIAS[id] or id
+end
+
+-- The moves Gen 3 added (and the few old ones whose Gen 3 shape the type
+-- misreads). Same field rules as MOVE_STYLE: a field left out falls through.
+M.MOVE_STYLE3 = {
+  -- ------- beams and streams
+  HYDRO_CANNON = beam(1.30),
+  BLAST_BURN   = { style = "ember", delivery = "beam", scale = 1.30 },
+  OVERHEAT     = { style = "ember", delivery = "beam", scale = 1.25 },
+  SIGNAL_BEAM  = { style = "sparkle", palette = "BUG", delivery = "beam", scale = 1.00 },
+  PSYCHO_BOOST = { style = "psi", delivery = "beam", scale = 1.30 },
+  DRAGONBREATH = { style = "ember", palette = "DRAGON", delivery = "beam", scale = 1.00 },
+  LUSTER_PURGE = { style = "psi", delivery = "projectile", scale = 1.10 },
+  MIST_BALL    = { style = "psi", delivery = "projectile", scale = 1.10 },
+
+  -- ------- across the whole field
+  ERUPTION     = { style = "blast", palette = "FIRE", delivery = "field", scale = 1.50,
+                   intensity = 1.3 },
+  WATER_SPOUT  = { style = "splash", palette = "WATER", delivery = "field", scale = 1.45,
+                   intensity = 1.2 },
+  HEAT_WAVE    = { style = "ember", palette = "FIRE", delivery = "field", scale = 1.35 },
+  MUDDY_WATER  = { style = "splash", palette = "GROUND", delivery = "field", scale = 1.35 },
+  HYPER_VOICE  = { style = "note", palette = "NORMAL", delivery = "field", scale = 1.25 },
+  HAIL         = { style = "shard", palette = "ICE", delivery = "field", scale = 1.45,
+                   duration = 0.60 },
+  MUD_SPORT    = { style = "quake", palette = "GROUND", delivery = "field" },
+  WATER_SPORT  = { style = "splash", palette = "WATER", delivery = "field" },
+  TEETER_DANCE = { style = "psi", palette = "NORMAL", delivery = "field" },
+  AROMATHERAPY = { style = "cure", palette = "GRASS", delivery = "field" },
+  FRENZY_PLANT = { style = "leaf", palette = "GRASS", scale = 1.40, intensity = 1.3 },
+  SHEER_COLD   = { style = "shard", palette = "ICE", scale = 1.45, intensity = 1.3 },
+
+  -- ------- thrown, not swung
+  WEATHER_BALL = { delivery = "projectile", scale = 1.05 },
+  SHOCK_WAVE   = { style = "spark", delivery = "projectile" },
+  WATER_PULSE  = { style = "splash", delivery = "projectile" },
+  ROCK_TOMB    = { style = "rock", delivery = "projectile", scale = 1.10 },
+  ROCK_BLAST   = { style = "rock", delivery = "projectile" },
+  BULLET_SEED  = { style = "leaf", delivery = "projectile", scale = 0.85 },
+  ICICLE_SPEAR = { style = "shard", delivery = "projectile", scale = 0.90 },
+  MUD_SHOT     = { style = "quake", palette = "GROUND", delivery = "projectile" },
+  AIR_CUTTER   = { style = "gust", delivery = "projectile" },
+  ICE_BALL     = { style = "shard", delivery = "projectile" },
+  SPIT_UP      = { style = "blast", palette = "NORMAL", delivery = "projectile" },
+  SEED_BOMB    = { style = "leaf", delivery = "projectile" },
+  WILL_O_WISP  = { style = "ember", palette = "GHOST", delivery = "projectile",
+                   intensity = 0.8 },
+  EXTRASENSORY = { style = "psi", delivery = "projectile" },
+  DOOM_DESIRE  = { style = "shine", palette = "STEEL", delivery = "self", scale = 1.20 },
+
+  -- ------- blows with a look of their own
+  AERIAL_ACE   = { style = "gust", palette = "FLYING", scale = 1.10 },
+  SKY_UPPERCUT = { style = "impact", palette = "FIGHTING", scale = 1.15 },
+  FOCUS_PUNCH  = { style = "impact", palette = "FIGHTING", scale = 1.30, intensity = 1.2 },
+  SUPERPOWER   = { style = "impact", palette = "FIGHTING", scale = 1.30 },
+  BRICK_BREAK  = { style = "impact", palette = "FIGHTING", scale = 1.10 },
+  METEOR_MASH  = { style = "impact", palette = "STEEL", scale = 1.15 },
+  SHADOW_PUNCH = { style = "impact", palette = "GHOST" },
+  ASTONISH     = { style = "spirit", palette = "GHOST" },
+  KNOCK_OFF    = { style = "impact", palette = "DARK" },
+  FAKE_OUT     = { style = "impact", palette = "NORMAL", scale = 0.90 },
+  BLAZE_KICK   = { style = "ember", palette = "FIRE", scale = 1.10 },
+  POISON_FANG  = { style = "impact", palette = "POISON" },
+  DRAGON_CLAW  = { style = "impact", palette = "DRAGON", scale = 1.10 },
+  LEAF_BLADE   = { style = "leaf", palette = "GRASS", scale = 1.15 },
+  SAND_TOMB    = { style = "quake", palette = "GROUND" },
+
+  -- ------- acts on the user
+  CALM_MIND    = selfBuff("psi", "PSYCHIC"),
+  BULK_UP      = selfBuff("rage", "FIGHTING"),
+  DRAGON_DANCE = selfBuff("rage", "DRAGON"),
+  IRON_DEFENSE = selfBuff("shine", "STEEL"),
+  COSMIC_POWER = selfBuff("sparkle", "PSYCHIC"),
+  TAIL_GLOW    = selfBuff("shine", "BUG"),
+  HOWL         = selfBuff("note", "BUFF"),
+  CHARGE       = selfBuff("spark", "ELECTRIC"),
+  STOCKPILE    = selfBuff("rage", "BUFF"),
+  CAMOUFLAGE   = selfBuff("puff", "NORMAL"),
+  WISH         = selfBuff("sparkle", "HEAL"),
+  INGRAIN      = selfBuff("leaf", "GRASS"),
+  SLACK_OFF    = selfBuff("heal", "HEAL"),
+  SWALLOW      = selfBuff("heal", "HEAL"),
+  REFRESH      = selfBuff("cure", "CURE"),
+  MAGIC_COAT   = selfBuff("shine", "PSYCHIC"),
+  SNATCH       = selfBuff("shadow", "DARK"),
+  GRUDGE       = selfBuff("spirit", "GHOST"),
+  IMPRISON     = selfBuff("psi", "PSYCHIC"),
+  FOLLOW_ME    = selfBuff("sparkle", "NORMAL"),
+  HELPING_HAND = selfBuff("buff", "BUFF"),
+  RECYCLE      = selfBuff("sparkle", "NORMAL"),
+  NATURE_POWER = selfBuff("sparkle", "GRASS"),
+  ASSIST       = selfBuff("sparkle", "NORMAL"),
+
+  -- ------- gestures at the target
+  UPROAR       = { style = "note", delivery = "projectile" },
+  METAL_SOUND  = { style = "note", palette = "STEEL", delivery = "projectile" },
+  GRASSWHISTLE = { style = "note", palette = "GRASS", delivery = "projectile" },
+  YAWN         = { style = "note", palette = "PSYCHIC", delivery = "projectile" },
+  FAKE_TEARS   = { style = "splash", palette = "WATER", delivery = "projectile",
+                   intensity = 0.8 },
+  TICKLE       = { style = "sparkle", palette = "NORMAL", delivery = "projectile" },
+  FEATHERDANCE = { style = "gust", palette = "FLYING", delivery = "projectile" },
+  TAUNT        = { style = "shadow", palette = "DARK", delivery = "projectile" },
+  TORMENT      = { style = "shadow", palette = "DARK", delivery = "projectile" },
+  FLATTER      = { style = "sparkle", palette = "DARK", delivery = "projectile" },
+  MEMENTO      = { style = "spirit", palette = "DARK", delivery = "projectile" },
+  BLOCK        = { style = "shadow", palette = "NORMAL" },
+  ODOR_SLEUTH  = { style = "psi", palette = "NORMAL" },
+  SKILL_SWAP   = { style = "psi", palette = "PSYCHIC", delivery = "projectile" },
+  ROLE_PLAY    = { style = "psi", palette = "PSYCHIC", delivery = "projectile" },
+  TRICK        = { style = "sparkle", palette = "PSYCHIC", delivery = "projectile" },
+}
+
+-- pret EFFECT_* numbers the shape rules below read.
+local E3_SELF_BOOST = {
+  [10] = true, [11] = true, [12] = true, [13] = true, [14] = true, [15] = true,
+  [16] = true, [50] = true, [51] = true, [52] = true, [53] = true, [54] = true,
+  [55] = true, [56] = true, [47] = true, [142] = true, [206] = true, [208] = true,
+  [211] = true, [212] = true, [156] = true, [108] = true,
+}
+local E3_STAT_DROP = {
+  [18] = true, [19] = true, [20] = true, [21] = true, [22] = true, [23] = true,
+  [24] = true, [58] = true, [59] = true, [60] = true, [61] = true, [62] = true,
+  [63] = true, [64] = true, [205] = true,
+}
+local E3_SELF_HEAL = {
+  [32] = true, [37] = true, [132] = true, [133] = true, [134] = true,
+  [157] = true, [162] = true, [179] = true,
+}
+-- A condition inflicted without damage: the look of that condition, thrown.
+local E3_INFLICT = {
+  [1] = "SLP", [33] = "TOX", [49] = "confusion", [66] = "PSN", [67] = "PAR",
+  [167] = "BRN", [187] = "SLP", [118] = "confusion", [166] = "confusion",
+}
+-- MOVE_TARGET_* bits.
+local TARGET_USER = 16
+local TARGET_FOES_AND_ALLY = 32
+
+-- One Gen 3 move's look. `row` is the C4 move row (or the engine's own
+-- Moves.get record): `type` a pret number, `power`, `effect`, `target`, and an
+-- optional `category`. `typeName` wins over the row's type when given. Never
+-- nil.
+function M.forMove3(moveId, row, typeName)
+  local id = M.moveKey3(moveId)
+  row = type(row) == "table" and row or {}
+  local typeId = M.gen3TypeKey(typeName) or M.gen3TypeKey(row.type)
+
+  local out = typeSpec(typeId)
+  local power = num(row.power, 0)
+  local status = row.category == "status" or (row.category == nil and power <= 0)
+  if status then
+    out.intensity = 0.75
+    out.scale = 0.90
+  else
+    local band = M.powerBand(power)
+    if band then
+      out.intensity = band.intensity
+      out.scale = band.scale
+    end
+  end
+
+  -- The move's shape, for a move nobody named: read off what it does.
+  local over = id and (M.MOVE_STYLE3[id] or M.MOVE_STYLE[id]) or nil
+  if not over then
+    local effect = floor(num(row.effect, -1))
+    local target = floor(num(row.target, 0))
+    local inflicted = status and E3_INFLICT[effect] or nil
+    if status and E3_SELF_HEAL[effect] then
+      out.style, out.palette, out.delivery = "heal", "HEAL", "self"
+    elseif status and (E3_SELF_BOOST[effect] or target == TARGET_USER) then
+      out.style, out.palette, out.delivery = "buff", "BUFF", "self"
+    elseif status and E3_STAT_DROP[effect] then
+      out.style, out.palette, out.delivery = "debuff", "DEBUFF", "projectile"
+    elseif inflicted then
+      local look = M.STATUS_STYLE[inflicted]
+      if look then
+        out.style, out.palette = look.style, look.palette
+      end
+      out.delivery = "projectile"
+    elseif not status and target == TARGET_FOES_AND_ALLY then
+      out.delivery = "field"
+      out.scale = math.max(out.scale or 1, 1.30)
+    end
+  else
+    if over.style then out.style = over.style end
+    if over.palette then out.palette = over.palette end
+    if over.delivery then out.delivery = over.delivery end
+    if over.scale then out.scale = over.scale end
+    if over.intensity then out.intensity = over.intensity end
+    if over.duration then out.duration = over.duration end
+  end
+  if not M.DELIVERIES[out.delivery] then out.delivery = "burst" end
+  if not M.STYLES[out.style] then out.style = M.DEFAULT_STYLE end
+  if not M.PALETTES[out.palette] then out.palette = M.DEFAULT_PALETTE end
+  return out
+end
+
+-- The charge-turn look for a Gen 3 two-turn move (Dig, Fly, Dive, Bounce,
+-- SolarBeam, Skull Bash, Razor Wind, Sky Attack), or nil for a move that has
+-- none. Through the alias table, so a pret spelling finds the same row.
+function M.chargeStyle3(moveId)
+  local id = M.moveKey3(moveId)
+  if not id then return nil end
+  local entry = M.CHARGE_STYLE[id]
+  if not entry then return nil end
+  return specOf(entry.style, entry.palette, entry.delivery or "self",
+    entry.scale or 1, entry.intensity or 1, entry.duration)
+end
+
+-- The Gen 3 bag, by the names the cart prints (PARLYZ HEAL, ENERGYPOWDER,
+-- POKé DOLL...) folded to keys. Separate from ITEM_STYLE for the same reason
+-- the move table is: several of these names are Gold's too (MOOMOO_MILK,
+-- BERRY_JUICE, ENERGY_ROOT...), and a look added for Gen 3 must not start
+-- drawing on a Gold fight that has never had one.
+M.ITEM_STYLE3 = {
+  PARALYZE_HEAL = { style = "cure", palette = "ELECTRIC" },
+  MOOMOO_MILK   = { style = "heal", palette = "HEAL" },
+  ENERGYPOWDER  = { style = "heal", palette = "GRASS" },
+  ENERGY_POWDER = { style = "heal", palette = "GRASS" },
+  ENERGY_ROOT   = { style = "heal", palette = "GRASS", scale = 1.15 },
+  HEAL_POWDER   = { style = "cure", palette = "GRASS" },
+  REVIVAL_HERB  = { style = "revive", palette = "GRASS" },
+  BERRY_JUICE   = { style = "heal", palette = "HEAL", scale = 0.90 },
+  LAVA_COOKIE   = { style = "cure", palette = "FIRE" },
+  SACRED_ASH    = { style = "revive", palette = "FIRE", scale = 1.30, intensity = 1.3 },
+  BLUE_FLUTE    = { style = "note", palette = "WATER" },
+  YELLOW_FLUTE  = { style = "note", palette = "ELECTRIC" },
+  RED_FLUTE     = { style = "note", palette = "FIRE" },
+  POKE_FLUTE    = { style = "note", palette = "CURE", delivery = "field",
+                    scale = 1.3, duration = 0.60 },
+  FLUFFY_TAIL   = { style = "puff", palette = "ESCAPE", scale = 1.2 },
+  ORAN_BERRY    = { style = "heal", palette = "HEAL", scale = 0.85 },
+  SITRUS_BERRY  = { style = "heal", palette = "HEAL" },
+  CHERI_BERRY   = { style = "cure", palette = "ELECTRIC" },
+  CHESTO_BERRY  = { style = "cure", palette = "PSYCHIC" },
+  PECHA_BERRY   = { style = "cure", palette = "POISON" },
+  RAWST_BERRY   = { style = "cure", palette = "FIRE" },
+  ASPEAR_BERRY  = { style = "cure", palette = "ICE" },
+  LEPPA_BERRY   = { style = "sparkle", palette = "CURE" },
+  PERSIM_BERRY  = { style = "cure", palette = "PSYCHIC" },
+  LUM_BERRY     = { style = "cure", palette = "CURE", intensity = 1.2 },
+}
+
+local ITEM_BALLS3 = {
+  POKE_BALL = true, GREAT_BALL = true, ULTRA_BALL = true, MASTER_BALL = true,
+  SAFARI_BALL = true, NET_BALL = true, DIVE_BALL = true, NEST_BALL = true,
+  REPEAT_BALL = true, TIMER_BALL = true, LUXURY_BALL = true, PREMIER_BALL = true,
+}
+
+-- "POKé DOLL" -> POKE_DOLL, "GUARD SPEC." -> GUARD_SPEC, "X ATTACK" -> X_ATTACK.
+function M.itemKey3(name)
+  if type(name) ~= "string" or name == "" then return nil end
+  local key = name:upper()
+    :gsub("\195\169", "E"):gsub("\195\137", "E")
+    :gsub("[%.']", ""):gsub("[%s%-]+", "_")
+    :gsub("^_+", ""):gsub("_+$", "")
+  if key == "" then return nil end
+  return key
+end
+
+-- A Gen 3 bag item's look, or nil (a ball -- the throw is its own flow -- or an
+-- item this table has never heard of, which plays nothing rather than a guess).
+-- `item` is the name the cart prints, or a pret-style key.
+function M.forItem3(item)
+  local id = M.itemKey3(item)
+  if id == nil or ITEM_BALLS3[id] then return nil end
+  local entry = M.ITEM_STYLE3[id] or M.ITEM_STYLE[id]
+  if not entry then return nil end
+  local out = specOf(entry.style, entry.palette, entry.delivery or "self",
+    entry.scale or 1, entry.intensity or 1, entry.duration)
+  if not M.DELIVERIES[out.delivery] then out.delivery = "self" end
+  if not M.STYLES[out.style] then out.style = M.DEFAULT_STYLE end
+  if not M.PALETTES[out.palette] then out.palette = M.DEFAULT_PALETTE end
+  return out
+end
+
+-- ------------------------------------------------------------------
+-- Gen 3's general animations (pret gBattleAnims_General)
+-- ------------------------------------------------------------------
+--
+-- The clips the Gen 3 referee names in an `anim` event for something that is
+-- not a move: the monster too scared to move and the GHOST's "Get out..."
+-- (pokefirered data/battle_scripts_1.s:3809 BattleScript_TooScaredToMove /
+-- :3815 BattleScript_GhostGetOutGetOut), the SILPH SCOPE's unveil (:3820),
+-- and the Safari Zone's throws and the wild monster's answer to them
+-- (pokefirered battle_scripts_2.s:211-227, pokeemerald battle_scripts_2.s:185
+-- BattleScript_ActionThrowPokeblock).  And the ones every fight can send
+-- (W3-UC3): a trap's per-turn squeeze (battle_scripts_1.s:3770
+-- BattleScript_WrapTurnDmg; em :3830), the FOCUS PUNCH user tightening its
+-- focus before anybody moves (:3652 BattleScript_FocusPunchSetUp; em :3712),
+-- and a FUTURE SIGHT or DOOM DESIRE landing two turns on (:3472 / :3475
+-- BattleScript_FutureAttackAnimate; em :3519 / :3522).  None is an order a
+-- trainer gave, so the screens play them quiet -- no callout, no lunge, no
+-- projectile leaving a move user -- and each wears the look below, read off
+-- the cart's own script (pokefirered / pokeemerald data/battle_anim_scripts.s,
+-- General_*) as far as the arena's vocabulary goes.
+--
+-- **A separate door again** (`forGeneral3`): `forMove` / `forMove3` /
+-- `forStatusAnim` answer exactly what they did, and `ROCK_THROW` is still the
+-- move ROCK THROW to all three -- pret's B_ANIM_ROCK_THROW shares its token,
+-- so only a Safari fight reads it as the general clip (`isGeneral3`).
+--
+-- A look is a list of **beats**, played together on the row's beat.  A beat
+-- is either a particle spec (style / palette / delivery / scale / intensity /
+-- duration, as every other look here) or a motion of the monster itself
+-- (`motion` -- Battlefield's seat modifiers `sway`, `nod`, `tremble`), and it
+-- says where it plays by the cart's own battler roles
+-- (AnimTask_SafariOrGhost_DecideAnimSides / AnimTask_SetAttackerTargetLeftPos
+-- fix them per clip, whoever the event names):
+--
+--   on   = "event"  the battler the event names (the script's BS_ATTACKER /
+--                   BS_OPPONENT1)
+--          "own"    the viewer's first seat (pret B_POSITION_PLAYER_LEFT)
+--          "foe"    the other side's first seat (B_POSITION_OPPONENT_LEFT)
+--   from = "trainer"  a thrown beat leaves the viewer's own trainer: in a
+--                     Safari (and the old man's tutorial) side a has no
+--                     battler, and the sprite at PLAYER_LEFT is the trainer's
+--                     back pic (pret battle_controller_safari.c) -- the arena
+--                     launches it from the trainer figure on our edge
+--                     (Battlefield `fromTrainer`)
+--   wait = 0..1      a motion beat's rest before it moves, as a fraction of
+--                    its own span: the monster sways once the bait has landed
+--                    (General_BaitThrow's `delay 50` before AnimTask_SwayMon)
+--
+-- `SAFARI_REACTION` is keyed by the referee's `amount`, pret's
+-- gBattleCommunication[MULTISTRING_CHOOSER] as AnimTask_SafariGetReaction
+-- reads it (B_MSG_MON_WATCHING 0, B_MSG_MON_ANGRY 1, B_MSG_MON_EATING 2; any
+-- other number is watching).  FireRed / LeafGreen only: Emerald's
+-- BattleScript_ActionWatchesCarefully plays no clip.  POKEBLOCK_THROW is
+-- Emerald's (B_ANIM_POKEBLOCK_THROW, the slot FireRed gives BAIT_THROW).
+--
+-- `TURN_TRAP` is keyed by the referee's `amount` too: the trapping move's
+-- number, which is what the cart hands the clip (battle_util.c:878
+-- ENDTURN_WRAP sets sB_ANIM_ARG1 to gBattleStruct->wrappedMove; em :1595), and
+-- the clip's own first task turns it into the look (`M.trapAnim3`,
+-- AnimTask_GetTrappedMoveAnimId).  No number, or any move but the four named,
+-- is BIND / WRAP's squeeze -- the script's own fallthrough (`goto
+-- Status_BindWrap`).  The four clips are FireRed's and Emerald's alike.
+
+-- Every name M.GENERAL_LOOK3 answers for; `"safari"` marks the one that is
+-- also a move's token, general on a Safari fight only (the wild monster there
+-- never uses a move).  The last four are no move's token (MOVE_FOCUS_PUNCH is
+-- FOCUS_PUNCH, MOVE_FUTURE_SIGHT is FUTURE_SIGHT), so general anywhere.
+M.GENERAL_ANIMS3 = {
+  MON_SCARED = true, GHOST_GET_OUT = true, SILPH_SCOPED = true,
+  BAIT_THROW = true, POKEBLOCK_THROW = true, SAFARI_REACTION = true,
+  ROCK_THROW = "safari",
+  TURN_TRAP = true, FOCUS_PUNCH_SETUP = true,
+  FUTURE_SIGHT_HIT = true, DOOM_DESIRE_HIT = true,
+}
+
+-- pret AnimTask_GetTrappedMoveAnimId (pokefirered battle_anim_special.c:2283,
+-- pokeemerald battle_anim_throw.c:2486): the trapping move's number -> the
+-- TRAP_ANIM_* the clip branches on (include/constants/battle_anim.h:
+-- TRAP_ANIM_BIND = TRAP_ANIM_WRAP 0, FIRE_SPIN 1, WHIRLPOOL 2, CLAMP 3,
+-- SAND_TOMB 4).  The keys are pret's public MOVE_* numbers
+-- (include/constants/moves.h, the same on both carts), as the BattleSim3
+-- tables are; nothing here is read from a ROM.
+M.TRAP_ANIMS3 = {
+  [83] = 1,   -- MOVE_FIRE_SPIN
+  [250] = 2,  -- MOVE_WHIRLPOOL
+  [128] = 3,  -- MOVE_CLAMP
+  [328] = 4,  -- MOVE_SAND_TOMB
+}
+
+-- The TRAP_ANIM_* for a trapping move's number; 0 (BIND / WRAP) for any other
+-- number and for none, as the cart's own `else` does.
+function M.trapAnim3(move)
+  local n = tonumber(move)
+  if not n then return 0 end
+  return M.TRAP_ANIMS3[floor(n)] or 0
+end
+
+-- Is `anim` one of Gen 3's general clips here?  `safari` is whether the fight
+-- is a Safari Zone one (where ROCK_THROW is B_ANIM_ROCK_THROW, not the move).
+function M.isGeneral3(anim, safari)
+  local entry = type(anim) == "string" and M.GENERAL_ANIMS3[anim] or nil
+  if entry == true then return true end
+  if entry == "safari" then return safari == true end
+  return false
+end
+
+local function motion(kind, on, span, wait)
+  return { motion = kind, on = on, duration = span, wait = wait }
+end
+
+M.GENERAL_LOOK3 = {
+  -- General_MonScared: the scared monster (DecideAnimSides 1 makes it the
+  -- target, PLAYER_LEFT) blends to a cold teal, sweat drops spray off it
+  -- (gSprayWaterDropletSpriteTemplate) and it shakes (AnimTask_ShakeMon2,
+  -- 2 px then 4) and stretches up.
+  MON_SCARED = {
+    { on = "own", style = "splash", palette = "FEAR", delivery = "self",
+      scale = 0.80, intensity = 0.65, duration = 0.70 },
+    motion("tremble", "own"),
+  },
+  -- General_GhostGetOut: the screen fades to the GHOST background (fadetobg
+  -- BG_GHOST) behind the GHOST (AnimTask_GhostGetOut on the attacker), then
+  -- the player's monster -- the target -- tints, sweats and shakes as above.
+  GHOST_GET_OUT = {
+    { on = "foe", style = "spirit", palette = "GHOST", delivery = "field",
+      scale = 1.00, intensity = 1.00, duration = 0.90 },
+    { on = "own", style = "splash", palette = "FEAR", delivery = "self",
+      scale = 0.80, intensity = 0.65, duration = 0.70 },
+    motion("tremble", "own", nil, 0.35),
+  },
+  -- General_SilphScoped: AnimTask_TransformMon on the GHOST (BS_OPPONENT1)
+  -- under SE_M_TELEPORT -- the TRANSFORM shimmer (MOVE_STYLE.TRANSFORM).
+  SILPH_SCOPED = {
+    { on = "event", style = "sparkle", palette = "PSYCHIC", delivery = "self",
+      scale = 1.10, intensity = 1.00, duration = 0.80 },
+  },
+  -- General_BaitThrow (DecideAnimSides 0: PLAYER_LEFT throws at
+  -- OPPONENT_LEFT): the bait arcs over (gSafariBaitSpriteTemplate) and, 50
+  -- frames on, the monster sways (AnimTask_SwayMon).
+  BAIT_THROW = {
+    { on = "foe", from = "trainer", style = "rock", palette = "BAIT",
+      delivery = "projectile", scale = 0.70, intensity = 0.55, duration = 0.80 },
+    motion("sway", "foe", 1.20, 0.40),
+  },
+  -- General_SafariRockThrow: the rock arcs over (gSafariRockTemplate) and
+  -- strikes (gBasicHitSplatSpriteTemplate, SE_M_DOUBLE_SLAP).
+  ROCK_THROW = {
+    { on = "foe", from = "trainer", style = "rock", palette = "ROCK",
+      delivery = "projectile", scale = 0.85, intensity = 0.85, duration = 0.80 },
+  },
+  -- Emerald's General_PokeblockThrow (AnimTask_SetAttackerTargetLeftPos 0):
+  -- the POKeBLOCK arcs over (gPokeblockSpriteTemplate), then the sway.
+  POKEBLOCK_THROW = {
+    { on = "foe", from = "trainer", style = "rock", palette = "POKEBLOCK",
+      delivery = "projectile", scale = 0.60, intensity = 0.50, duration = 0.80 },
+    motion("sway", "foe", 1.20, 0.40),
+  },
+  -- General_SafariReaction, on BS_OPPONENT1: watching carefully turns side to
+  -- side (AnimTask_RotateMonToSideAndRestore 16, +-96), angry pops two anger
+  -- marks (gAngerMarkSpriteTemplate), eating bobs twice (8, 136).
+  SAFARI_REACTION = {
+    [0] = { motion("sway", "foe") },
+    [1] = { { on = "foe", style = "shine", palette = "ANGER", delivery = "self",
+              scale = 0.75, intensity = 0.35, duration = 0.70 } },
+    [2] = { motion("nod", "foe") },
+  },
+  -- General_TurnTrap, by `M.trapAnim3`.  playanimation BS_ATTACKER with the
+  -- trapped monster as gBattlerAttacker (the end-of-turn loop's
+  -- gActiveBattler), and a general clip is launched with that one battler as
+  -- both ANIM_ATTACKER and ANIM_TARGET -- so every beat is on the battler the
+  -- event names, and nothing travels.  Each branch replays its move's own
+  -- effect, smaller, then the monster shakes (AnimTask_ShakeMon /
+  -- AnimTask_ShakeMon2 on ANIM_TARGET).
+  TURN_TRAP = {
+    -- [0] Status_BindWrap: two binding tendrils squeeze it
+    -- (gConstrictBindingSpriteTemplate), 10 frames on it shakes 2 px.
+    [0] = {
+      { on = "event", style = "gust", palette = "NORMAL", delivery = "self",
+        scale = 0.80, intensity = 0.70, duration = 0.60 },
+      motion("tremble", "event", nil, 0.25),
+    },
+    -- [1] Status_FireSpin: two FireSpinEffect rings of embers spiral up round
+    -- it (gFireSpinSpriteTemplate) as it shakes for 30 frames.
+    [1] = {
+      { on = "event", style = "ember", palette = "FIRE", delivery = "self",
+        scale = 0.85, intensity = 0.80, duration = 0.70 },
+      motion("tremble", "event", 0.60),
+    },
+    -- [2] Status_Whirlpool: it tints sea blue under two WhirlpoolEffect rings
+    -- of water orbs (gWhirlpoolSpriteTemplate) and shakes -- the WHIRLPOOL
+    -- move's own swirl here (MOVE_STYLE psi / WATER).
+    [2] = {
+      { on = "event", style = "psi", palette = "WATER", delivery = "self",
+        scale = 0.85, intensity = 0.80, duration = 0.70 },
+      motion("tremble", "event", 0.60),
+    },
+    -- [3] Status_Clamp: the shell's two jaws snap shut on it
+    -- (gClampJawSpriteTemplate), a hit splat 10 frames on
+    -- (gBasicHitSplatSpriteTemplate) and a 3 px shake.
+    [3] = {
+      { on = "event", style = "impact", palette = "WATER", delivery = "self",
+        scale = 0.80, intensity = 0.75, duration = 0.55 },
+      motion("tremble", "event", nil, 0.35),
+    },
+    -- [4] Status_SandTomb: it tints sandy under two SandTombSwirlingDirt
+    -- rings (gSwirlingDirtSpriteTemplate) and shakes -- SAND TOMB's own look
+    -- (MOVE_STYLE3 quake / GROUND).
+    [4] = {
+      { on = "event", style = "quake", palette = "GROUND", delivery = "self",
+        scale = 0.85, intensity = 0.80, duration = 0.70 },
+      motion("tremble", "event", 0.60),
+    },
+  },
+  -- General_FocusPunchSetUp, on its user (BS_ATTACKER, ANIM_ATTACKER): three
+  -- EndureEffect bursts of energy rising off it (gEndureEnergySpriteTemplate
+  -- -- ENDURE's own look, MOVE_STYLE shine / FIGHTING), its colours cycling to
+  -- red (AnimTask_BlendColorCycle RGB_RED) and a 1 px shiver for 32 frames
+  -- (AnimTask_ShakeMon2) after the first.
+  FOCUS_PUNCH_SETUP = {
+    { on = "event", style = "shine", palette = "FIGHTING", delivery = "self",
+      scale = 0.90, intensity = 0.80, duration = 0.80 },
+    motion("tremble", "event", 0.60, 0.20),
+  },
+  -- General_FutureSightHit: AnimTask_SetAnimTargetToBattlerTarget makes the
+  -- monster hit the target -- the battler the referee's event names -- then
+  -- the PSYCHIC background comes up behind the whole field
+  -- (SetPsychicBackground) and the target shakes 4 px, twice
+  -- (AnimTask_ShakeMon, 15 frames then 24) as it squashes
+  -- (AnimTask_ScaleMonAndRestore).  No sprite of its own: the field's tint
+  -- and the shake are the whole clip.
+  FUTURE_SIGHT_HIT = {
+    { on = "event", style = "psi", palette = "PSYCHIC", delivery = "field",
+      scale = 1.00, intensity = 0.80, duration = 0.90 },
+    motion("tremble", "event", 0.70, 0.30),
+  },
+  -- General_DoomDesireHit: on the target too (SetAnimTargetToBattlerTarget).
+  -- The background whites out (F_PAL_BG to RGB_WHITE), shafts of light fall
+  -- on the target's side (AnimTask_DoomDesireLightBeam), then five
+  -- explosions burst on it (gExplosionSpriteTemplate -- EXPLOSION's own,
+  -- MOVE_STYLE blast / FIRE) while it shakes in place, 10 px
+  -- (AnimTask_ShakeMonInPlace).
+  DOOM_DESIRE_HIT = {
+    { on = "event", style = "shine", palette = "STEEL", delivery = "field",
+      scale = 1.00, intensity = 0.70, duration = 0.90 },
+    { on = "event", style = "blast", palette = "FIRE", delivery = "self",
+      scale = 1.00, intensity = 0.90, duration = 0.80 },
+    motion("tremble", "event", 0.70, 0.40),
+  },
+}
+
+M.GENERAL_ROLES3 = { event = true, own = true, foe = true }
+M.GENERAL_MOTIONS3 = { sway = true, nod = true, tremble = true }
+
+-- pret TryHandleLaunchBattleTableAnimation (pokefirered
+-- battle_gfx_sfx_util.c:208, pokeemerald :458): a general clip is launched for
+-- the playanimation's battler (the controllers pass gActiveBattler as
+-- attacker and target both -- pokefirered battle_controller_player.c:2833),
+-- and one launched for a battler behind a SUBSTITUTE is skipped outright --
+-- the doll does not squeeze, tense or sweat -- bar the doll's own fade, the
+-- weather and SNATCH (ShouldAnimBeDoneRegardlessOfSubsitute, :250), none of
+-- which the referee sends.  These are the clips whose battler is the one the
+-- event names (BS_ATTACKER / BS_OPPONENT1 above), so a SUBSTITUTE standing on
+-- that seat silences them.  FUTURE_SIGHT_HIT / DOOM_DESIRE_HIT are launched
+-- for their user's position (BS_ATTACKER = futureSightAttacker, battle_util.c
+-- :1093; em :1810), which their event does not name -- the target's doll
+-- never silences them; the Safari's are launched for a side a with no
+-- battler to hold one.
+M.SUB_SILENCES3 = {
+  TURN_TRAP = true, FOCUS_PUNCH_SETUP = true,
+  MON_SCARED = true, GHOST_GET_OUT = true, SILPH_SCOPED = true,
+}
+
+-- Does a SUBSTITUTE on the battler `anim`'s event names keep the cart from
+-- playing it?  (The screens then play nothing and hold nothing.)
+function M.subSilences3(anim)
+  return type(anim) == "string" and M.SUB_SILENCES3[anim] == true
+end
+
+-- The look of one of Gen 3's general clips: a fresh list of beats (see
+-- above), every particle beat a valid spec and every motion one a known
+-- seat modifier.  `amount` picks SAFARI_REACTION's answer, and TURN_TRAP's
+-- branch (the trapping move's number, `M.trapAnim3`).  nil for a name this
+-- table does not have -- the caller's own path then, as ever.
+function M.forGeneral3(anim, amount)
+  local entry = type(anim) == "string" and M.GENERAL_LOOK3[anim] or nil
+  if not entry then return nil end
+  if anim == "SAFARI_REACTION" then
+    local n = floor(num(amount, 0))
+    entry = entry[n] or entry[0]
+  elseif anim == "TURN_TRAP" then
+    entry = entry[M.trapAnim3(amount)] or entry[0]
+  end
+  local out = {}
+  for _, beat in ipairs(entry) do
+    local on = M.GENERAL_ROLES3[beat.on] and beat.on or "event"
+    if beat.motion then
+      if M.GENERAL_MOTIONS3[beat.motion] then
+        out[#out + 1] = { motion = beat.motion, on = on, duration = beat.duration,
+                          wait = beat.wait and clamp(num(beat.wait, 0), 0, 0.9) or nil }
+      end
+    else
+      local spec = specOf(beat.style, beat.palette, beat.delivery or "self",
+        beat.scale or 1, beat.intensity or 1, beat.duration)
+      if not M.DELIVERIES[spec.delivery] then spec.delivery = "self" end
+      if not M.STYLES[spec.style] then spec.style = M.DEFAULT_STYLE end
+      if not M.PALETTES[spec.palette] then spec.palette = M.DEFAULT_PALETTE end
+      spec.on = on
+      spec.from = (beat.from == "trainer") and "trainer" or nil
+      out[#out + 1] = spec
+    end
+  end
+  return out
 end
 
 return M

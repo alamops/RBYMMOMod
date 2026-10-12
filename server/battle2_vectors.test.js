@@ -24,7 +24,9 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const { damage, accuracy, crit, status, Rng, Effects } = require('./lib/battle2');
+const {
+  damage, accuracy, crit, status, Rng, Effects, Items,
+} = require('./lib/battle2');
 
 const FIXTURE = path.join(__dirname, '..', 'tests', 'fixtures', 'battle_sim2_vectors.json');
 const vectors = JSON.parse(fs.readFileSync(FIXTURE, 'utf8'));
@@ -42,7 +44,8 @@ function expectFields(actual, expected, label) {
 test('fixture pack is the one this suite was written against', () => {
   assert.strictEqual(vectors.version, 1, 'fixture version bumped — reread the notes before touching this');
   assert.strictEqual(vectors.generation, 2, 'this suite is Gen2-only');
-  for (const group of ['damage', 'accuracy', 'crit', 'status']) {
+  for (const group of ['damage', 'accuracy', 'crit', 'status', 'badgeStats', 'badgeTypes',
+    'stages', 'battleStats', 'truncate', 'items', 'gold']) {
     assert.ok(Array.isArray(vectors[group]) && vectors[group].length > 0, `${group} vectors present`);
   }
 });
@@ -95,11 +98,14 @@ test('immunity short-circuits before the random roll', () => {
 });
 
 test('no Gen1 255-stat clamp', () => {
+  // compute() reads the pair it is handed; the cart's fold to a byte is
+  // TruncateHL_BC, which the referee runs first (truncateStats; see the
+  // truncate vectors below).
   const got = damage.compute({
     level: 50, power: 40, attack: 400, defense: 200,
     physical: true, stab: false, typeEffect: [100], crit: false, roll: 100,
   });
-  assert.strictEqual(got.statClamped, false, 'Gen2 never quarters overflow stats');
+  assert.strictEqual(got.statClamped, false, 'compute() never quarters overflow stats itself');
   assert.strictEqual(got.attack, 400);
   assert.strictEqual(got.defense, 200);
 });
@@ -107,30 +113,31 @@ test('no Gen1 255-stat clamp', () => {
 test('accuracy vectors', async (t) => {
   for (const v of vectors.accuracy) {
     await t.test(v.id, () => {
-      expectFields(accuracy.hit(v.in), v.out, v.id);
+      const got = accuracy.hit(v.in);
+      got.draws = got.effectiveAccuracy === null ? undefined : accuracy.draws(got.effectiveAccuracy);
+      expectFields(got, v.out, v.id);
     });
   }
 });
 
-test('a 100% move hits every roll 0..99 (no Gen1 1/256 quirk)', () => {
+test("a 255 byte hits every roll and draws none; any lower byte rolls (R2c's byte domain)", () => {
   let hits = 0;
-  for (let roll = 0; roll <= accuracy.ROLL_MAX; roll++) {
-    if (accuracy.hit({
-      accuracy: 100, accuracyStage: 0, evasionStage: 0, roll,
-    }).hit) hits++;
+  for (let roll = 0; roll <= 255; roll++) {
+    if (accuracy.hit({ accuracy: 255, accuracyStage: 0, evasionStage: 0, roll }).hit) hits++;
   }
-  assert.strictEqual(hits, 100, 'roll 0..99 all hit a neutral 100% move');
-
+  assert.strictEqual(hits, 256, 'every byte hits a neutral 100% move');
+  assert.strictEqual(accuracy.draws(255), false, '...and the cart draws no byte for it');
+  assert.strictEqual(accuracy.draws(254), true, 'a byte of 254 is rolled');
   let always = 0;
-  for (let roll = 0; roll <= accuracy.ROLL_MAX; roll++) {
-    if (accuracy.hit({ accuracy: 100, alwaysHits: true, roll }).hit) always++;
+  for (let roll = 0; roll <= 255; roll++) {
+    if (accuracy.hit({ accuracy: 1, alwaysHits: true, roll }).hit) always++;
   }
-  assert.strictEqual(always, 100, 'a move that cannot miss does not consult the roll');
+  assert.strictEqual(always, 256, 'a move that cannot miss does not consult the roll');
 });
 
 test('accuracy clamps at both ends', () => {
-  assert.strictEqual(accuracy.effective(100, 6, 0), 100, 'boosts cannot exceed 100');
-  assert.strictEqual(accuracy.effective(10, -6, 6), 1, 'stacked drops floor at 1, never 0');
+  assert.strictEqual(accuracy.effectiveByte(200, 6, 0), 255, 'a byte past $ff is held at $ff');
+  assert.strictEqual(accuracy.effectiveByte(10, -6, 6), 1, 'stacked drops floor at 1, never 0');
 });
 
 test('crit vectors', async (t) => {
@@ -152,14 +159,18 @@ test('focus energy raises crit level (no Gen1 bug)', () => {
   );
 });
 
-test('crit roll 0 is the only crit in the ladder window', () => {
+// R2d: `.Tally` compares one BattleRandom byte with the level's
+// CriticalHitChances row (`1 out_of N` = floor(256 / N)) -- the bytes under it
+// crit, every other does not.
+test('the bytes under the CriticalHitChances row are the crits', () => {
   for (let level = 0; level <= 6; level++) {
-    const ch = crit.chance(level);
+    const th = crit.threshold(level);
+    assert.strictEqual(th, Math.floor(256 / crit.chance(level)), `level ${level}: 1 out_of N`);
     let crits = 0;
-    for (let roll = 0; roll < ch; roll++) {
+    for (let roll = 0; roll <= 255; roll++) {
       if (crit.check({ criticalLevel: level, roll }).isCrit) crits++;
     }
-    assert.strictEqual(crits, 1, `level ${level}: exactly one of 0..${ch - 1} is a crit`);
+    assert.strictEqual(crits, th, `level ${level}: ${th} of the 256 bytes are a crit`);
   }
 });
 
@@ -173,20 +184,25 @@ test('status vectors', async (t) => {
   }
 });
 
-test('freeze thaws exactly when roll % 5 === 0', () => {
+test('freeze never thaws in CheckTurn; HandleDefrost thaws under 25', () => {
   let thaws = 0;
-  for (let roll = 0; roll < 20; roll++) {
+  for (let roll = 0; roll <= 255; roll++) {
     if (status.freezeTick(roll).thawed) thaws++;
   }
-  assert.strictEqual(thaws, 4, '0,5,10,15 of 0..19');
+  assert.strictEqual(thaws, 0, 'the CheckTurn gate draws nothing and thaws nothing');
+  let defrosts = 0;
+  for (let byte = 0; byte <= 255; byte++) {
+    if (status.defrosts(byte)) defrosts++;
+  }
+  assert.strictEqual(defrosts, status.DEFROST_BYTE, '`cp 10 percent`: 25 of 256');
 });
 
-test('paralysis stops exactly when roll % 4 === 0', () => {
+test('paralysis stops on a byte under 63 (`cp 25 percent`)', () => {
   let stopped = 0;
-  for (let roll = 0; roll < 16; roll++) {
+  for (let roll = 0; roll <= 255; roll++) {
     if (status.paralysisTick(roll).fullyParalyzed) stopped++;
   }
-  assert.strictEqual(stopped, 4, '0,4,8,12 of 0..15 — 1/4');
+  assert.strictEqual(stopped, 63, '63 of 256 bytes');
 });
 
 test('confusion self-hits exactly half the time and shares Gen2 damage', () => {
@@ -230,6 +246,195 @@ test('the before-move dispatcher answers only for statuses that gate a turn', ()
     'burn is 1/8 in Gen2');
 });
 
+// Crystal's stat boosts (with Glacier's Sp. Def tail and the 999 cap) and the
+// badge type boost's lookup, both checked against the Gold engine's own
+// Battle.battleStat / badgeTypeBoost before they were written down.
+test('badge stat vectors', async (t) => {
+  for (const v of vectors.badgeStats) {
+    await t.test(v.id, () => {
+      const got = { value: Effects.badgeBoost(v.in.stat, v.in.key, v.in.badges, v.in.spa) };
+      expectFields(got, v.out, v.id);
+    });
+  }
+});
+
+test('badge type vectors', async (t) => {
+  for (const v of vectors.badgeTypes) {
+    await t.test(v.id, () => {
+      const got = { boosted: Effects.badgeTypeBoost(v.in.typeId, v.in.badges) };
+      expectFields(got, v.out, v.id);
+    });
+  }
+});
+
+// The pokecrystal stat pipeline: CalcBattleStats' stage ratio and clamp,
+// CalcPlayerStats' order (stage, badge, burn / paralysis), and the
+// TruncateHL_BC fold the damage formula reads.
+test('stage vectors', async (t) => {
+  for (const v of vectors.stages) {
+    await t.test(v.id, () => {
+      expectFields({ value: Effects.applyStage(v.in.stat, v.in.stage) }, v.out, v.id);
+    });
+  }
+});
+
+test('battle stat vectors', async (t) => {
+  for (const v of vectors.battleStats) {
+    await t.test(v.id, () => {
+      const mon = { stats: v.in.stats, stages: v.in.stages, status: v.in.status };
+      expectFields({ value: Effects.battleStat(mon, v.in.key, v.in.badges) }, v.out, v.id);
+    });
+  }
+});
+
+test('truncate vectors', async (t) => {
+  for (const v of vectors.truncate) {
+    await t.test(v.id, () => {
+      expectFields(damage.truncateStats(v.in.attack, v.in.defense, v.in.link), v.out, v.id);
+    });
+  }
+});
+
+// Gold held items and the obedience arithmetic (Items.js), one `kind` per rule
+// -- the same dispatch tests/battle_sim2_vectors.lua runs.
+const sheetOf = (input) => ({
+  heldItem: input.heldItem, holdEffect: input.holdEffect,
+  holdParam: input.holdParam, speciesId: input.speciesId,
+});
+const ITEM_RULES = {
+  typeBoost: (input) => ({ percent: Items.typeBoostPercent(sheetOf(input), input.typeId) }),
+  quickClaw: (input) => ({ fires: Items.quickClawFires(input.param, input.byte) }),
+  brightPowder: (input) => ({ effective: Items.brightPowder(input.effective, input.param) }),
+  speciesAttack: (input) => ({
+    attack: Items.speciesAttack(sheetOf(input), input.special, input.attack),
+  }),
+  metalPowder: (input) => Items.metalPowder(sheetOf(input), input.attack, input.defense),
+  focusBand: (input) => Items.focusBand(input.amount, input.hp),
+  sixteenth: (input) => ({ value: Items.sixteenth(input.maxHp) }),
+  // GetEighthMaxHP, LEECH SEED's sap: the same register walk, halved.
+  eighth: (input) => ({ value: Items.eighth(input.maxHp) }),
+  berryWants: (input) => ({ wants: Items.berryWants(input.hp, input.maxHp) }),
+  obedienceCap: (input) => ({ cap: Items.obedienceCap(input.badges) }),
+  swap: (input) => ({ value: Items.swap(input.byte) }),
+  napTurns: (input) => ({ value: Items.napTurns(input.byte) }),
+  kingsRockMove: (input) => ({ rolls: Items.kingsRockMove(input.effectId, input.moveId) }),
+  critSpeciesItem: (input) => ({ set: Items.critSpeciesItem(input.species, input.itemId) }),
+};
+
+test('held item and obedience vectors', async (t) => {
+  for (const v of vectors.items) {
+    await t.test(v.id, () => {
+      const rule = ITEM_RULES[v.in.kind];
+      assert.ok(rule, `${v.id}: no handler for item rule ${v.in.kind}`);
+      expectFields(rule(v.in), v.out, v.id);
+    });
+  }
+});
+
+// The wave-3 (R2c) Gold formulas, one `kind` per rule -- the same dispatch
+// tests/battle_sim2_vectors.lua runs.
+const byteStream = (list) => {
+  let i = 0;
+  return { byte: () => { i += 1; return list[i - 1] === undefined ? 0 : list[i - 1]; }, drawn: () => i };
+};
+const nul = (v) => (v === null || v === undefined ? undefined : v);
+const GOLD_RULES = {
+  happinessPower: (input) => ({ power: Effects.happinessPower(nul(input.happiness)) }),
+  frustrationPower: (input) => ({ power: Effects.frustrationPower(nul(input.happiness)) }),
+  hiddenPower: (input) => {
+    const hp = Effects.hiddenPower(nul(input.dvs));
+    return { power: hp ? hp.power : undefined, type: hp ? hp.type : undefined };
+  },
+  reversalPower: (input) => ({ power: Effects.reversalPower(input.hp, input.maxHp) }),
+  magnitude: (input) => Effects.magnitude(input.byte),
+  presentPower: (input) => ({ power: nul(Effects.presentPower(input.byte)) }),
+  typeConstant: (input) => ({ value: Effects.typeConstant(nul(input.name)) }),
+  protectChance: (input) => {
+    const r = byteStream(input.bytes);
+    return { ok: Effects.protectChance(r, input.count), drawn: r.drawn() };
+  },
+  tripleKickCount: (input) => {
+    const r = byteStream(input.bytes);
+    return { hits: Effects.tripleKickCount(r), drawn: r.drawn() };
+  },
+  psywave: (input) => {
+    const r = byteStream(input.bytes);
+    const damage = Effects.fixedDamage({ effectId: Effects.PSYWAVE, userMon: { level: input.level }, rng: r });
+    return { damage, drawn: r.drawn() };
+  },
+  levelDamage: (input) => ({
+    damage: Effects.fixedDamage({ effectId: Effects.LEVEL_DAMAGE, userMon: { level: input.level } }),
+  }),
+  weatherTenths: (input) => ({
+    tenths: nul(Effects.weatherTenths(nul(input.weather), nul(input.typeName), input.effectId)),
+  }),
+  timeHealAmount: (input) => ({
+    value: Effects.timeHealAmount(input.maxHp, input.timeMatches, nul(input.weather)),
+  }),
+  calc: (input) => ({
+    damage: nul(damage.calc(input.level, input.power, input.attack, input.defense, {
+      crit: input.crit, itemBoostPercent: nul(input.itemBoostPercent), carry: nul(input.carry),
+    })),
+  }),
+  stab: (input) => {
+    const got = damage.stab(input.damage, {
+      weatherTenths: nul(input.weatherTenths), badgeTypeBoost: input.badgeTypeBoost,
+      stab: input.stab, typeEffect: nul(input.typeEffect),
+    });
+    return { damage: got.damage, immune: got.immune, cReg: nul(got.cReg) };
+  },
+  multiply: (input) => ({ damage: damage.multiply(input.damage, input.times) }),
+  doubleTimes: (input) => ({ damage: damage.doubleTimes(input.damage, input.count) }),
+  applyRoll: (input) => ({
+    damage: damage.applyRoll(input.damage, input.roll), varies: damage.varies(input.damage),
+  }),
+  quarter: (input) => ({ value: Items.quarter(input.maxHp) }),
+  half: (input) => ({ value: Items.half(input.maxHp) }),
+  sleepCount: (input) => {
+    const r = byteStream(input.bytes);
+    const target = { species: 'T', hp: 10, maxHp: 10, stages: {}, types: [0], substitute: 0 };
+    Effects.applyPrimary({
+      effectId: 32, rng: r, userMon: { species: 'U', maxHp: 10, stages: {} },
+      targetMon: target, userFighter: { slot: 0, side: 'a' }, targetFighter: { slot: 3, side: 'b' },
+    });
+    return { turns: target.statusTurns, drawn: r.drawn() };
+  },
+  movePriority: (input) => ({
+    priority: Effects.movePriority({ id: input.id, effect: input.effect, priority: nul(input.priority) }),
+  }),
+  // FX-R2: PokeBallEffect (the Lua twin carries the notes).
+  ballRate: (input) => ({
+    rate: Effects.ballRate(input.ball, input.rate, nul(input.target),
+      { thrower: nul(input.thrower), battleType: nul(input.battleType) }),
+  }),
+  catchHpRate: (input) => ({
+    value: Effects.catchHpRate(input.rate, input.hp, input.maxHp, nul(input.status)),
+  }),
+  wobbleByte: (input) => ({ value: Effects.wobbleByte(input.rate) }),
+  heavyBallWeightByte: (input) => ({ value: Effects.heavyBallWeightByte(input.weight) }),
+  catchAttempt: (input) => {
+    const r = byteStream(input.bytes);
+    const got = Effects.catchAttempt(input.ball, nul(input.target), r,
+      { thrower: nul(input.thrower), battleType: nul(input.battleType) });
+    return { caught: got.caught, shakes: got.shakes, finalRate: got.finalRate, drawn: r.drawn() };
+  },
+};
+
+test('Gold move-effect formula vectors (R2c)', async (t) => {
+  for (const v of vectors.gold) {
+    await t.test(v.id, () => {
+      const rule = GOLD_RULES[v.in.kind];
+      assert.ok(rule, `${v.id}: no handler for gold rule ${v.in.kind}`);
+      const got = rule(v.in);
+      for (const key of Object.keys(v.out)) {
+        const want = v.out[key];
+        assert.strictEqual(got[key] === undefined ? null : got[key], want,
+          `${v.id}: ${key} expected ${JSON.stringify(want)}, got ${JSON.stringify(got[key])}`);
+      }
+    });
+  }
+});
+
 test('Rng LCG matches the Lua twin for a known seed stream', () => {
   const rng = Rng.create(12345);
   // First five raw states from src/BattleSim2/Rng.lua with seed 12345
@@ -253,6 +458,30 @@ test('Rng LCG matches the Lua twin for a known seed stream', () => {
   assert.strictEqual(live.byte(), restored.byte(), 'state restores');
   assert.strictEqual(Rng.create(1).below(1), 0, 'below(1) is 0');
   assert.ok(Rng.create(2).below(15) < 15, 'below(n) is in range');
+
+  // Contract K12: `below` and `nextInt` read the state's HIGH bits (its high
+  // 16 bits modulo the span, Gen 1's rule too); the same four streams the Lua
+  // vectors suite pins from the same seed.
+  const stream = (seed, n, draw) => {
+    const r = Rng.create(seed);
+    const out = [];
+    for (let i = 0; i < n; i++) out.push(draw(r));
+    return out.join(',');
+  };
+  assert.strictEqual(stream(12345, 8, (r) => r.below(4)), '1,0,0,1,3,2,2,0', 'K12 below(4)');
+  assert.strictEqual(stream(12345, 8, (r) => r.below(17)), '11,13,15,10,3,9,11,15', 'K12 below(17)');
+  // R2d: DamageVariation's loop (a rotated byte, redrawn under 217).
+  assert.strictEqual(stream(12345, 8, (r) => r.damageRoll()), '251,237,234,251,253,240,224,220',
+    'K12 damage roll');
+  assert.strictEqual(stream(12345, 8, (r) => r.nextInt(0, 99)), '37,84,96,9,39,70,98,36',
+    'K12 accuracy roll');
+  // The old low-bit draw: the state's two low bits cycle with period four.
+  const probe = Rng.create(12345);
+  const first = [];
+  for (let i = 0; i < 4; i++) first.push(probe.next() % 4);
+  for (let k = 0; k < 16; k++) {
+    for (let i = 0; i < 4; i++) assert.strictEqual(probe.next() % 4, first[i], 'low bits cycle');
+  }
 });
 
 function dummyMon2(o) {
@@ -289,12 +518,17 @@ function applyPrimary2(effectId, user, target) {
 test('gen2 applyPrimary fails foe-targeting effects through a substitute', () => {
   const target = dummyMon2({ species: 'Beta', substitute: 40 });
   const sleep = applyPrimary2(32, dummyMon2(), target);
-  assert.strictEqual(sleep.nothing, true, 'SLEEP_EFFECT vs substitute is nothing');
+  // R2d: SleepTarget's own line, DidntAffect1Text.
+  // K18: DidntAffect1Text's `line` break; an unmarked synthetic sheet prints
+  // its name bare (K17).
+  assert.deepStrictEqual(sleep.messages, ["It didn't affect\nBeta!"], 'SLEEP_EFFECT vs substitute didn\'t affect');
   assert.strictEqual(target.status, undefined, 'SLEEP_EFFECT does not land through a substitute');
 
   const growlTarget = dummyMon2({ species: 'Beta', substitute: 40 });
   const growl = applyPrimary2(18, dummyMon2(), growlTarget);
-  assert.strictEqual(growl.nothing, true, 'Growl vs substitute is nothing');
+  // BattleCommand_StatDown's `.DidntMiss`: a substitute is `.Failed`, whose
+  // StatDownFailText is "But it failed!" (R2b), not "But nothing happened".
+  assert.deepStrictEqual(growl.messages, ['But it failed!'], 'Growl vs substitute fails');
   assert.strictEqual(growlTarget.stages.atk, 0, 'Growl does not drop atk behind a substitute');
 
   const swordsUser = dummyMon2();
@@ -304,8 +538,10 @@ test('gen2 applyPrimary fails foe-targeting effects through a substitute', () =>
 
   const transformUser = dummyMon2();
   const transform = applyPrimary2(57, transformUser, dummyMon2({ species: 'Beta', substitute: 40 }));
-  assert.strictEqual(transform.nothing, true, 'TRANSFORM_EFFECT vs substitute is nothing');
-  assert.strictEqual(transformUser.transformed, undefined, 'TRANSFORM_EFFECT does not copy');
+  // BattleCommand_Transform reads no substitute: only a transformed or hidden
+  // target fails it (R2b).
+  assert.strictEqual(transform.nothing, false, 'TRANSFORM_EFFECT copies through a substitute');
+  assert.strictEqual(transformUser.transformed, true, '...and the user is transformed');
 
   const hazeUser = dummyMon2();
   hazeUser.stages.atk = 2;

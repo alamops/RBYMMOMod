@@ -136,6 +136,13 @@ local function featuredEntry(spec)
   }
 end
 
+-- Which boot may see an official row is the row's `gens` list, asked through
+-- Config.featuredServerAllowed rather than decided here.  That keeps the gate
+-- honest for a generation no row names: a FireRed, LeafGreen or Emerald boot
+-- (Gen.generation 3) sees *neither* official, because there is no Gen 3 hub
+-- to show (owner decision, 2026-09-30), and a Gen 3 player reaches a hub by
+-- address or room code like any community server.  Adding one is a row in
+-- Config.FEATURED_SERVERS with `gens = { 3 }` -- nothing here moves.
 local function featuredAllowed(spec, game)
   return Config.featuredServerAllowed(Gen.generation(game), spec.host)
 end
@@ -568,7 +575,9 @@ end
 -- recents. Keep that projection separate from list/get so external callers
 -- still see exactly the history they saw before featured servers existed.
 -- `game` (optional) gates each official by boot generation -- Gen 1 sees
--- RBY Official, Gen 2 sees GSC Official, and a missing game is Gen 1.
+-- RBY Official, Gen 2 sees GSC Official, Gen 3 sees neither, and a missing
+-- game is whatever Gen.generation reads for this boot (Gen 1 on a Gen 1 or
+-- Gen 2 loader, Gen 3 on a Gen 3 one).
 function M:menuList(game)
   self:_load()
   local out = {}
@@ -647,9 +656,10 @@ end
 --
 -- `game` is the boot the row is being resolved against, and it is here for
 -- the same reason menuGet takes one: official rows are generation-gated, so
--- a Gold game must not be able to arm a dial at the RBY hub, and a Red game
--- must not arm the GSC one. Absent, it resolves as Gen 1 -- which is what
--- every headless caller is.
+-- a Gold game must not be able to arm a dial at the RBY hub, a Red game
+-- must not arm the GSC one, and a FireRed game must arm neither. Absent, it
+-- resolves as Gen.generation reads this boot -- Gen 1 for every headless
+-- Gen 1 / Gen 2 caller, Gen 3 on a Gen 3 loader.
 function M:setAutoJoin(key, on, game)
   self:_load()
   local id = keyOf(key)

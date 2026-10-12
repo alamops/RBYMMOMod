@@ -7,13 +7,21 @@
 -- from the same battle fought offline -- and players notice the fix, not the
 -- faithfulness.
 --
---   effectiveAccuracy = clamp(floor(floor(acc * accMod/100) * evaMod/100), 1, 255)
+--   step1             = max(1, floor(acc * accMod/100))
+--   effectiveAccuracy = min(255, max(1, floor(step1 * evaMod/100)))
 --   hit               = roll < effectiveAccuracy
 --
 -- The two modifier steps truncate separately, matching the original's
--- successive 8-bit multiplies, and the clamp is what stops a stack of
--- accuracy drops from reaching an unmissable 0 or a boost from reaching a
--- never-missing 256.
+-- successive multiplies, and each one is held at 1 the moment it comes out
+-- at 0: CalcHitChance (pokered engine/battle/core.asm :5348-5414) runs its
+-- `.loop` twice and sets a quotient of 0 back to 1 inside it, before the
+-- second multiply -- so a 0 the accuracy drop left is evaded from 1, not
+-- from 0.  Only the end result is held at 255 (`.storeAccuracy`), so a
+-- boost never reaches a never-missing 256.
+--
+-- `evasionMod` is the ratio the cart reads for the *target's* evasion,
+-- which CalcHitChance reflects over neutral first (`c = 14 - EVASIONMOD`):
+-- the caller passes the ratio of the negated stage (Turn `_hitTest`).
 --
 -- `alwaysHits` bypasses the roll entirely and reports no effective accuracy at
 -- all -- there is no number to report, and returning 255 instead would be a
@@ -40,9 +48,9 @@ end
 -- accuracyMod / evasionMod: percents, 100 being unmodified
 function M.effective(accuracy, accuracyMod, evasionMod)
   local acc = max(0, int(accuracy, M.MAX))
-  local value = floor(acc * max(0, int(accuracyMod, 100)) / 100)
-  value = floor(value * max(0, int(evasionMod, 100)) / 100)
-  return min(M.MAX, max(M.MIN, value))
+  local value = max(M.MIN, floor(acc * max(0, int(accuracyMod, 100)) / 100))
+  value = max(M.MIN, floor(value * max(0, int(evasionMod, 100)) / 100))
+  return min(M.MAX, value)
 end
 
 -- Returns hit (boolean) and the effective accuracy it was decided against,

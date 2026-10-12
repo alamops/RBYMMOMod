@@ -20,9 +20,19 @@
 #
 # From the Gen1Recomp checkout root (mods/rby_mmo -> this repo):
 #
-#   bash mods/rby_mmo/tests/drivers/run-solo-battle-e2e.sh          # both legs
+#   bash mods/rby_mmo/tests/drivers/run-solo-battle-e2e.sh          # every leg
 #   bash mods/rby_mmo/tests/drivers/run-solo-battle-e2e.sh --gen1   # Red only
 #   bash mods/rby_mmo/tests/drivers/run-solo-battle-e2e.sh --gen2   # Gold only
+#   bash mods/rby_mmo/tests/drivers/run-solo-battle-e2e.sh --both   # Red + Gold
+#   bash mods/rby_mmo/tests/drivers/run-solo-battle-e2e.sh --gen3   # Gen 3 only
+#   GEN3_GAME=emerald bash mods/rby_mmo/tests/drivers/run-solo-battle-e2e.sh --gen3
+#
+# Gen 3 runs one leg per cart in GEN3_GAME (firered | leafgreen | emerald, a
+# space- or comma-separated list; default "firered emerald"). A cart already
+# imported somewhere on this machine (a LOVE identity holding
+# <game>/rom-cache.complete, e.g. rby-mmo-g3-import-fr) is copied into the
+# throwaway identity (tools/env.sh seed_gen3_cache) rather than imported
+# again; its ROM is only read when no import exists anywhere.
 #
 # .env (gitignored, see .env.example) -- and **its absence is not an error**:
 #
@@ -30,6 +40,9 @@
 #     ROM_VERSION=red
 #     GOLD_ROM_PATH=/path/to/Pokemon Gold.gbc
 #     GOLD_ROM_VERSION=gold
+#     FIRE_RED_ROM_PATH=/path/to/Pokemon FireRed.gba
+#     EMERALD_ROM_PATH=/path/to/Pokemon Emerald.gba
+#     LEAF_GREEN_ROM_PATH=/path/to/Pokemon LeafGreen.gba
 #
 # A leg with no cache and no usable ROM **skips cleanly (exit 0)**, which is
 # this repo's standing convention for every ROM-backed driver: CI has no
@@ -39,18 +52,48 @@
 #
 # Env knobs: SOLO_TIMEOUT (seconds per leg, default 900), SHOT_DIR (defaults
 # to a **run-specific** directory -- two concurrent runs must not overwrite
-# each other's screenshots), MMO_SOUND=1 to hear it.
+# each other's screenshots), MMO_SOUND=1 to hear it, SOLO_LEGS (a comma list
+# of legs to drive, default every leg; read by the driver, so it passes
+# straight through, and one list serves every cart in the run -- a name a cart
+# does not have is simply not driven there):
+#   every cart  singles (the wild / trainer / catch legs), obey (the group)
+#   Gen 3       field (Safari, roamers, legends, ghosts, first battles and
+#               tutorials), frontier, tower, hill, tent, base, pairs,
+#               double, badge, theft, or one of double-arena, double-classic,
+#               double-ko, double-lastmon, double-refusal, double-handback,
+#               double-real, badge-boost, badge-guard, badge-trainer,
+#               obey-arena, obey-classic, obey-badge8, obey-outcomes,
+#               obey-asleep, theft-wild
+#   Red / Gold  priority, held, gaps, or one of obey-traded, obey-capless,
+#               obey-asleep (Gold), priority-quick, held-leftovers, held-berry,
+#               held-quickclaw, held-thief, held-smokeball (the held ones Gold),
+#               payday, level-up, trainer-item, sleep-talk, weather, baton-pass
+#               (the last four Gold)
+# The badge and obey legs are the carts' rules against the computer
+# (docs/plans/gen3-badge-rules.md, docs/plans/gen12-referee-fidelity.md): the
+# x110/100 stat boosts, a traded monster over its level cap disobeying in the
+# cart's own words, a never-trusted MEW asleep, the foe's THIEF; on Red and
+# Gold move priority, and Gold's held items and the save after them.  The
+# "gaps" legs are docs/plans/gen12-referee-gaps-fix.md's TT-E: PAY DAY's pot on
+# the save (Red's TELEPORT escape, Gold's AMULET COIN), a level-up reaching the
+# referee mid-fight, a Gold trainer's held item stolen, SLEEP TALK, rain, and
+# BATON PASS to the successor the picker named.
 
 set -uo pipefail
 
 # ------------------------------------------------------------------ layout
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+MOD_REAL="$(cd "$SCRIPT_DIR/../.." && pwd)"
+ENGINE_VIEW=""
+cleanup_layout() { [ -z "$ENGINE_VIEW" ] || rm -rf "$ENGINE_VIEW"; }
+trap cleanup_layout EXIT
 ENGINE_ROOT=""
 # An explicit override wins, and it is the one that matters when this mod is
 # being developed in a worktree: the *shared* gen1recomp checkout has
 # mods/rby_mmo pointing at the main clone, so a run started from a worktree
-# path would load a copy of this mod that has no src/SoloBattle.lua in it. Point
-# GEN1RECOMP_ROOT at a private engine view whose mods/rby_mmo is this branch.
+# path would otherwise load a different copy of this mod.
+# GEN1RECOMP_ROOT selects the engine. An isolated view below mounts this
+# checkout when that engine has a different mod installed.
 if [ -n "${GEN1RECOMP_ROOT:-}" ] && [ -f "${GEN1RECOMP_ROOT}/main.lua" ]; then
   ENGINE_ROOT="$GEN1RECOMP_ROOT"
 fi
@@ -70,35 +113,72 @@ if [ -z "$ENGINE_ROOT" ]; then
   echo "  !! could not find a Gen1Recomp checkout (main.lua + mods/)" >&2
   exit 2
 fi
+# Give this run its own mod mount when the engine has another checkout
+# installed. The shared engine and its installed mod are never changed.
+ENGINE_ROOT="$(cd "$ENGINE_ROOT" && pwd -P)"
+INSTALLED_MOD="$(cd "$ENGINE_ROOT/mods/rby_mmo" 2>/dev/null && pwd -P)" || INSTALLED_MOD=""
+if [ "$INSTALLED_MOD" != "$(cd "$MOD_REAL" && pwd -P)" ]; then
+  ENGINE_VIEW="$(mktemp -d "${TMPDIR:-/tmp}/rby-mmo-solo-engine.XXXXXX")" || exit 2
+  for entry in "$ENGINE_ROOT"/* "$ENGINE_ROOT"/.[!.]* "$ENGINE_ROOT"/..?*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    name="$(basename "$entry")"
+    case "$name" in mods|.git) continue ;; esac
+    ln -s "$entry" "$ENGINE_VIEW/$name" || exit 2
+  done
+  mkdir "$ENGINE_VIEW/mods" || exit 2
+  for entry in "$ENGINE_ROOT/mods"/*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    name="$(basename "$entry")"
+    [ "$name" = "rby_mmo" ] && continue
+    ln -s "$entry" "$ENGINE_VIEW/mods/$name" || exit 2
+  done
+  ln -s "$MOD_REAL" "$ENGINE_VIEW/mods/rby_mmo" || exit 2
+  ENGINE_ROOT="$ENGINE_VIEW"
+fi
 cd "$ENGINE_ROOT" || exit 1
 
 MOD_DIR="mods/rby_mmo"
-MOD_REAL="$(cd "$SCRIPT_DIR/../.." && pwd)"
-OUT="$MOD_DIR/tmp/e2e-solo-battle"
-[ -d "$MOD_DIR" ] || OUT="$MOD_REAL/tmp/e2e-solo-battle"
+# SOLO_E2E_OUT moves the logs, so two runs on one machine (one per cart, or
+# two agents' legs) never write over each other's solo-gen*.log.
+OUT="${SOLO_E2E_OUT:-}"
+if [ -z "$OUT" ]; then
+  OUT="$MOD_DIR/tmp/e2e-solo-battle"
+  [ -d "$MOD_DIR" ] || OUT="$MOD_REAL/tmp/e2e-solo-battle"
+fi
 mkdir -p "$OUT"
 
 fail() { echo "  !! $*" >&2; exit 2; }
 
-DRIVERS="$MOD_DIR/tests/drivers"
-[ -f "$DRIVERS/solo_battle_e2e.lua" ] || DRIVERS="$MOD_REAL/tests/drivers"
+DRIVERS="$MOD_REAL/tests/drivers"
 DRIVER="$DRIVERS/solo_battle_e2e.lua"
 [ -f "$DRIVER" ] || fail "missing solo_battle_e2e.lua beside this script"
 
 # ------------------------------------------------------------------ args
 WANT_GEN1=1
 WANT_GEN2=1
+WANT_GEN3=1
 for arg in "$@"; do
   case "$arg" in
-    --gen1|--red|gen1|red) WANT_GEN1=1; WANT_GEN2=0 ;;
-    --gen2|--gold|gen2|gold) WANT_GEN1=0; WANT_GEN2=1 ;;
-    --both|both) WANT_GEN1=1; WANT_GEN2=1 ;;
+    --gen1|--red|gen1|red) WANT_GEN1=1; WANT_GEN2=0; WANT_GEN3=0 ;;
+    --gen2|--gold|gen2|gold) WANT_GEN1=0; WANT_GEN2=1; WANT_GEN3=0 ;;
+    --both|both) WANT_GEN1=1; WANT_GEN2=1; WANT_GEN3=0 ;;
+    --gen3|gen3) WANT_GEN1=0; WANT_GEN2=0; WANT_GEN3=1 ;;
+    --firered|firered|--emerald|emerald|--leafgreen|leafgreen)
+      WANT_GEN1=0; WANT_GEN2=0; WANT_GEN3=1; GEN3_GAME="${arg#--}" ;;
+    --all|all) WANT_GEN1=1; WANT_GEN2=1; WANT_GEN3=1 ;;
     -h|--help)
       # Absolute: this script has already cd'd to the engine root, so a
       # relative $0 no longer resolves.
-      sed -n '2,45p' "$SCRIPT_DIR/$(basename "$0")" | sed 's/^# \{0,1\}//'
+      sed -n '2,78p' "$SCRIPT_DIR/$(basename "$0")" | sed 's/^# \{0,1\}//'
       exit 0 ;;
-    *) fail "unknown argument: $arg (try --gen1, --gen2, --both)" ;;
+    *) fail "unknown argument: $arg (try --gen1, --gen2, --both, --gen3, --all)" ;;
+  esac
+done
+GEN3_GAMES="$(printf '%s' "${GEN3_GAME:-firered emerald}" | tr ',' ' ')"
+for g in $GEN3_GAMES; do
+  case "$g" in
+    firered|leafgreen|emerald) ;;
+    *) fail "GEN3_GAME lists '$g' -- firered, leafgreen or emerald" ;;
   esac
 done
 
@@ -138,6 +218,10 @@ if [ -n "$ENV_SH" ]; then
       load_env "$CANON_ENV" 2>/dev/null || true
     fi
   fi
+  # A worktree's thin .env: the canonical one fills the Gen 3 keys too.
+  if command -v load_canon_env >/dev/null 2>&1; then
+    load_canon_env 2>/dev/null || true
+  fi
 else
   echo "  note: tools/env.sh not found; relying on the ambient environment"
 fi
@@ -176,8 +260,7 @@ fi
 # ------------------------------------------------------------- headless bar
 # Same gate the battlefield driver sets: a red suite means the LOVE run would
 # only be a slower way of learning the same thing.
-SUITE="$MOD_DIR/tests/rby_mmo_test.lua"
-[ -f "$SUITE" ] || SUITE="$MOD_REAL/tests/rby_mmo_test.lua"
+SUITE="$MOD_REAL/tests/rby_mmo_test.lua"
 echo
 echo "  running the mod's Lua suite…"
 if ! "$LUAJIT" "$SUITE" >"$OUT/suite.tail.txt" 2>&1; then
@@ -207,7 +290,7 @@ function love.load()
   love.event.quit()
 end
 PROBE_MAIN
-cleanup_probe() { rm -rf "$PROBE"; }
+cleanup_probe() { rm -rf "$PROBE"; cleanup_layout; }
 trap cleanup_probe EXIT
 
 save_dir_for() {
@@ -259,17 +342,52 @@ seed_gold_cache() {
 # ------------------------------------------------------------------ one leg
 #
 # $1 = generation (1|2), $2 = label. Returns 0 pass, 1 fail, 3 skip.
+# $3 = the Gen 3 cart (firered | leafgreen | emerald) when $1 is 3.
 run_leg() {
-  local gen="$1" label="$2"
-  local identity="soloe2e-g${gen}-${RUN_ID}"
-  local shots="$SHOT_ROOT/gen$gen"
-  local logfile="$OUT/solo-gen$gen.log"
+  local gen="$1" label="$2" game3="${3:-}"
+  local suffix="$gen"
+  [ -n "$game3" ] && suffix="$gen-$game3"
+  local identity="soloe2e-g${suffix}-${RUN_ID}"
+  local shots="$SHOT_ROOT/gen$suffix"
+  local logfile="$OUT/solo-gen$suffix.log"
   local save_dir=""
+  local rom3=""
 
   echo
   echo "  ---- $label ----"
 
-  if [ "$gen" = "2" ]; then
+  if [ "$gen" = "3" ]; then
+    # Gen 3: tools/env.sh's cart helpers (the Gen 3 MMO runner's own).
+    if ! command -v have_gen3_cache >/dev/null 2>&1; then
+      echo "    SKIP: tools/env.sh (with the Gen 3 helpers) was not found."
+      return 3
+    fi
+    check_gen3_rom_config "$game3" || return 1
+    rom3="$(gen3_rom_path "$game3")"
+    if ! have_gen3_cache "$game3" "$ENGINE_ROOT"; then
+      if [ -n "$rom3" ] && [ -f "$rom3" ]; then
+        echo "    no $game3 cache yet; importing $(basename "$rom3")"
+        if ! POKEPORT_IDENTITY="rby-mmo-g3-solo-import-$game3-$RUN_ID" \
+             POKEPORT_VERSION="$game3" \
+             POKEPORT_IMPORT_ROM="$rom3" \
+             POKEPORT_IMPORT_ONLY=1 \
+             "$LOVE" . ; then
+          echo "    !! the $game3 import failed -- check $(gen3_rom_key "$game3") is the" >&2
+          echo "       canonical US cart (SHA-1 $(gen3_rom_sha "$game3"))." >&2
+          return 1
+        fi
+        have_gen3_cache "$game3" "$ENGINE_ROOT" || {
+          echo "    !! the $game3 import left no rom-cache.complete" >&2
+          return 1
+        }
+      else
+        echo "    SKIP: no $game3 cache and no usable $(gen3_rom_key "$game3")."
+        echo "          Set $(gen3_rom_key "$game3") in .env -- see .env.example"
+        return 3
+      fi
+    fi
+    echo "    $game3 cache: $(gen3_cache_dir "$game3" "$ENGINE_ROOT")"
+  elif [ "$gen" = "2" ]; then
     command -v check_gold_rom_config >/dev/null 2>&1 && check_gold_rom_config
     local have_gold=0
     if command -v have_gold_cache >/dev/null 2>&1 \
@@ -323,7 +441,8 @@ run_leg() {
     fi
   fi
 
-  save_dir="$(enable_mod_for "$identity")"
+  save_dir="$(enable_mod_for "$identity")" || return 1
+  [ -n "$save_dir" ] || return 1
   echo "    enabled rby_mmo (SOLO BATTLES seeded OFF) in $save_dir"
   mkdir -p "$shots"
   rm -f "$logfile"
@@ -332,7 +451,16 @@ run_leg() {
   # identity that cannot find one stalls forever on the ROM picker, and an
   # e2e that stalls on a picker looks exactly like an e2e that hung.
   local -a envs=()
-  if [ "$gen" = "2" ]; then
+  if [ "$gen" = "3" ]; then
+    seed_gen3_cache "$save_dir" "$game3" "$ENGINE_ROOT" || {
+      echo "    !! could not seed the $game3 cache into $save_dir" >&2
+      return 1
+    }
+    envs+=("POKEPORT_VERSION=$game3")
+    if [ -n "$rom3" ] && [ -f "$rom3" ]; then
+      envs+=("POKEPORT_IMPORT_ROM=$rom3")
+    fi
+  elif [ "$gen" = "2" ]; then
     seed_gold_cache "$save_dir"
     envs+=("POKEPORT_VERSION=gold")
     if [ -n "${GOLD_ROM_PATH:-}" ] && [ -f "$GOLD_ROM_PATH" ]; then
@@ -395,6 +523,12 @@ run_leg() {
   local gaps
   gaps=$(grep -o 'GAPS:[0-9]*' "$logfile" | tail -1 | cut -d: -f2)
 
+  # The contact sheet for a Gen 3 leg's g3-*.png, whatever the verdict.
+  local indexer="$DRIVERS/shots_index.py"
+  if [ "$gen" = "3" ] && [ -f "$indexer" ] && command -v python3 >/dev/null 2>&1; then
+    python3 "$indexer" "$shots" 2>/dev/null | sed 's/^/    /'
+  fi
+
   # The identity is throwaway; the shots are not.
   [ -n "$save_dir" ] && rm -rf "$save_dir"
 
@@ -419,7 +553,7 @@ run_leg() {
     return 1
   fi
   echo "    RESULT: $label passed -- GAPS:0. Screenshots in $shots"
-  rm -f "$logfile"
+  echo "    full log: $logfile"
   return 0
 }
 
@@ -446,6 +580,17 @@ if [ "$WANT_GEN2" -eq 1 ]; then
   esac
 fi
 
+if [ "$WANT_GEN3" -eq 1 ]; then
+  for game3 in $GEN3_GAMES; do
+    run_leg 3 "Gen 3 ($game3)" "$game3"
+    case $? in
+      0) ran=$((ran + 1)) ;;
+      3) skipped=$((skipped + 1)) ;;
+      *) failed=$((failed + 1)) ;;
+    esac
+  done
+fi
+
 echo
 if [ "$failed" -ne 0 ]; then
   echo "  RESULT: solo-battle e2e FAILED ($failed leg(s); $ran passed, $skipped skipped)"
@@ -458,6 +603,6 @@ if [ "$ran" -eq 0 ]; then
   echo "        anything about solo battles."
   exit 0
 fi
-echo "  OK — suite green; solo battles driven on $ran generation(s)" \
+echo "  OK — suite green; solo battles driven on $ran leg(s)" \
      "($skipped skipped). Screenshots under $SHOT_ROOT"
 exit 0

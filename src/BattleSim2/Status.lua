@@ -3,27 +3,52 @@
 -- Engine: src/battle/gen2/Battle.lua STATUSES / BURN_FRACTION / THAW_CHANCE.
 -- Differs from Gen 1 BattleSim/Status.lua on purpose:
 --
---   * **Freeze thaws 1/5.**  roll in 0..4; thawed (and can move) when roll==0.
---   * **Burn and poison tick 1/8 max HP** (not 1/16).  Burn still halves
---     *physical* Attack via burnAttack — SpA is untouched.
---   * **Toxic** still ramps as max(1, floor(maxHp * counter / 16)).
---   * **Paralysis** full-stops 1/4 of the time (roll in 0..3, stop when 0),
---     not Gen 1's 63/256; speed still quarters.
+--   * **Freeze never thaws before a move.**  CheckTurn (pokecrystal engine/
+--     battle/effect_commands.asm:186-202) only says "frozen solid" and stops
+--     the move -- no byte, no thaw (the engine port's 1/5 roll there is not
+--     the cart's).  HandleDefrost (engine/battle/core.asm:1524-1581) thaws
+--     between turns instead: one BattleRandom per frozen battler, thawed
+--     under `10 percent` (25), and never the turn the freeze landed
+--     (wPlayerJustGotFrozen) -- `defrosts`.
+--   * **Burn and poison tick 1/8 max HP** (not 1/16), GetEighthMaxHP's byte
+--     arithmetic (Items.eighth).  Burn still halves *physical* Attack via
+--     burnAttack — SpA is untouched.
+--   * **Toxic** ramps as GetSixteenthMaxHP (Items.sixteenth) times the count,
+--     a 16-bit sum (ResidualDamage's `.add` loop, core.asm:1038-1052).
+--   * **Paralysis** full-stops on a BattleRandom byte under `25 percent` --
+--     63, so 63/256 (CheckTurn's `cp 25 percent / ret nc`, effect_commands.asm:
+--     323-331; RGBDS `percent` is `* $ff / 100`) -- not the 1/4 the referee
+--     used to roll; speed still quarters.
+--   * **Sleep** draws no byte in CheckTurn: the counter ticks and that is all
+--     (the caller draws for paralysis alone).
 --   * **Sleep** wakes *and acts* on the turn the counter hits zero (Gen 1
 --     loses the waking turn).
---   * Confusion self-hit still routes through Damage.compute (now Gen 2).
+--   * Confusion self-hit routes through Damage.compute as HitConfusion runs
+--     BattleCommand_DamageCalc and nothing after it: power 40, no crit, no
+--     STAB, no matchup, no variation.  The caller hands in the attack /
+--     defense HitSelfInConfusion builds (the confused mon's own battle stats,
+--     its own side's Reflect, TruncateHL_BC, the selected move's Explosion
+--     halving) and, as `itemBoostPercent`, the type-boost item DamageCalc
+--     finds for the SELECTED move's type -- both cart bugs (pokecrystal
+--     docs/bugs_and_glitches.md, "Confusion damage is affected by
+--     type-boosting items and Explosion/Self-Destruct doubling").
 --
 -- Nothing here raises; no love, no engine modules, no mod facade.
 
 local need = ...
 local Damage = need("BattleSim2/Damage")
+-- GetEighthMaxHP / GetSixteenthMaxHP, the residuals' HP arithmetic.
+local Items = need("BattleSim2/Items")
 
 local M = {}
 
 local floor, max = math.floor, math.max
 
-M.PARALYSIS_SKIP_CHANCE = 4
-M.THAW_CHANCE = 5
+-- CheckTurn's `cp 25 percent`: a byte under 63 is a full paralysis.
+M.PARALYSIS_STOP_BYTE = 63
+-- HandleDefrost's `cp 10 percent`: RGBDS `percent` is `* $ff / 100`, so 25 --
+-- a byte under it thaws (25/256).
+M.DEFROST_BYTE = 25
 M.CONFUSION_HIT_ROLL = 128
 M.CONFUSION_POWER = 40
 M.RESIDUAL_DIVISOR = 8
@@ -54,19 +79,24 @@ function M.sleepCanMove(turnsRemaining)
   return M.sleepTick(turnsRemaining).canMove
 end
 
--- roll: 0..THAW_CHANCE-1; thaw when 0.
+-- CheckTurn's freeze gate: frozen solid, whatever the roll -- no byte is drawn
+-- for it (`roll` is ignored).  Thawing is `defrosts`, between turns.
 function M.freezeTick(roll)
-  local thawed = int(roll, 1) % M.THAW_CHANCE == 0
-  return { thawed = thawed, canMove = thawed }
+  return { thawed = false, canMove = false }
+end
+
+-- HandleDefrost's roll for one frozen battler.
+function M.defrosts(byte)
+  return int(byte, 255) < M.DEFROST_BYTE
 end
 
 function M.freezeCanMove(roll)
   return M.freezeTick(roll).canMove
 end
 
--- roll: 0..PARALYSIS_SKIP_CHANCE-1; stop when 0.
+-- roll: the BattleRandom byte; stop under PARALYSIS_STOP_BYTE.
 function M.paralysisStop(roll)
-  return int(roll, 1) % M.PARALYSIS_SKIP_CHANCE == 0
+  return int(roll, 255) < M.PARALYSIS_STOP_BYTE
 end
 
 function M.paralysisTick(roll)
@@ -93,15 +123,24 @@ function M.confusionTick(state, roll)
              canMove = true, selfDamage = 0 }
   end
 
+  return { turnsRemaining = left, snappedOut = false, selfHit = true,
+           canMove = false, selfDamage = M.selfHitDamage(state) }
+end
+
+-- HitConfusion's damage on its own: the confusion gate's self-hit above, and
+-- the disobedient monster's "won't obey!" self-hit (BattleCommand_CheckObedience
+-- calls the same HitConfusion).  `state` carries level, attack, defense and the
+-- optional itemBoostPercent.
+function M.selfHitDamage(state)
+  state = state or {}
   local hit = Damage.compute(
     { level = state.level, attack = state.attack, atk = state.atk },
     { defense = state.defense, def = state.def },
     { power = M.CONFUSION_POWER },
     { crit = false, stab = false, typeEffect = { 100 },
-      roll = Damage.ROLL_MAX, physical = true })
-
-  return { turnsRemaining = left, snappedOut = false, selfHit = true,
-           canMove = false, selfDamage = hit.damage or 0 }
+      roll = Damage.ROLL_MAX, physical = true,
+      itemBoostPercent = state.itemBoostPercent })
+  return hit.damage or 0
 end
 
 function M.confusionSelfHit(roll)
@@ -111,7 +150,7 @@ end
 -- ------- residuals
 
 local function eighth(maxHp)
-  return max(1, floor(max(0, int(maxHp, 0)) / M.RESIDUAL_DIVISOR))
+  return Items.eighth(maxHp)
 end
 
 function M.residualBurn(maxHp)
@@ -124,7 +163,7 @@ end
 
 function M.residualToxic(maxHp, toxicCounter)
   local counter = max(1, int(toxicCounter, 1))
-  return max(1, floor(max(0, int(maxHp, 0)) * counter / M.TOXIC_DIVISOR))
+  return (Items.sixteenth(maxHp) * counter) % 65536
 end
 
 -- Burn halves physical Attack only (SpA unchanged — callers must not pass spa).

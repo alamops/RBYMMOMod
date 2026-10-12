@@ -16,9 +16,13 @@ engine" heading is the contract this mod is written against, gathered from `brya
 ### Layout
 
 ```
-manifest.json        api 2, permissions:["network"], affects_link:false, experimental:false
+manifest.json        api 2, games gen1/gen2/gen3, permissions network+engine_internals, affects_link:false
 main.lua             entry chunk: a mod:read-based resolver, then Client.install()
 src/Config.lua       constants (PROTOCOL, intervals, radii, sprite list)
+src/Gen.lua          generation 1|2|3 + family/version; every per-generation helper
+src/Gen3.lua         the only door into game3 engine modules (lazy, gen-3-gated, Gen3.wrapFn)
+src/Gen3Ui.lua       the mod.ui surface on the game3 modal stack (240x160 screens)
+src/Borrow3.lua      ledger of party/bag a Gen 3 fight borrows from the save; save.write gives back or vetoes
 src/Wire.lua         message-type vocabulary + the sanitiser every inbound field passes
 src/Transport.lua    hub connection, built on src/link/Net.lua's TCP framing
 src/Roster.lua       who is online and where
@@ -31,13 +35,18 @@ src/SessionNet.lua   a Net-shaped shim so engine link code runs over the hub
 src/Sessions.lua     requests; trade → TradeSession; battle → MediatedBattle
 src/MediatedBattle.lua  thin client for hub-refereed fights (snapshots, events, choices)
 src/BattleSim/       Lua half of the battle intermediator (formulas + turn machine)
+src/BattleSim2/ src/BattleSim3/  the Gen 2 / Gen 3 intermediators (same API, own sheet dialects)
+src/Sheet3.lua       Gen 3 battle sheet, ruleset and bag from the game3 session
+src/Exp3.lua         post-battle EXP/EVs on Gen 3 (pret Cmd_getexp)
+src/Trade2.lua src/Trade3.lua  Gold / Gen 3 trade codecs over SessionNet
 src/Battlefield.lua  the arena: seat layout, HUD plates, and every battle effect drawn
 src/Vfx.lua          the particle catalogue: which look a move / item / status wears
 src/World.lua        guarded mod.world:current()
 src/Client.lua       wiring: options, hooks, events, inbound dispatch
 server/hub.js        the hub (node, no deps, newline-JSON over TCP)
 server/lib/battle/   Node half of the battle intermediator (mirrors BattleSim)
-scripts/run-server.sh    VPS install+run via Docker (latest GitHub release; --generation 1|2)
+server/lib/battle2/ server/lib/battle3/  Node twins of BattleSim2 / BattleSim3
+scripts/run-server.sh    VPS install+run via Docker (latest GitHub release; --generation 1|2|3)
 scripts/upgrade-server.sh  move a running hub onto a GitHub release (keeps /data and gen lock)
 tests/               the mod's suite (excluded from the packed archive)
 ```
@@ -62,6 +71,25 @@ parity lives in `tests/fixtures/hub_protocol_parity.json` (Lua driver +
    the mod installed. Mediated battles do not write link registries; they substitute the MMO
    battle path only. If that assertion ever fails, the mod started writing into a link registry
    and every player's fingerprint moved.
+
+### Gen 3 (FireRed / LeafGreen / Emerald), from 1.5.0
+
+- **One hub generation (`3`) for all three carts.** Hello carries `generation`
+  and the cart (`version`); a hub refuses a generation it isn't locked to. Map
+  ids are `FR_*` / `EM_*`, so presence is region-scoped for free — nothing in
+  the hub is region-aware. Plan: `docs/plans/gen3-firered-emerald-support.md`.
+- **The engine reach-arounds are deliberate.** game3 has no public `spawnNpc`,
+  `player.sprite`, `screen.pushed` or battle-intercept seam, so Avatars injects
+  event objects, Cast wraps `OwSprites.playerGraphicsId`, CoopField wraps
+  `BattleBridge.start`, Avatars shields the quest-log recorder / tile puzzle.
+  Every wrap goes through `Gen3.wrapFn`/`unwrapFn`; every game3 require through
+  `Gen3.engine` (the loader **throws** on a cross-generation require). Costs and
+  the proposed seams: `docs/upstream/gen3-spawn-npc.md` — extend it, don't hide
+  a new reach-around.
+- **The twin rule covers battle3.** `src/BattleSim3` ↔ `server/lib/battle3`
+  line for line, held by `tests/fixtures/battle_sim3_vectors.json` and
+  `battle3_turn_parity.json`; the sheet/event contract is
+  `docs/plans/gen3-battle-sheet.md`. Gen 1/2 wire reads stay generation-gated.
 
 ### Commands
 

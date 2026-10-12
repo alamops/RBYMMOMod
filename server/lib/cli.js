@@ -509,7 +509,7 @@ const HELP = {
     'Exit codes: 0 success, 1 error, 2 wrong usage.',
   ],
   init: [
-    `Usage: ${PROGRAM} init [--force] [--yes] [--port N] [--max N] [--generation 1|2]`,
+    `Usage: ${PROGRAM} init [--force] [--yes] [--port N] [--max N] [--generation 1|2|3]`,
     '                       [--code CODE]',
     '                       [--log-level debug|info|warn|error|silent]',
     '',
@@ -519,9 +519,10 @@ const HELP = {
     '  --yes         do not ask; take the flags and the defaults. This is the',
     '                path a Dockerfile or a test suite uses.',
     '  --force       replace an existing config file.',
-    '  --generation 1|2  lock this hub to Gen 1 (RBY) or Gen 2 (Gold). Written',
-    '                into the config. Default 1 when omitted (compat); Gen 2',
-    '                hubs must pass 2.',
+    '  --generation 1|2|3  lock this hub to Gen 1 (Red/Blue/Yellow), Gen 2',
+    '                (Gold/Silver/Crystal) or Gen 3 (FireRed, LeafGreen and',
+    '                Emerald, together). Written into the config. Default 1',
+    '                when omitted (compat); Gen 2 and Gen 3 hubs must pass it.',
     '  --code CODE   use this passcode instead of a generated one.',
     `                ${auth.CODE_LEN} characters from ${auth.ALPHABET}`,
     '                -- no I, L, O or U. Dashes, spaces and lower case are',
@@ -532,17 +533,17 @@ const HELP = {
     'There is no --no-auth. A passcode is required, here and in game.',
   ],
   start: [
-    `Usage: ${PROGRAM} start [--port N] [--host ADDR] [--max N] [--generation 1|2] [...]`,
+    `Usage: ${PROGRAM} start [--port N] [--host ADDR] [--max N] [--generation 1|2|3] [...]`,
     '                        [--insecure-config]',
     '',
     'Loads the configuration, prints who can reach this machine, and runs the',
     'hub until it is stopped. Any config path may be overridden for this run',
     'with a flag -- `--limits.maxPending 12` works as well as `--max 8`.',
     '',
-    '  --generation 1|2  lock this hub to Gen 1 or Gen 2 for this run. Beats',
-    '                    RBY_MMO_GENERATION and config generation. Default 1',
-    '                    when omitted (compat warning at startup); Gen 2 hubs',
-    '                    must pass 2.',
+    '  --generation 1|2|3  lock this hub to Gen 1, Gen 2 or Gen 3 for this',
+    '                    run. Beats RBY_MMO_GENERATION and config generation.',
+    '                    Default 1 when omitted (compat warning at startup);',
+    '                    Gen 2 and Gen 3 hubs must pass it.',
     '',
     'Two things stop it before it binds anything:',
     '',
@@ -1261,7 +1262,7 @@ async function verbInit(ctx) {
   ctx.say('');
   ctx.say(`  listening on   ${final.listen.host}:${final.listen.port}`);
   ctx.say(`  players        up to ${final.maxPlayers}`);
-  ctx.say(`  generation     ${final.generation === 2 ? '2 (Gen 2 / Gold)' : '1 (Gen 1 / RBY)'}`);
+  ctx.say(`  generation     ${generationLabel(final.generation)}`);
   ctx.say('  join code      required (always -- there is no open-hub setting)');
   ctx.say(`  log level      ${final.log.level}`);
 
@@ -2320,6 +2321,22 @@ function readJsonFile(file) {
 function finite(value) {
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
+}
+
+/*
+ * A hub's generation lock the way a host names their cart. One line per
+ * generation, and Gen 3 names all three carts because one Gen 3 hub admits
+ * FireRed, LeafGreen and Emerald together -- a host of a FireRed room should
+ * not have to wonder whether their Emerald friend can come in. Anything else
+ * (a status file from a hub that predates the field) is a dash.
+ */
+function generationLabel(value) {
+  switch (Number(value)) {
+    case 1: return '1 (Gen 1 / RBY)';
+    case 2: return '2 (Gen 2 / Gold)';
+    case 3: return '3 (Gen 3 / FRLG + Emerald)';
+    default: return '-';
+  }
 }
 
 /** An age a host reads at a glance. Coarse on purpose: seconds, then minutes. */
@@ -3397,6 +3414,7 @@ async function verbStats(ctx) {
     ['address', where],
     ['uptime', uptimeMs === null ? '-' : humanAge(uptimeMs)],
     ['protocol', plain(stats.protocol, 12) || '-'],
+    ['generation', generationLabel(stats.generation)],
     ['players', players === null ? '-'
       : `${players}${maxPlayers === null ? '' : ` of ${maxPlayers}`}`],
     ['pending', countOf(stats.pending, 'connection(s)', 'not in the world yet')],

@@ -65,12 +65,14 @@ services:
       # RBY_MMO_PORT: "7788"        # container-side port; keep ports: in step
       # RBY_MMO_LOG_LEVEL: "debug"  # debug | info | warn | error | silent
       #
-      # Hub generation lock (PROTOCOL 20+). 1 = RBY, 2 = Gold. Interpolated
-      # from server/.env / the host env. Empty on purpose: config.js skips
-      # empty env, so config.json wins. A Gold volume that only has
-      # generation: 2 in the file must not be forced back to 1 here.
-      # scripts/run-server.sh --generation writes 1 or 2 into server/.env
-      # so first-boot init still sees the operator's choice.
+      # Hub generation lock (PROTOCOL 20+). 1 = RBY, 2 = Gold, 3 = FireRed /
+      # LeafGreen / Emerald (one Gen 3 hub admits all three; PROTOCOL 30+).
+      # Interpolated from server/.env / the host env. Empty on purpose:
+      # config.js skips empty env, so config.json wins. A Gold or Gen 3
+      # volume that only has generation: 2 or 3 in the file must not be
+      # forced back to 1 here. scripts/run-server.sh --generation writes 1, 2
+      # or 3 into server/.env so first-boot init still sees the operator's
+      # choice.
       RBY_MMO_GENERATION: "${RBY_MMO_GENERATION:-}"
       #
       # There is deliberately no setting here that turns the passcode off.

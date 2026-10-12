@@ -15,9 +15,12 @@
 -- so the arithmetic is exact without the bit library; in JS the same step is
 -- `(Math.imul(1664525, state) + 1013904223) >>> 0`.  Two lines, one sequence.
 --
--- Draws come off bits 16..23 rather than the low byte: an LCG's low bits
--- cycle with a short period (bit 0 alternates every step), which would make a
--- paralysis coin flip visibly regular over a long battle.
+-- Every draw comes off the high half of the state, never the low bits: an
+-- LCG's bit k cycles with period 2^(k+1) (bit 0 alternates every step), so a
+-- draw that kept the low bits -- `next() % span`, which is what `nextInt` did
+-- until 1.5.0 -- repeats on a short cycle: a coin flip would go A-B-A-B and a
+-- `% 16` roll would cycle every 16 draws.  `byte()` reads bits 16..23 (period
+-- 2^17 and up); `nextInt` reads bits 16..31 (see it below).
 --
 -- Nothing here raises.  A bad seed or a reversed range is normalised rather
 -- than rejected, because every caller is downstream of a mod callback where a
@@ -68,9 +71,21 @@ function M:byte()
   return floor(self:next() / 65536) % 256
 end
 
+-- The high 16 bits of one step (bits 16..31), 0..65535.  `floor(s / 65536)`
+-- is exact in a double and in V8 (`s` < 2^32), so both runtimes agree.
+local function high16(self)
+  return floor(self:next() / 65536)
+end
+
 -- Inclusive on both ends.  A reversed or partly-nil range is repaired rather
 -- than refused; a zero-width range consumes no draw so a caller cannot desync
 -- the two runtimes by asking for a constant.
+--
+-- K12 (gen12-referee-gaps-fix): the draw is the state's high 16 bits modulo
+-- the span, not the whole state modulo the span -- the old `next() % span`
+-- kept the low bits' short cycles (gen12-referee-known-gaps.md section 10).
+-- A span wider than 65536 (no referee caller has one) stitches two high
+-- halves into a 32-bit value first, still exact in both runtimes.
 function M:nextInt(min, max)
   local lo, hi = tonumber(min), tonumber(max)
   if not lo and not hi then return self:byte() end
@@ -79,7 +94,10 @@ function M:nextInt(min, max)
   if hi < lo then lo, hi = hi, lo end
   local span = hi - lo + 1
   if span <= 1 then return lo end
-  return lo + (self:next() % span)
+  if span <= 65536 then return lo + (high16(self) % span) end
+  local top = high16(self)               -- two statements: Lua leaves the
+  local bottom = high16(self)            -- order of operands unspecified
+  return lo + ((top * 65536 + bottom) % span)
 end
 
 function M:damageRoll()

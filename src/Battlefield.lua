@@ -1,16 +1,31 @@
--- Top-down battlefield theatre for Gen1 co-op / mediated fights.
+-- Top-down battlefield theatre for co-op / mediated fights, on every
+-- generation the mod runs on (Red, Gold, FireRed / LeafGreen / Emerald).
 --
 -- Owns arena load, seat layout, and draw helpers. CoopBattle and
 -- MediatedBattle keep turn logic; they call into this for uiSize-shaped
--- presentation (640×360 fill-scale canvas). Gen2 stays on the classic
--- guild-focus path via M.enabled.
+-- presentation (640×360 fill-scale canvas on Gen 1, the window-space
+-- `drawWidescreen` pass on Gold and Gen 3). CLASSIC BATTLE UI is the other
+-- skin (src/ClassicBattle.lua); M.enabled is the theatre gate.
 --
 -- Soft-fail everywhere: a missing arena, SpriteRenderer, or icon costs
 -- that layer only — never the battle screen.
+--
+-- ------- Gen 3 (see "the Gen 3 arm" further down for the whole of it)
+--
+-- The same field, seats and HUD, with Gen 3 art in every source slot: 64x64
+-- battle pics drawn at whole-pixel scale and bottom-aligned on their own art,
+-- the cart's party icons (32x32, two frames), OW walkers (16x32 frames) for
+-- the humans on the field and the NPC trainer's own front pic, and an arena
+-- built at runtime from the cart's battle background for the current map --
+-- the player's cache, never a committed pixel. Everything is reached through
+-- src/Gen3.lua, which answers nil off a Gen 3 boot, so no line of it runs on
+-- Red or Gold and no src.*.game3.* module is ever required there.
 
 local need, mod = ...
 local Config = need("Config")
 local Gen = need("Gen")
+-- Gen 3 art and engine modules, all lazy and generation-guarded (Gen3.engine).
+local Gen3 = need("Gen3")
 -- Type only: Toast owns the mod's one per-size font cache (Rajdhani, linear
 -- filter, engine-default fallback). Nothing else is borrowed from it.
 local Toast = need("Toast")
@@ -19,6 +34,9 @@ local Toast = need("Toast")
 -- only thing in the mod that touches a canvas -- and it requires nothing, so
 -- the suite can assert a frame's worth of particles with no LOVE in process.
 local Vfx = need("Vfx")
+-- The status token's three letters, the carts' way (ClassicBattle.statusLabel:
+-- a Red / Gold TOX shows PSN).  ClassicBattle requires nothing of this file.
+local ClassicBattle = need("ClassicBattle")
 
 local M = {}
 
@@ -129,6 +147,9 @@ M.MON_COLUMN_FOE = M.PITCH_RIGHT - math.floor(M.MON_DRAW / 2) - M.MON_PITCH_INSE
 M.CARD_W = 120
 M.CARD_H = 100
 M.CARD_SPRITE = 48
+-- Gen 3: the pic at its own 64px, and the card grown by the difference.
+M.CARD_H3 = 116
+M.CARD_SPRITE3 = 64
 
 -- Persistent seat plates (the arena HUD): one per placed seat, always up.
 -- Ally plates stack upward from the field floor so they clear MENU_BAND; foe
@@ -168,6 +189,14 @@ M.PLATE_EXP_GAP = 2 -- HP bar bottom to EXP strip top
 -- same width read as a pair of equals; pulling the secondary one in at both
 -- ends makes it read as subordinate to the HP bar it hangs under.
 M.PLATE_EXP_XINSET = 2
+-- The owner tag a plate carries where one side has two trainers (a Gen 3
+-- solo double's pair, its partner): the trainer's label, cut to this many
+-- glyphs, in the status row's free end -- right-aligned on a foe plate (no
+-- figures there), after the status chips on our side, never over the HP
+-- figures (`drawPlate`).
+M.PLATE_OWNER_CHARS = 12
+-- ...and the least room it is drawn in at all: an ellipsis alone says nothing.
+M.PLATE_OWNER_MIN_W = 24
 
 -- ------- the roster chip
 --
@@ -210,12 +239,60 @@ M.ROSTER_MARGIN = M.PLATE_PAD
 M.HUMAN_SCALE = 2
 M.HUMAN_SRC = 16
 M.HUMAN_DRAW = M.HUMAN_SRC * M.HUMAN_SCALE
+-- Gen 3 walkers are 16x32 overworld frames (src/core/game3/ow_sprites.lua),
+-- twice the height of Gen 1 / Gen 2's 16x16: at the same HUMAN_SCALE a figure
+-- stands 32x64, and the layout reserves exactly that rather than letting a
+-- 64px figure overlap the one stacked under it (a 32px reservation did).
+M.HUMAN_DRAW_W3 = 32
+M.HUMAN_DRAW_H3 = 64
+-- How far a Gen 3 walker's visible figure reaches above its feet: the frame's
+-- top 8 source rows are headroom (16px at 2x).
+M.HUMAN_REACH3 = M.HUMAN_DRAW_H3 - 16
+-- Two NPC trainers side by side on one Gen 3 edge (placeHumans: a solo
+-- double's pair, where the trainer column cannot stack two 64px pics): the
+-- step between their columns -- a figure's width and a gutter.
+M.HUMAN_ROW_PITCH3 = M.HUMAN_DRAW_W3 + 8
 -- Distance from the canvas edge to a trainer's column. Shared with the ball
 -- arc, which starts at the thrower's column.
 local HUMAN_PAD = 20
 -- Vertical spacing between two stacked trainers on the same side (centre to
 -- centre). One draw height plus a gutter, so two sprites never touch.
 local HUMAN_STACK_GAP = M.HUMAN_DRAW + 12
+
+-- Is this a Gen 3 boot. The loader's generation is fixed for the whole
+-- session, so the pure layout helpers below may ask it too: every seat and
+-- human on a FireRed field is a Gen 3 one. rawget-cheap (Gen3.active), so a
+-- per-frame caller pays nothing for asking.
+local function onGen3()
+  return type(Gen3) == "table" and type(Gen3.active) == "function"
+    and Gen3.active() == true
+end
+M.onGen3 = onGen3
+
+-- The Gen 3 arm's own state and helpers, in one table: this file's main chunk
+-- sits at Lua's 200-local ceiling, so the arm adds a single local rather than
+-- one per helper. The draw-side half lives in "the Gen 3 arm" section below.
+local G3 = {
+  -- the platform oval cut out of the cart's battle background when the arena
+  -- was composed (nil on a custom drop-in, which paints its own ground)
+  platform = nil,
+  -- each drawn picture's opaque bounds, and each bare icon sheet's frame
+  -- quads (weak: an image the engine drops takes its entry with it)
+  bounds = setmetatable({}, { __mode = "k" }),
+  iconQuads = setmetatable({}, { __mode = "k" }),
+}
+
+-- The box a trainer on the field occupies, and the pitch between two of them.
+-- Gen 1 / Gen 2 answer exactly the constants above.
+function G3.humanBox()
+  if onGen3() then return M.HUMAN_DRAW_W3, M.HUMAN_DRAW_H3 end
+  return M.HUMAN_DRAW, M.HUMAN_DRAW
+end
+
+function G3.humanStackGap()
+  if onGen3() then return M.HUMAN_DRAW_H3 + 12 end
+  return HUMAN_STACK_GAP
+end
 -- Keeps a trainer sprite off the field's own top / bottom edge. The stack is
 -- clamped into FIELD_TOP..FIELD_BOTTOM minus this: R3 item 2 was seat 2 of a
 -- coop side rendering *above* the arena, in the letterbox.
@@ -266,6 +343,19 @@ M.STATUS_COLORS = {
   cnf = { 0.90, 0.42, 0.72 },
 }
 local STATUS_FALLBACK = { 0.55, 0.58, 0.65 }
+-- Gen 3's set: the same five plus TOX, which Gen 3 sheets carry as its own
+-- token (docs/plans/gen3-battle-sheet.md) and which reads as the poison it
+-- is -- a deeper violet, so bad poison is told apart from plain at a glance.
+-- A separate table so the Gen 1 / Gen 2 chips keep exactly their colours.
+M.STATUS_COLORS3 = {
+  psn = M.STATUS_COLORS.psn,
+  tox = { 0.48, 0.22, 0.70 },
+  brn = M.STATUS_COLORS.brn,
+  slp = M.STATUS_COLORS.slp,
+  par = M.STATUS_COLORS.par,
+  frz = M.STATUS_COLORS.frz,
+  cnf = M.STATUS_COLORS.cnf,
+}
 
 local arenaImage = nil
 local arenaTried = false
@@ -291,6 +381,7 @@ function M.reloadArena()
   monFrontCache = {}
   -- Keyed by image, so it would otherwise pin the images just dropped above.
   quadCache = {}
+  G3.platform = nil
 end
 
 local function clamp(v, lo, hi)
@@ -312,12 +403,17 @@ end
 
 -- Shared by the card, the plates and the bubbles — declared here so the pure
 -- model helpers below can reach it too.
+-- Counted and cut in glyphs (ClassicBattle.glyphs): a trainer's name and a
+-- referee line carry é / … / ♂ / ♀ since wave 6, one character each, and a
+-- byte cut through one is text the font cannot draw.
 local function truncate(text, maxChars)
   if type(text) ~= "string" then return "" end
   maxChars = maxChars or 12
-  if #text <= maxChars then return text end
-  return text:sub(1, math.max(1, maxChars - 1)) .. "."
+  if ClassicBattle.glyphCount(text) <= maxChars then return text end
+  return ClassicBattle.glyphPrefix(text, math.max(1, maxChars - 1)) .. "."
 end
+-- For the suites.
+M.truncateText = truncate
 
 -- Callout voice: "pikachu" -> "PIKACHU!". Collapses whitespace, upper-cases,
 -- and appends exactly one exclamation mark — an author's own terminal ! or ?
@@ -357,14 +453,24 @@ end
 -- Kept as a function rather than becoming `return true` for two reasons: the
 -- pcall still has to swallow a `Gen.generation` that throws on a half-built
 -- game (the draw path calls this), and a generation the engine grows later is
--- refused rather than assumed -- a Gen 3 boot with no front pics would draw an
--- arena full of blanks, and the GB fallback is a better answer than that.
-local THEATRE_GENERATIONS = { [1] = true, [2] = true }
+-- refused rather than assumed -- a boot with no front pics would draw an
+-- arena full of blanks, and the classic chrome is a better answer than that.
+--
+-- Gen 3 is in because every source slot now has a Gen 3 arm (the "Gen 3
+-- arm" section below): 64x64 pics, the cart's icons, OW walkers, trainer
+-- pics and a backdrop built from the cart's own battle background.
+local THEATRE_GENERATIONS = { [1] = true, [2] = true, [3] = true }
 
 function M.enabled(game)
   local ok, gen = pcall(Gen.generation, game)
   if not ok then return false end
-  return THEATRE_GENERATIONS[tonumber(gen) or 1] == true
+  gen = tonumber(gen) or 1
+  -- Gen 3's art is reached through the running engine (src/Gen3.lua), so a
+  -- table that merely *says* generation 3 on a Red or Gold boot -- a stub, a
+  -- dataset read out of context -- has none of it to draw with and keeps the
+  -- refusal above. A real FireRed / Emerald boot answers Gen3.active().
+  if gen == 3 and not onGen3() then return false end
+  return THEATRE_GENERATIONS[gen] == true
 end
 
 -- ------- asset load
@@ -372,8 +478,8 @@ end
 -- Prefer a player drop-in at assets/battle/custom/{wild,indoor,gym}.png
 -- (optional {kind}_field.png overlay) when that file loads. Otherwise stamp
 -- the player's own ROM tiles (the overworld tileset the fight is standing
--- on). Those pixels never ship in this repo -- they live in assets/generated/
--- after a ROM import, the same cache the sprites already read. The authored
+-- on). Those pixels never ship in this repo -- they live in the player’s import
+-- cache, the same cache the sprites already read. The authored
 -- PNG and the two-platform stand-in are only what a headless boot or a
 -- missing cache falls back to.
 
@@ -482,6 +588,12 @@ end
 function M.load(modFacade, game)
   modFacade = modFacade or mod
   if arenaTried then return arenaImage end
+
+  -- Gen 3 has no overworld state or tileset table to read: the map, and the
+  -- cart's battle background for it, come from the engine (M.loadGen3).
+  if onGen3() and type(M.loadGen3) == "function" then
+    return M.loadGen3(modFacade)
+  end
 
   game = game or peekGame()
   -- Do not guess "wild" before the map is known: a gym fight's first
@@ -601,12 +713,9 @@ function M.cardModel(seat)
   local hp = math.max(0, math.floor(num(seat.hp, 0)))
   local maxHp = math.max(1, math.floor(num(seat.maxHp, hp > 0 and hp or 1)))
   if hp > maxHp then hp = maxHp end
-  local status = seat.status
-  if type(status) ~= "string" or status == "" then
-    status = nil
-  else
-    status = status:sub(1, 3)
-  end
+  -- A Red / Gold seat's TOX is the PSN both carts' HUDs print (the badly
+  -- poisoned flag sits beside the status byte); Gen 3 keeps its own TOX chip.
+  local status = ClassicBattle.statusLabel(seat.status, onGen3())
   local confused = seat.confused == true
       or (type(seat.confused) == "number" and seat.confused > 0)
   local species = seat.species
@@ -647,10 +756,22 @@ function M.monDrawParams(mon, iw, ih, opts)
   if mul < 0 then mul = 0 end
 
   local sc
-  if opts.iconFrame then
+  if opts.iconFrame and num(opts.iconSize, 16) > 16 then
+    -- Gen 3's 32x32 party icon: whole pixels, about a box tall.
+    local size = num(opts.iconSize, 32)
+    iw, ih = size, size
+    sc = math.max(1, math.floor(box / size + 0.5))
+  elseif opts.iconFrame then
     -- 16×16 menu frame, integer scale for crisp pixels.
     iw, ih = 16, 16
     sc = math.max(2, math.floor(box / 16))
+  elseif opts.integer then
+    -- Gen 3: whole pixels only. A 64px battle pic in the 60px box is 0.94 of
+    -- a pixel per pixel as a fit -- every sixteenth row and column dropped by
+    -- the nearest filter, which reads as a smeared face. At 1x the art's own
+    -- transparent margin absorbs the 4px, and a pic is never *shrunk* below
+    -- its own size.
+    sc = math.max(1, math.floor(math.min(box / iw, box / ih) + 0.5))
   else
     -- Aspect-correct fit inside the mon box (no smash / stretch).
     sc = math.min(box / iw, box / ih)
@@ -704,6 +825,11 @@ function M.plateModel(seat)
   local shownLevel = tonumber(seat.shownLevel)
   if shownLevel ~= shownLevel then shownLevel = nil end
   if shownLevel then shownLevel = math.max(1, math.floor(shownLevel)) end
+  -- The trainer the monster fights for, on a side with two (a Gen 3 solo
+  -- double's pair, its partner); absent is a side with one, and nothing is
+  -- drawn for it.
+  local owner = seat.owner
+  if type(owner) ~= "string" or owner == "" then owner = nil end
   return {
     name = truncate(base.name, 10),
     level = base.level,
@@ -716,6 +842,7 @@ function M.plateModel(seat)
     side = side,
     expFrac = expFrac,
     shownLevel = shownLevel,
+    owner = owner and truncate(owner, M.PLATE_OWNER_CHARS) or nil,
   }
 end
 
@@ -818,6 +945,19 @@ end
 
 M.FX_LUNGE = 14 -- peak px toward the midline, reached at t == 0.5
 M.FX_SHAKE = 3 -- peak whole-field jolt, px
+M.FX_HUD_SHAKE = 4 -- peak plate jolt, px (Red's ENEMY_HUD_SHAKE_ANIM)
+-- Red's follow-on shakes (pokered PlayApplyingAttackAnimation's
+-- AnimationTypePointerTable, run behind a clip that left one -- see
+-- MediatedBattle.followShake): the field slides right and back, horizontally
+-- only, as rWX does.  Peaks keep the cart's proportions under FX_SHAKE (the
+-- overscan drawArena reserves): ShakeScreenHorizontallySlow's 6 px is the
+-- full FX_SHAKE, Slow2's 3 px half of it, Light's 2 px a third.  Spans are the
+-- routines' own frame counts at 60 fps -- Slow `lb bc, 6, 2`: 6 steps out and
+-- 6 back at 2 frames each, twice (48 frames); Slow2 `lb bc, 3, 2` (24);
+-- PredefShakeScreenHorizontally `ld b, 2`: 2 px then 1, 5 frames out and 4
+-- back each (18).  The screens hold their queue for the span.
+M.FX_FOLLOW_SHAKE = { slowshake = 3, slowshake2 = 1.5, lightshake = 1 }
+M.FX_FOLLOW_SPAN = { slowshake = 0.8, slowshake2 = 0.4, lightshake = 0.3 }
 M.FX_FAINT_DROP = 0.5 -- fraction of the mon box a fainting seat sinks
 M.FX_BALL_R = 5 -- pokéball radius (a ~10px ball on a 60px mon)
 M.FX_BALL_LIFT = 46 -- peak px the arc rises above the straight line
@@ -828,6 +968,23 @@ M.FX_POOF_R = 30 -- outer ring radius at the end of a poof
 -- before `hidden` sticks. Original geometry — no ROM battle_anims.
 M.FX_DIG_DROP = 0.90
 M.FX_FLY_LIFT = 0.95
+-- Gen 3's general clips move the monster itself (Vfx.GENERAL_LOOK3's motion
+-- beats; pret data/battle_anim_scripts.s): `sway` -- side to side, toward the
+-- midline first (AnimTask_SwayMon after the bait lands, the Safari monster
+-- turning to watch, AnimTask_RotateMonToSideAndRestore 16, +-96); `nod` -- a
+-- dip and back, twice (the eating monster's RotateMonToSideAndRestore 8, 136
+-- run twice); `tremble` -- a quick shiver (AnimTask_ShakeMon2's 2 px then 4,
+-- a frame each, the scared monster; AnimTask_ShakeMon / ShakeMonInPlace
+-- under a trap's squeeze, FOCUS PUNCH's focus and a FUTURE SIGHT / DOOM
+-- DESIRE landing, each at this one peak -- a beat's span says how long).
+-- Peaks in arena px, sized for the 60px monster against the 64px GBA pic the
+-- cart moves; original curves, no ROM tables.  Spans are the screens' default
+-- life for each (a beat may carry its own, and a `wait` -- a fraction of that
+-- life at rest before it moves).
+M.FX_SWAY = 6
+M.FX_NOD = 5
+M.FX_TREMBLE = 3
+M.FX_MOTION_SPAN = { sway = 0.60, nod = 0.60, tremble = 0.45 }
 
 -- ------- particle fx
 --
@@ -836,7 +993,8 @@ M.FX_FLY_LIFT = 0.95
 -- that carries its own look on the record rather than being named by `kind`:
 -- `style`, `palette`, `delivery`, `scale`, `intensity` and `seed`, plus the
 -- seat it lands on (`side` / `seatIndex`) and, for the deliveries that travel,
--- the seat it came from (`fromSide` / `fromSeat`).
+-- the seat it came from (`fromSide` / `fromSeat`) or the side whose trainer
+-- threw it (`fromTrainer`, "ally" | "foe": the Safari's throws -- `vfxOrigin`).
 --
 -- It is field-level, not a seat modifier: nothing about it moves, tints or
 -- hides the monster it plays over (`M.fxSeat` skips it by construction), so an
@@ -868,6 +1026,7 @@ local SEAT_FX = {
   lunge = true, flash = true, faint = true, spawn = true,
   recall = true, wobble = true, evolve = true,
   dig = true, fly = true, emerge = true,
+  sway = true, nod = true, tremble = true,
 }
 
 local function fxT(v)
@@ -895,6 +1054,32 @@ end
 function M.fxFaint(t)
   t = fxT(t)
   return t * t, 1 - t
+end
+
+-- A motion's own progress once its rest (`wait`, 0..1 of the life) is over:
+-- 0 throughout the rest, then 0..1 over what is left.  No wait is no rest.
+function M.fxWaited(t, wait)
+  t = fxT(t)
+  local w = clamp(num(wait, 0), 0, 0.95)
+  if w <= 0 then return t end
+  if t <= w then return 0 end
+  return (t - w) / (1 - w)
+end
+
+-- Side to side, twice, at rest at both ends (the sign is the first lean).
+function M.fxSway(t)
+  return math.sin(fxT(t) * math.pi * 4)
+end
+
+-- Down and back, twice: 0..1 of the dip, at rest at both ends.
+function M.fxNod(t)
+  return math.abs(math.sin(fxT(t) * math.pi * 2))
+end
+
+-- A fast shiver that eases off, at rest at both ends.
+function M.fxTremble(t)
+  t = fxT(t)
+  return math.sin(t * math.pi * 16) * (1 - t * 0.5)
 end
 
 -- Scale-up with a slight overshoot (back-out): 0 at t == 0, 1 at t == 1.
@@ -1018,6 +1203,14 @@ function M.fxSeat(fx, side, seatIndex)
       elseif e.kind == "emerge" then
         -- Come back for the hitting turn. Same back-out as a send-out spawn.
         out.scale = out.scale * M.fxSpawn(e.t)
+      elseif e.kind == "sway" then
+        -- Gen 3's general clips (M.FX_SWAY): toward the midline first.
+        local dir = side == "foe" and -1 or 1
+        out.dx = out.dx + dir * M.FX_SWAY * M.fxSway(M.fxWaited(e.t, e.wait))
+      elseif e.kind == "nod" then
+        out.dy = out.dy + M.FX_NOD * M.fxNod(M.fxWaited(e.t, e.wait))
+      elseif e.kind == "tremble" then
+        out.dx = out.dx + M.FX_TREMBLE * M.fxTremble(M.fxWaited(e.t, e.wait))
       end
     end
   end
@@ -1026,10 +1219,38 @@ function M.fxSeat(fx, side, seatIndex)
   return out
 end
 
--- Whole-field jolt. `shake` is field-wide, so side / seatIndex are ignored.
--- The fold is clamped: a multi-hit move stacks three to five live shakes, and
--- their unclamped sum would walk the field past the outset drawArena reserves
--- and uncover the canvas edge.
+-- AnimationShakeScreenHorizontallySlow's travel, 0..1 of the peak: out one
+-- step at a time and back to rest, twice (`c` = 2) -- a triangle, never left
+-- of rest (rWX only grows from 7).
+function M.fxSlowShake(t)
+  t = fxT(t)
+  local phase = (t * 2) % 1
+  if t >= 1 then phase = 0 end
+  return 1 - math.abs(2 * phase - 1)
+end
+
+-- PredefShakeScreenHorizontally's travel with `b` = 2, 0..1 of the peak: the
+-- full step out and home, then half of it out and home (each 5 frames out,
+-- 4 back).
+function M.fxLightShake(t)
+  t = fxT(t)
+  if t >= 1 then return 0 end
+  local half = (t < 0.5) and 1 or 0.5
+  local phase = (t * 2) % 1
+  return (phase < 5 / 9) and half or 0
+end
+
+-- Is `kind` a field-wide shake (`fxFieldShake` reads it, side and seat
+-- ignored)?  The co-op screen asks before it projects an effect onto seats.
+function M.isFieldShake(kind)
+  return kind == "shake" or M.FX_FOLLOW_SHAKE[kind] ~= nil
+end
+
+-- Whole-field jolt. `shake` is field-wide, so side / seatIndex are ignored;
+-- so are Red's follow-on shakes (`FX_FOLLOW_SHAKE`), which slide it
+-- horizontally alone.  The fold is clamped: a multi-hit move stacks three to
+-- five live shakes, and their unclamped sum would walk the field past the
+-- outset drawArena reserves and uncover the canvas edge.
 function M.fxFieldShake(fx)
   local dx, dy = 0, 0
   for _, e in ipairs(listOf(fx)) do
@@ -1037,9 +1258,29 @@ function M.fxFieldShake(fx)
       local t = fxT(e.t)
       dx = dx + M.FX_SHAKE * M.fxShake(t)
       dy = dy + M.FX_SHAKE * 0.6 * math.cos(t * math.pi * 5) * (1 - t)
+    elseif type(e) == "table" and (e.kind == "slowshake" or e.kind == "slowshake2") then
+      dx = dx + M.FX_FOLLOW_SHAKE[e.kind] * M.fxSlowShake(e.t)
+    elseif type(e) == "table" and e.kind == "lightshake" then
+      dx = dx + M.FX_FOLLOW_SHAKE.lightshake * M.fxLightShake(e.t)
     end
   end
   return clamp(dx, -M.FX_SHAKE, M.FX_SHAKE), clamp(dy, -M.FX_SHAKE, M.FX_SHAKE)
+end
+
+-- One seat's plate jolting side to side: pokered EnemyHUDShakeAnim
+-- (SE_SHAKE_ENEMY_HUD), which PoisonEffect and FreezeBurnParalyzeEffect play
+-- on a side-effect status the player's move landed -- the HUD of the monster
+-- it landed on shakes and the field holds still.  `hudshake` FX on that seat
+-- (side and seatIndex as `fxSeat` reads them); clamped like the field's.
+function M.fxPlateShake(fx, side, seatIndex)
+  local dx = 0
+  for _, e in ipairs(listOf(fx)) do
+    if type(e) == "table" and e.kind == "hudshake" and e.side == side
+       and (e.seatIndex == nil or e.seatIndex == seatIndex) then
+      dx = dx + M.FX_HUD_SHAKE * M.fxShake(e.t)
+    end
+  end
+  return clamp(dx, -M.FX_HUD_SHAKE, M.FX_HUD_SHAKE)
 end
 
 -- dir -1 / +1; wraps. `current` is 1-based index into `targets`, or a seat
@@ -1177,13 +1418,22 @@ local function occupantMon(side)
 end
 
 local function occupantHuman(side)
-  local half = math.floor(M.HUMAN_DRAW / 2)
+  local w, h = G3.humanBox()
+  local half = math.floor(w / 2)
+  -- Gen 1 / Gen 2 reserve half a (square) figure each way, as they always
+  -- have. Gen 3's figure stands on its row: G3.drawHuman puts the feet on the
+  -- row y, so its whole reach is above it and none below. A walker's 16x32
+  -- frame is headroom for its top 8 rows, so an ally (always a walker) reaches
+  -- M.HUMAN_REACH3; the foe edge may carry an NPC's 64px trainer pic, so it
+  -- reserves the whole frame.
+  local up, down = half, half
+  if onGen3() then up, down = (side == "foe") and h or M.HUMAN_REACH3, 0 end
   return {
     x = (side == "ally") and (HUMAN_PAD + half)
       or (M.WIDTH - HUMAN_PAD - half),
     half = half,
-    up = half,
-    down = half,
+    up = up,
+    down = down,
   }
 end
 
@@ -1339,10 +1589,37 @@ local function placeHumans(humans, side, rows, paired, plates, out)
   -- that centre, and the whole stack is clamped so every sprite stays fully
   -- inside FIELD_TOP..FIELD_BOTTOM (never in the letterbox above the arena).
   local centerY = M.FIELD_TOP + math.floor(M.FIELD_HEIGHT / 2)
-  local half = occ.half
-  local minY = M.FIELD_TOP + half + HUMAN_EDGE_PAD
-  local maxY = M.FIELD_BOTTOM - half - HUMAN_EDGE_PAD
+  -- occ.up / occ.down are both half a figure on Gen 1 / Gen 2 (the bounds
+  -- they always had); Gen 3's figure stands on its row and reaches only up
+  -- (see occupantHuman).
+  local minY = M.FIELD_TOP + occ.up + HUMAN_EDGE_PAD
+  local maxY = M.FIELD_BOTTOM - occ.down - HUMAN_EDGE_PAD
+  local stackGap = G3.humanStackGap()
+  local drawW, drawH = G3.humanBox()
+  if onGen3() then
+    -- The roster chips own this side's free corner (allies down from the
+    -- top-left, foes up from the bottom-right -- M.layout) and the trainer
+    -- column runs straight through it. A 32px Gen 1 figure never reached that
+    -- far from the field centre; a 64px Gen 3 one does, so its band stops at
+    -- the chips' edge.
+    local chips = 0
+    for _, human in ipairs(humans) do
+      if M.rosterModel(human) then chips = chips + 1 end
+    end
+    if chips > 0 then
+      local stackH = chips * M.ROSTER_H + (chips - 1) * M.ROSTER_STACK_GAP
+      if side == "foe" then
+        maxY = math.min(maxY, M.FIELD_BOTTOM - M.ROSTER_MARGIN - stackH - occ.down - 2)
+      else
+        minY = math.max(minY, M.FIELD_TOP + M.ROSTER_MARGIN + stackH + occ.up + 2)
+      end
+      if maxY < minY then maxY = minY end
+    end
+  end
   local ys
+  -- Side by side rather than stacked (Gen 3, M.HUMAN_ROW_PITCH3): a column
+  -- step per figure, inboard from the trainer column.
+  local rowStep = nil
   if paired and #rows == count then
     -- Paired: take the mons' own rows verbatim. sideRows already folded this
     -- column's plate clearance into the band they came out of, so re-clamping
@@ -1354,10 +1631,36 @@ local function placeHumans(humans, side, rows, paired, plates, out)
     -- their own has no more business standing inside the HUD than one with.
     local dodgeMin, dodgeMax =
       dodgePlates(side, num(plates, 0), minY, maxY, { occ })
-    if bandHolds(count, HUMAN_STACK_GAP, dodgeMin, dodgeMax) then
+    if bandHolds(count, stackGap, dodgeMin, dodgeMax) then
       minY, maxY = dodgeMin, dodgeMax
     end
-    ys = rowStack(count, HUMAN_STACK_GAP, centerY, minY, maxY)
+    ys = rowStack(count, stackGap, centerY, minY, maxY)
+    -- Two NPC trainers on one Gen 3 edge (a solo double's pair: each a 64px
+    -- front pic) where the column between the plates and the chips cannot
+    -- stack them a whole figure apart: they stand side by side on the one
+    -- row, the first on the trainer column and each next one inboard -- the
+    -- cart's own arrangement of a pair (pret OpponentHandleDrawTrainerPic:
+    -- the first trainer outer, the second nearer the middle).  A squeezed
+    -- stack would put one pic over the other.  Players' walkers (co-op) keep
+    -- their stack.
+    if onGen3() and count >= 2 and (maxY - minY) < (count - 1) * occ.up then
+      local pics = true
+      for _, human in ipairs(humans) do
+        if not (human and (human.trainerPic or human.picId or human.pic)) then pics = false end
+      end
+      local inboard = (side == "foe") and -1 or 1
+      local lastX = x + inboard * (count - 1) * M.HUMAN_ROW_PITCH3
+      local monEdge = (side == "foe") and (M.MON_COLUMN_FOE + math.floor(M.MON_DRAW / 2))
+        or (M.MON_COLUMN_ALLY - math.floor(M.MON_DRAW / 2))
+      local clear = (side == "foe") and (lastX - occ.half > monEdge)
+        or (lastX + occ.half < monEdge)
+      if pics and clear then
+        rowStep = inboard * M.HUMAN_ROW_PITCH3
+        local rowY = clamp(centerY, minY, maxY)
+        ys = {}
+        for i = 1, count do ys[i] = rowY end
+      end
+    end
   end
   for i, human in ipairs(humans) do
     local y = clamp(math.floor(num(ys[i], centerY)), minY, maxY)
@@ -1367,17 +1670,23 @@ local function placeHumans(humans, side, rows, paired, plates, out)
       id = human and human.id,
       name = human and human.name,
       spriteId = human and human.spriteId,
+      -- Gen 3 only (nil everywhere else): the NPC trainer's TRAINER_PIC_* id,
+      -- drawn instead of a walker, and the version / gender a peer's presence
+      -- carried, which is what maps their OW graphic onto this cart (C3).
+      trainerPic = human and (human.trainerPic or human.picId or human.pic),
+      version = human and human.version,
+      gender = human and human.gender,
       -- This trainer's party, for the roster chip. Carried verbatim -- list of
       -- sheets or referee roster string, see `M.rosterModel` -- because the
       -- placer's job is where a figure stands and the chip's shape is not its
       -- business. Absent for a side nobody described, which is what leaves a
       -- wild fight's foe edge without one.
       party = human and human.party,
-      x = x,
+      x = rowStep and (x + (i - 1) * rowStep) or x,
       y = y,
       facing = facing,
-      drawW = M.HUMAN_DRAW,
-      drawH = M.HUMAN_DRAW,
+      drawW = drawW,
+      drawH = drawH,
     }
   end
 end
@@ -1442,6 +1751,14 @@ local function placeMons(seats, side, rows, out)
       icon = seat and seat.icon,
       front = seat and (seat.front or seat.frontImage or seat.sprite),
       acting = seat and seat.acting and true or false,
+      -- Gen 3 only: how far the cart floats this species above its platform
+      -- (M.gen3Elevation; pret gEnemyMonElevation), and whether a Substitute
+      -- doll stands in for it. nil everywhere else.
+      elevation = seat and seat.elevation,
+      substitute = seat and seat.substitute and true or nil,
+      -- Whose monster, where a side has two trainers on it (a Gen 3 solo
+      -- double's pair, its partner): the plate's owner tag. nil elsewhere.
+      owner = seat and seat.owner,
       x = x,
       y = y,
       facing = facing,
@@ -1610,10 +1927,14 @@ function M.layout(ctx)
       -- would only duplicate a plate and cover the sprite it points at.
       if #listOf(ctx.targets) > 1 then
         local model = M.cardModel(targetMon)
+        -- Gen 3's card is taller: its 64px pic is drawn at 1x (a 48px fit
+        -- would be 0.75 of a pixel per pixel) and needs the room above the
+        -- chips.
+        local cardH = onGen3() and M.CARD_H3 or M.CARD_H
         local cx = targetMon.x + 28
-        local cy = targetMon.y - M.CARD_H - 8
+        local cy = targetMon.y - cardH - 8
         cx = clamp(cx, 4, M.WIDTH - M.CARD_W - 4)
-        cy = clamp(cy, 4, M.FIELD_BOTTOM - M.CARD_H - 4)
+        cy = clamp(cy, 4, M.FIELD_BOTTOM - cardH - 4)
         -- Prefer parking the card toward canvas center if near an edge.
         if targetMon.x > M.MIDLINE then
           cx = clamp(targetMon.x - M.CARD_W - 20, 4, M.WIDTH - M.CARD_W - 4)
@@ -1622,7 +1943,8 @@ function M.layout(ctx)
           x = cx,
           y = cy,
           w = M.CARD_W,
-          h = M.CARD_H,
+          h = cardH,
+          sprite = onGen3() and M.CARD_SPRITE3 or nil,
           model = model,
           mon = targetMon,
         }
@@ -1728,7 +2050,11 @@ function M.layout(ctx)
             and b.moveName or nil,
           t = clamp(num(b.t, 1), 0, 1),
           x = host.x,
-          y = host.y - math.floor(host.drawH / 2) - 6,
+          -- Gen 3's figure stands on its row and its 16x32 frame is headroom
+          -- first: the tail goes just over the head (~14px below the frame
+          -- top at 2x) rather than half-way down a 64px figure's face.
+          y = onGen3() and (host.y - host.drawH + 8)
+            or (host.y - math.floor(host.drawH / 2) - 6),
           human = host,
         }
       end
@@ -1773,6 +2099,9 @@ function M.layout(ctx)
       foe = pendingCount(ctx.pendingSeats, "foe"),
     },
     frame = num(ctx.frame, 0),
+    -- The weather over the field ("RAIN" | "SUN" | "SAND" | "HAIL"), nil
+    -- when the sky is clear. A Gen 3 or a Gold draw paints it (M.draw).
+    weather = M.weatherKey(ctx.weather),
     -- Bench evolution movie: a front pic in the middle of the field, with
     -- the same white pulse the on-plate `evolve` fx uses.
     evolveCenter = (function()
@@ -1842,7 +2171,7 @@ local function widthWith(font, text)
     local ok, w = pcall(font.getWidth, font, text)
     if ok and type(w) == "number" then return w end
   end
-  return #text * 6
+  return ClassicBattle.glyphCount(text) * 6
 end
 
 local function heightWith(font)
@@ -1959,7 +2288,8 @@ end
 -- only pairing that stays readable across violet and amber alike.
 local function drawStatusChip(gfx, font, status, x, y, h)
   local text = tostring(status):upper()
-  local color = M.STATUS_COLORS[tostring(status):lower()] or STATUS_FALLBACK
+  local colors = onGen3() and M.STATUS_COLORS3 or M.STATUS_COLORS
+  local color = colors[tostring(status):lower()] or STATUS_FALLBACK
   local w = widthWith(font, text) + 8
   gfx.setColor(color[1], color[2], color[3], 0.9)
   gfx.rectangle("fill", x, y, w, h, 2, 2)
@@ -1987,22 +2317,31 @@ end
 -- because Font:getWidth kerns — prefix width plus ellipsis width is not the
 -- same number, and the output here has to be byte-identical to the walk.
 -- Width is non-decreasing in the cut, which is what makes the search legal.
+--
+-- The cut is searched over glyphs (ClassicBattle.glyphCount / glyphPrefix),
+-- not bytes: a referee line carries é / … / ♂ / ♀ since wave 6, and a prefix
+-- ending inside one is invalid UTF-8 -- which a LÖVE font will not measure or
+-- print.  Cut in place rather than off a table of glyphs: a line that does
+-- not fit is cut again every frame it is drawn.
 local function fitLine(font, text, maxW)
   text = tostring(text or "")
   if widthWith(font, text) <= maxW then return text, false end
+  local prefix = ClassicBattle.glyphPrefix
   -- Floor of 1, as the walk had: something ellipsised beats an empty row.
-  local lo, hi, cut = 1, #text, 1
+  local lo, hi, cut = 1, ClassicBattle.glyphCount(text), 1
   while lo <= hi do
     local mid = math.floor((lo + hi) / 2)
-    if widthWith(font, text:sub(1, mid) .. "...") <= maxW then
+    if widthWith(font, prefix(text, mid) .. "...") <= maxW then
       cut = mid
       lo = mid + 1
     else
       hi = mid - 1
     end
   end
-  return text:sub(1, cut) .. "...", true
+  return prefix(text, cut) .. "...", true
 end
+-- For the suites.
+M.fitLine = fitLine
 
 -- Word wrap by measured width, honouring embedded newlines (battle text is
 -- written with them). Returns at most `maxLines` lines plus whether anything
@@ -2417,6 +2756,12 @@ end
 -- has no world. The live Game still has the overworld on the stack --
 -- read it from there so a house fight is not composed as OVERWORLD.
 local function overworldFrom(game)
+  -- Gen 3 has neither an overworld state nor a `game.stack` to find one on
+  -- (Game3 carries no stack; its modal layers are the game3 Stack, reached
+  -- through Gen3Ui), and its arena never asks: M.loadGen3 reads the map from
+  -- the engine (M.gen3MapContext). So nothing below -- the stack walk
+  -- included -- is reached on a FireRed / Emerald boot.
+  if onGen3() then return nil end
   local ow = peekOverworld()
   if ow then return ow end
   if type(game) ~= "table" then return nil end
@@ -3027,6 +3372,834 @@ function M.composeRomArena(game)
   return canvas, map ~= nil
 end
 
+-- ======================================================================
+-- the Gen 3 arm
+-- ======================================================================
+--
+-- FireRed, LeafGreen and Emerald keep their art pre-decoded in the player's
+-- import cache (RGBA, no palettes to apply), and the engine hands it out as
+-- LOVE images: `Pokemon.frontPic/backPic/icon`, `TrainerPic.front`,
+-- `OwSprites.getDraw`, `BattleChrome.terrain`. Every one of those is reached
+-- through src/Gen3.lua, so nothing here runs -- or requires anything -- off a
+-- Gen 3 boot. What this section adds on top is only arithmetic:
+--
+--   * **Pics stand on their own feet.** A GB pic is bottom-aligned in its
+--     56x56 box, which is what monDrawParams' 0.85 anchor assumes. A GBA pic
+--     is not: the art sits anywhere in its 64x64 cell and the cart moves it
+--     down by the species' pic y-offset (pret gMonFrontPicCoords), which works
+--     out to "the lowest opaque row lands on the cell's floor". M.picBounds
+--     measures that row once per image, so the arena, the list preview and the
+--     classic stage all put the feet where the cart does -- for a sprite mod's
+--     replacement art too, which no offset table knows about.
+--   * **Whole pixels.** 64px art in a 60px box is drawn at 1x, not at 0.94
+--     (monDrawParams' `integer`); icons are 32x32 at 2x; trainers 16x32 at 2x.
+--   * **The ground is the cart's.** The arena backdrop is the battle
+--     background the cart would pick for this map (the same terrain rules
+--     battle_bridge.lua applies at a battle start), widened at 2x; and every
+--     monster stands on the cart's own platform oval, cut out of that
+--     background, rather than on a painted mound.
+--
+-- ------- what a battle screen hands the arena on Gen 3
+--
+-- M.draw(battle, ctx, eng) is the Gen 1 / Gen 2 call, unchanged; on Gen 3 the
+-- ctx carries (MediatedBattle, CoopBattle):
+--
+--   seat.front       M.gen3Front(monOrSpecies, { form, shiny, personality })
+--   seat.icon        M.gen3Icon(monOrSpecies) -- the engine's icon record;
+--                    animated here (M.gen3IconFrame / gen3IconBob)
+--   seat.elevation   M.gen3Elevation(species) -- a floater's lift
+--   seat.substitute  true while a Substitute is up: the cart's doll stands in
+--   human.spriteId   an OBJ_EVENT_GFX_* name (the player's look, a peer's --
+--                    with human.version / human.gender, contract C3 -- or
+--                    Gen.trainerWalkSpriteId's walker for an NPC)
+--   human.trainerPic an NPC's TRAINER_PIC_* id (picId / pic accepted), or the
+--                    pic image itself: drawn instead of the walker
+--   ctx.weather      "RAIN" | "SUN" | "SAND" | "HAIL" (any case) -- painted
+--                    over the field (M.drawWeather)
+--
+-- The screen is a Gen3Ui.pushState state: drawsWidescreen() true means this
+-- arena, painted in window space from drawWidescreen(w, h) (Gen3Ui's
+-- render.hud pass), exactly as Gold's; false means CLASSIC BATTLE UI, drawn
+-- into the 240x160 canvas from draw() by ClassicBattle.drawGen3.
+
+G3.FIELD_ROWS = 112   -- battle background rows above the textbox chrome
+G3.FOE_FEET_Y = 71    -- where the cart stands a foe's feet (base 40 + 31)
+G3.ARENA_SCALE = 2    -- the wallpaper's scale on the 640x360 arena
+M.GBA_FOE_FEET_Y = G3.FOE_FEET_Y
+
+-- A drawable's pixels, read back through a scratch canvas (LOVE 11 has no
+-- Image:newImageData). nil without LOVE or on any failure. The caller's canvas,
+-- transform, scissor, shader, blend mode and colour all survive (push "all").
+function G3.readback(img)
+  local gfx = love and love.graphics
+  if not (gfx and gfx.newCanvas and img and img.getDimensions) then return nil end
+  local data = nil
+  pcall(function()
+    local iw, ih = img:getDimensions()
+    if iw < 1 or ih < 1 or iw > 1024 or ih > 1024 then return end
+    if img.typeOf and img:typeOf("Canvas") and img.newImageData then
+      data = img:newImageData()
+      return
+    end
+    local canvas = gfx.newCanvas(iw, ih)
+    gfx.push("all")
+    local drew = pcall(function()
+      gfx.setCanvas(canvas)
+      gfx.origin()
+      gfx.setScissor()
+      if gfx.setShader then gfx.setShader() end
+      gfx.setBlendMode("alpha")
+      gfx.clear(0, 0, 0, 0)
+      gfx.setColor(1, 1, 1, 1)
+      gfx.draw(img, 0, 0)
+    end)
+    gfx.pop()
+    if drew then data = canvas:newImageData() end
+  end)
+  return data
+end
+M.readback = G3.readback
+
+-- A picture's opaque bounds, { top, bottom, left, right, w, h } in its own
+-- pixels, or nil (no LOVE, fully transparent, unreadable). Measured once per
+-- image and remembered weakly.
+function M.picBounds(img)
+  if img == nil then return nil end
+  local hit = G3.bounds[img]
+  if hit ~= nil then return hit or nil end
+  local out = false
+  local data = G3.readback(img)
+  if data then
+    pcall(function()
+      local iw, ih = data:getDimensions()
+      local top, bottom, left, right
+      for y = 0, ih - 1 do
+        for x = 0, iw - 1 do
+          local _, _, _, a = data:getPixel(x, y)
+          if a > 0 then
+            if not top then top = y end
+            bottom = y
+            if not left or x < left then left = x end
+            if not right or x > right then right = x end
+          end
+        end
+      end
+      if top then
+        out = { top = top, bottom = bottom, left = left, right = right, w = iw, h = ih }
+      end
+    end)
+  end
+  G3.bounds[img] = out
+  return out or nil
+end
+
+-- How many transparent rows sit under the art: the distance the cart's pic
+-- offset moves it down. 0 when the bounds are unknown (the pic is then drawn
+-- as a bottom-aligned GB pic would be, which is a sane fallback).
+function M.picFloorPad(img)
+  local b = M.picBounds(img)
+  if not b then return 0 end
+  return math.max(0, b.h - 1 - b.bottom)
+end
+
+-- ------- the art a seat carries (what MediatedBattle / CoopBattle put on it)
+
+-- A seat's `front`: the 64x64 battle front pic as a LOVE image, for a mon
+-- table (egg, Unown letter, Spinda spots, shiny from OT + PID -- the engine's
+-- own mon-aware pick) or a species number (`opts.form/shiny/personality`).
+function M.gen3Front(subject, opts)
+  local entry = Gen3.frontPic(subject, opts)
+  if type(entry) == "table" then return entry.image end
+  return nil
+end
+
+-- The back pic (the classic stage's own-side battler).
+function M.gen3Back(subject, opts)
+  local entry = Gen3.backPic(subject, opts)
+  if type(entry) == "table" then return entry.image end
+  return nil
+end
+
+-- A seat's `icon`: the engine's party-icon record itself ({ image, w = 32,
+-- h = 32, frames, quads }), which the draw code animates.
+function M.gen3Icon(subject)
+  local icon = Gen3.icon(subject)
+  if type(icon) == "table" and icon.image then return icon end
+  return nil
+end
+
+-- An NPC trainer's front pic (TRAINER_PIC_* id), as an image.
+function M.gen3TrainerPic(picId)
+  local entry = Gen3.trainerPic(picId)
+  if type(entry) == "table" then return entry.image end
+  return nil
+end
+
+-- A trainer's back pic strip (the engine's trainer_pic.lua TrainerPic.back
+-- entry: { image, w, h, frames }, frames of 64x64 stacked), by the cart's
+-- TRAINER_BACK_PIC_* index -- the player's is their gender, a partner's his
+-- own (pret battle_controller_player_partner.c:1303 TRAINER_BACK_PIC_STEVEN)
+-- -- or by the engine battle profile's `backPics` key ("steven", "wally";
+-- profiles/emerald/battle.lua), which is how the engine's own battle names
+-- it (battle/init.lua st.partner.backPic).  Gen3.trainerBackPic takes a
+-- gender alone, so the index is asked of the engine here.  nil off Gen 3, or
+-- with no such pic in the player's cache.
+function M.gen3TrainerBackPic(which)
+  local index = tonumber(which)
+  if index == nil and type(which) == "string" and which ~= "" then
+    local Profile = Gen3.engine("src.core.game3.battle.profile")
+    local ok, bp = false, nil
+    if Profile and type(Profile.get) == "function" then
+      ok, bp = pcall(Profile.get, Gen3.session and Gen3.session() or nil)
+    end
+    local pics = ok and type(bp) == "table" and bp.backPics or nil
+    index = type(pics) == "table" and tonumber(pics[which]) or nil
+  end
+  if index == nil or index < 0 then return nil end
+  local TrainerPic = Gen3.engine("src.core.game3.trainer_pic")
+  if not (TrainerPic and type(TrainerPic.back) == "function") then return nil end
+  local ok, entry = pcall(TrainerPic.back, math.floor(index))
+  if ok and type(entry) == "table" and entry.image then return entry end
+  return nil
+end
+
+-- The player's own FRONT pic id (pret pokemon.c PlayerGenderToFrontTrainerPicId:
+-- TRAINER_PIC_BRENDAN / TRAINER_PIC_MAY on Emerald, by the save's gender --
+-- what the cart draws for the player beside a frontier partner,
+-- battle_controller_player.c:2304), read through the engine's constants for
+-- the running cart (the engine's own hall_of_fame.lua / dome_tourney.lua
+-- spelling).  FireRed / LeafGreen name RED / LEAF.  nil off Gen 3, or when
+-- the cart names no such pic; draw it with M.gen3TrainerPic.
+M.PLAYER_FRONT_PICS3 = {
+  rse = { [0] = "TRAINER_PIC_BRENDAN", [1] = "TRAINER_PIC_MAY" },
+  frlg = { [0] = "TRAINER_PIC_RED", [1] = "TRAINER_PIC_LEAF" },
+}
+function M.gen3PlayerFrontPicId(gender)
+  local C = Gen3.engine("src.core.game3.constants")
+  if not (type(C) == "table" and type(C.of) == "function") then return nil end
+  local okSet, set = pcall(C.of, Gen3.version and Gen3.version() or nil)
+  if not (okSet and type(set) == "table" and type(set.id) == "function") then return nil end
+  local family = (Gen3.family and Gen3.family()) == "frlg" and "frlg" or "rse"
+  local g = (Gen3.genderOf and Gen3.genderOf(gender)) or ((gender == 1) and 1 or 0)
+  local name = M.PLAYER_FRONT_PICS3[family][g == 1 and 1 or 0]
+  local okId, id = pcall(set.id, set, "trainer_classes", name)
+  id = okId and tonumber(id) or nil
+  if id == nil or id < 0 then return nil end
+  return math.floor(id)
+end
+
+-- A seat's `elevation`: how far the cart floats this species over its
+-- platform (pret gEnemyMonElevation -- Gastly, the Magnemite line...), or nil.
+-- Read from the engine's PicCoords, which is per version (Emerald's comes out
+-- of the player's cache).
+function M.gen3Elevation(species)
+  local sp = tonumber(species)
+  if not sp then return nil end
+  local PicCoords = Gen3.engine("src.core.game3.battle.pic_coords")
+  if not PicCoords then return nil end
+  local ok, elev = pcall(function() return PicCoords.elev[sp] end)
+  elev = ok and tonumber(elev) or nil
+  if elev and elev > 0 then return elev end
+  return nil
+end
+
+-- One frame of a Gen 3 party icon: (image, quad, size). `icon` is the engine
+-- record (M.gen3Icon) or a bare 32xN sheet of stacked frames; `frame` picks
+-- the bob frame. nil when there is nothing drawable.
+function M.gen3IconFrame(icon, frame)
+  if icon == nil then return nil end
+  frame = math.floor(num(frame, 0))
+  if type(icon) == "table" and icon.image ~= nil then
+    local img = icon.image
+    if img == nil then return nil end
+    local frames = math.max(1, math.floor(num(icon.frames, 1)))
+    local q = type(icon.quads) == "table" and icon.quads[frame % frames] or nil
+    return img, q, math.floor(num(icon.w, 32))
+  end
+  if not icon.getDimensions then return nil end
+  local okD, iw, ih = pcall(icon.getDimensions, icon)
+  if not okD then return nil end
+  local size = math.min(iw, ih)
+  local frames = math.max(1, math.floor(ih / math.max(size, 1)))
+  local quads = G3.iconQuads[icon]
+  if quads == nil and love and love.graphics and love.graphics.newQuad then
+    quads = {}
+    for f = 0, frames - 1 do
+      local okQ, q = pcall(love.graphics.newQuad, 0, f * size, size, size, iw, ih)
+      if okQ then quads[f] = q end
+    end
+    G3.iconQuads[icon] = quads
+  end
+  return icon, quads and quads[frame % frames] or nil, size
+end
+
+-- The party-icon bob: the cart flips the two frames about six times a second.
+function M.gen3IconBob(frame)
+  return math.floor(num(frame, 0) / 10) % 2
+end
+
+-- ------- the Substitute doll
+
+-- The cart's own doll (pret SUBSTITUTE_DOLL_FRONT / _BACK, out of the
+-- player's battle-animation cache): the front one for a foe -- and for every
+-- seat on the side-on arena, which draws front pics both ways -- the back one
+-- for the classic page's own seat. nil when the cache has none.
+function M.gen3SubstituteDoll(back)
+  local Anim = Gen3.engine("src.core.game3.battle.anim")
+  if not (Anim and type(Anim.substituteImage) == "function") then return nil end
+  -- battler 0 is the player's side, 1 the foe's (AnimCoords.sideOf)
+  local ok, img = pcall(Anim.substituteImage, back and 0 or 1)
+  if ok and img then return img end
+  return nil
+end
+
+-- An original stand-in for that doll, for a cache without the animation
+-- pack: a plush silhouette in primitives, feet on (cx, feetY), `size` tall.
+-- Vector art made here; no pixel of it comes from a ROM.
+function M.drawDollStandIn(gfx, cx, feetY, size, alpha, flip)
+  size = num(size, 40)
+  alpha = clamp(num(alpha, 1), 0, 1)
+  local u = size / 40
+  local dir = flip and -1 or 1
+  pcall(function()
+    local body = { 0.95, 0.90, 0.74 }
+    local line = { 0.36, 0.30, 0.22 }
+    gfx.setColor(line[1], line[2], line[3], alpha)
+    gfx.ellipse("fill", cx, feetY - 12 * u, 13 * u, 12 * u)
+    gfx.circle("fill", cx, feetY - 29 * u, 10 * u)
+    gfx.polygon("fill", cx - 9 * u, feetY - 33 * u, cx - 5 * u, feetY - 44 * u,
+      cx - 1 * u, feetY - 36 * u)
+    gfx.polygon("fill", cx + 9 * u, feetY - 33 * u, cx + 5 * u, feetY - 44 * u,
+      cx + 1 * u, feetY - 36 * u)
+    gfx.setColor(body[1], body[2], body[3], alpha)
+    gfx.ellipse("fill", cx, feetY - 12 * u, 12 * u, 11 * u)
+    gfx.circle("fill", cx, feetY - 29 * u, 9 * u)
+    gfx.polygon("fill", cx - 8 * u, feetY - 33 * u, cx - 5 * u, feetY - 42 * u,
+      cx - 2 * u, feetY - 35 * u)
+    gfx.polygon("fill", cx + 8 * u, feetY - 33 * u, cx + 5 * u, feetY - 42 * u,
+      cx + 2 * u, feetY - 35 * u)
+    gfx.setColor(line[1], line[2], line[3], alpha)
+    gfx.circle("fill", cx + dir * 4 * u, feetY - 30 * u, 1.5 * u)
+    gfx.circle("fill", cx - dir * 2 * u, feetY - 30 * u, 1.5 * u)
+    gfx.rectangle("fill", cx - 5 * u, feetY - 18 * u, 10 * u, math.max(1, u))
+    gfx.setColor(1, 1, 1, 1)
+  end)
+end
+
+-- ------- weather
+
+-- A weather value as any caller spells it (the referee's RAIN / SUN / SAND /
+-- HAIL, or rain / sunny / sandstorm / hail) -> one of those four, or nil.
+function M.weatherKey(value)
+  if value == nil or value == false then return nil end
+  local s = tostring(value):upper()
+  if s:find("RAIN", 1, true) then return "RAIN" end
+  if s:find("SUN", 1, true) then return "SUN" end
+  if s:find("SAND", 1, true) then return "SAND" end
+  if s:find("HAIL", 1, true) or s:find("SNOW", 1, true) then return "HAIL" end
+  return nil
+end
+
+-- The four skies: a wash over the field, and what falls or drifts through
+-- it. Original colours, like the particle palettes (src/Vfx.lua).
+M.WEATHER_LOOK = {
+  RAIN = { tint = { 0.20, 0.30, 0.66, 0.22 }, dot = { 0.86, 0.92, 1.00, 0.85 } },
+  SUN  = { tint = { 1.00, 0.84, 0.40, 0.16 }, dot = { 1.00, 0.96, 0.72, 0.18 } },
+  SAND = { tint = { 0.78, 0.60, 0.32, 0.24 }, dot = { 0.88, 0.72, 0.46, 0.90 } },
+  HAIL = { tint = { 0.80, 0.90, 1.00, 0.18 }, dot = { 0.96, 0.99, 1.00, 0.95 } },
+}
+
+-- Paint `key`'s weather into the rect (x, y, w, h) at animation tick `frame`.
+-- `unit` scales every particle (1 on the 640x360 arena, ~0.5 on the 240x160
+-- classic page). Deterministic -- a particle is a pure function of its index
+-- and the tick, with Vfx.rand01 for the scatter -- so two players watching one
+-- fight see the same rain. Draws nothing outside the rect, with no scissor
+-- (the arena is drawn under a scale transform that a window-space scissor
+-- would not follow). Returns true when it painted.
+function M.drawWeather(key, x, y, w, h, frame, unit)
+  local gfx = g()
+  local look = M.WEATHER_LOOK[M.weatherKey(key) or ""]
+  if not (gfx and look) then return false end
+  x, y, w, h = num(x, 0), num(y, 0), num(w, M.WIDTH), num(h, M.FIELD_HEIGHT)
+  frame = num(frame, 0)
+  unit = math.max(0.25, num(unit, 1))
+  local rand = Vfx.rand01
+  local area = (w * h) / (M.WIDTH * M.FIELD_HEIGHT)
+  local function wrap(v, lo, span) return lo + (v % span) end
+  -- Where particle i starts, as fractions of the rect: the R2 low-discrepancy
+  -- sequence (the plastic number's reciprocals), so a sky is evenly scattered
+  -- rather than bunched into the lines a hash lattice draws.
+  local function spot(i)
+    return (0.5 + i * 0.7548776662466927) % 1, (0.5 + i * 0.5698402909980532) % 1
+  end
+  return pcall(function()
+    local t = look.tint
+    gfx.setColor(t[1], t[2], t[3], t[4])
+    gfx.rectangle("fill", x, y, w, h)
+    local c = look.dot
+    local mode = M.weatherKey(key)
+    if mode == "RAIN" then
+      local n = math.max(12, math.floor(70 * area / unit + 0.5))
+      local len, lean = 14 * unit, 4 * unit
+      local thick = math.max(1, math.floor(2 * unit + 0.5))
+      gfx.setColor(c[1], c[2], c[3], c[4])
+      for i = 1, n do
+        local fx, fy = spot(i)
+        local speed = 0.8 + 0.4 * rand(i, 2, 11)
+        local px = wrap(fx * w - frame * 3 * unit * speed, x + lean, w - lean - thick)
+        local py = wrap(fy * h + frame * 12 * unit * speed, y, h - len)
+        gfx.polygon("fill", px, py, px + thick, py,
+          px - lean + thick, py + len, px - lean, py + len)
+      end
+    elseif mode == "SUN" then
+      local pulse = 0.5 + 0.5 * math.sin(frame * 0.05)
+      local cx, cy = x + w * 0.10, y + h * 0.08
+      for k = 3, 1, -1 do
+        gfx.setColor(c[1], c[2], c[3], c[4] * (0.7 + 0.3 * pulse) * (4 - k) / 2)
+        gfx.circle("fill", cx, cy, (26 + 22 * k) * unit)
+      end
+      gfx.setColor(c[1], c[2], c[3], c[4] * 0.8)
+      for r = 0, 5 do
+        local a = r * math.pi / 10 + 0.15 + frame * 0.002
+        local l = (w + h) * (0.35 + 0.1 * rand(r, 3, 17))
+        gfx.polygon("fill", cx, cy, cx + math.cos(a - 0.03) * l, cy + math.sin(a - 0.03) * l,
+          cx + math.cos(a + 0.03) * l, cy + math.sin(a + 0.03) * l)
+      end
+    elseif mode == "SAND" then
+      local n = math.max(16, math.floor(110 * area / unit + 0.5))
+      local s = math.max(2, math.floor(2 * unit + 0.5))
+      gfx.setColor(c[1], c[2], c[3], c[4])
+      for i = 1, n do
+        local fx, fy = spot(i)
+        local speed = 0.7 + 0.6 * rand(i, 1, 13)
+        local px = wrap(fx * w + frame * 7 * unit * speed, x, w - s * 2)
+        local py = wrap(fy * h + math.sin(frame * 0.08 + i) * 3 * unit
+          + frame * 0.6 * unit, y, h - s)
+        gfx.rectangle("fill", math.floor(px), math.floor(py), s * 2, s)
+      end
+    elseif mode == "HAIL" then
+      local n = math.max(10, math.floor(45 * area / unit + 0.5))
+      local s = math.max(2, math.floor(3 * unit + 0.5))
+      for i = 1, n do
+        local fx, fy = spot(i)
+        local speed = 0.8 + 0.4 * rand(i, 1, 19)
+        local px = wrap(fx * w - frame * 2 * unit * speed, x, w - s)
+        local py = wrap(fy * h + frame * 7 * unit * speed, y, h - s)
+        gfx.setColor(0.55, 0.78, 0.95, c[4])
+        gfx.rectangle("fill", math.floor(px) + 1, math.floor(py) + 1, s, s)
+        gfx.setColor(c[1], c[2], c[3], c[4])
+        gfx.rectangle("fill", math.floor(px), math.floor(py), s, s)
+      end
+    end
+    gfx.setColor(1, 1, 1, 1)
+  end) == true
+end
+
+-- ------- the backdrop
+
+-- Where the player stands, the way battle_bridge.lua reads it at a battle
+-- start: the current map's def (kind / mapType / battleType) and the metatile
+-- behaviour under the player (tall grass, sand, water...).
+function M.gen3MapContext()
+  local ctx = {}
+  local Map = Gen3.engine("src.core.game3.map")
+  if Map then
+    ctx.mapId = rawget(Map, "current")
+    if type(Map.currentDef) == "function" then
+      local ok, def = pcall(Map.currentDef)
+      if ok and type(def) == "table" then ctx.def = def end
+    end
+  end
+  local Collision = Gen3.engine("src.core.game3.collision")
+  local Player = Gen3.engine("src.core.game3.player")
+  if Collision and Player and type(Collision.behavior) == "function" then
+    local bx, by = Player.cellX, Player.cellY
+    if Player.moving then bx, by = Player.targetX, Player.targetY end
+    local ok, b = pcall(Collision.behavior, bx, by)
+    if ok then ctx.behavior = b end
+  end
+  return ctx
+end
+
+-- The cart's battle-background sheet for that spot ("grass", "cave",
+-- "building", "gym", "indoor_1"...): terrain from the behaviour and map type,
+-- the map's battle scene on top (gyms, the League), then the sheet the cache
+-- actually holds for it. nil when the engine cannot say.
+function M.gen3TerrainKey(ctx)
+  ctx = ctx or M.gen3MapContext()
+  local BattleBg = Gen3.engine("src.core.game3.battle.bg")
+  if not BattleBg then return nil end
+  local def = type(ctx.def) == "table" and ctx.def or {}
+  local key = nil
+  pcall(function()
+    local terrain = BattleBg.resolveFromBehavior(ctx.behavior, def.kind, def.mapType)
+    terrain = BattleBg.resolveOverride(terrain, { mapBattleScene = def.battleType })
+    key = BattleBg.sheetKey(terrain)
+  end)
+  if type(key) == "string" and key ~= "" then return key end
+  return nil
+end
+
+-- The three drop-in buckets (assets/battle/custom/{wild,indoor,gym}.png) for a
+-- Gen 3 sheet: gyms and the League rooms are "gym", buildings / interiors /
+-- the link room / team bases are "indoor", every outdoor sheet (grass, sand,
+-- water, cave, mountain, plain) is "wild" -- the same split Gen 1 draws.
+G3.GYM_SHEETS = {
+  gym = true, leader = true, champion = true,
+  lorelei = true, bruno = true, agatha = true, lance = true,
+  sidney = true, phoebe = true, glacia = true, drake = true,
+}
+G3.INDOOR_SHEETS = {
+  building = true, indoor_1 = true, indoor_2 = true, link = true,
+  frontier = true, magma = true, aqua = true,
+}
+
+function M.arenaKindGen3(key, ctx)
+  if G3.GYM_SHEETS[key] then return "gym" end
+  if G3.INDOOR_SHEETS[key] then return "indoor" end
+  local def = type(ctx) == "table" and ctx.def or nil
+  if key == nil and type(def) == "table" then
+    -- pret MAP_TYPE_INDOOR (8) / SECRET_BASE (9) with no sheet to go on
+    local mt = tonumber(def.mapType)
+    if mt == 8 or mt == 9 then return "indoor" end
+  end
+  return "wild"
+end
+
+-- The smallest vertical period of the wallpaper's bottom stripes, so the
+-- ground can be continued below the cart's 112 rows without a seam. 0 when
+-- the rows do not repeat (a gradient): the last row is then stretched.
+function G3.wallPeriod(data)
+  local okD, w = pcall(data.getDimensions, data)
+  if not okD then return 0 end
+  local function same(y1, y2)
+    for _, x in ipairs({ 0, math.floor(w / 2), w - 1 }) do
+      local r1, g1, b1, a1 = data:getPixel(x, y1)
+      local r2, g2, b2, a2 = data:getPixel(x, y2)
+      if r1 ~= r2 or g1 ~= g2 or b1 ~= b2 or a1 ~= a2 then return false end
+    end
+    return true
+  end
+  local last = G3.FIELD_ROWS - 1
+  for p = 1, 16 do
+    local ok = true
+    for k = 0, 31 do
+      local y = last - k
+      if y - p < 0 then break end
+      if not same(y, y - p) then ok = false; break end
+    end
+    if ok then return p end
+  end
+  return 0
+end
+
+-- The platform oval out of the cart's enemy-platform layer: every pixel of
+-- that layer that is not simply the wallpaper showing through, cropped to its
+-- bounds. The layer carries a tile-aligned rectangle of wallpaper around the
+-- oval; those pixels are dropped by a flood from the rectangle's edge (not by
+-- a colour test alone, which would also punch holes wherever the oval's own
+-- paint matches a stripe).
+function G3.cutPlatform(plat, wall)
+  local pd, wd = G3.readback(plat), G3.readback(wall)
+  if not (pd and wd) then return nil end
+  local out = nil
+  pcall(function()
+    local w, h = pd:getDimensions()
+    local ww, wh = wd:getDimensions()
+    local function opaque(x, y)
+      local _, _, _, a = pd:getPixel(x, y)
+      return a > 0
+    end
+    local function wallpaper(x, y)
+      if x >= ww or y >= wh then return false end
+      local r1, g1, b1 = pd:getPixel(x, y)
+      local r2, g2, b2 = wd:getPixel(x, y)
+      return math.abs(r1 - r2) < 0.004 and math.abs(g1 - g2) < 0.004
+        and math.abs(b1 - b2) < 0.004
+    end
+    -- flood the see-through wallpaper in from every opaque edge pixel
+    local drop, qx, qy, head = {}, {}, {}, 1
+    local function push(x, y)
+      if x < 0 or y < 0 or x >= w or y >= h then return end
+      local k = y * w + x
+      if drop[k] ~= nil then return end
+      if opaque(x, y) and wallpaper(x, y) then
+        drop[k] = true
+        qx[#qx + 1], qy[#qy + 1] = x, y
+      else
+        drop[k] = false
+      end
+    end
+    for y = 0, h - 1 do
+      for x = 0, w - 1 do
+        if opaque(x, y) then
+          local edge = x == 0 or y == 0 or x == w - 1 or y == h - 1
+            or not opaque(x - 1, y) or not opaque(x + 1, y)
+            or not opaque(x, y - 1) or not opaque(x, y + 1)
+          if edge then push(x, y) end
+        end
+      end
+    end
+    while head <= #qx do
+      local x, y = qx[head], qy[head]
+      head = head + 1
+      push(x - 1, y); push(x + 1, y); push(x, y - 1); push(x, y + 1)
+    end
+    local top, bottom, left, right
+    for y = 0, h - 1 do
+      for x = 0, w - 1 do
+        if opaque(x, y) and drop[y * w + x] ~= true then
+          if not top then top = y end
+          bottom = y
+          if not left or x < left then left = x end
+          if not right or x > right then right = x end
+        end
+      end
+    end
+    if not top then return end
+    local cw, ch = right - left + 1, bottom - top + 1
+    local cut = love.image.newImageData(cw, ch)
+    for y = 0, ch - 1 do
+      for x = 0, cw - 1 do
+        local sx, sy = left + x, top + y
+        if opaque(sx, sy) and drop[sy * w + sx] ~= true then
+          cut:setPixel(x, y, pd:getPixel(sx, sy))
+        end
+      end
+    end
+    local img = love.graphics.newImage(cut)
+    if img.setFilter then img:setFilter("nearest", "nearest") end
+    out = { image = img, w = cw, h = ch, feetDy = G3.FOE_FEET_Y - top }
+  end)
+  return out
+end
+
+-- The 640x360 arena for a Gen 3 map: the cart's battle wallpaper at 2x (it is
+-- horizontal stripes, so it tiles across without a seam), its ground stripes
+-- continued down to the menu band, and the platform oval kept aside for
+-- G3.drawPlatform to stand under every monster. Built in the player's own
+-- session from the player's own cache; nothing of it is ever saved.
+function M.composeGen3Arena(key)
+  local gfx = love and love.graphics
+  if not (gfx and gfx.newCanvas and gfx.newQuad) then return nil end
+  local BattleChrome = Gen3.engine("src.ui.game3.battle_chrome")
+  if not BattleChrome then return nil end
+  local entry = nil
+  pcall(function()
+    -- Installs the chrome once when no battle has run yet this session.
+    if type(BattleChrome.manifest) == "function" then BattleChrome.manifest() end
+    entry = (key and BattleChrome.terrain(key)) or BattleChrome.terrain("grass")
+      or BattleChrome.terrain("building")
+  end)
+  local wall = type(entry) == "table" and (entry.bgImage or entry.image) or nil
+  if not wall then return nil end
+  local wallData = G3.readback(wall)
+  local period = wallData and G3.wallPeriod(wallData) or 0
+  local okC, canvas = pcall(gfx.newCanvas, M.WIDTH, M.HEIGHT)
+  if not (okC and canvas) then return nil end
+  local painted = false
+  local ww = 256
+  pcall(function() ww = (wall:getDimensions()) end)
+  local wh = select(2, wall:getDimensions())
+  local rows = math.min(G3.FIELD_ROWS, wh)
+  local S = G3.ARENA_SCALE
+  gfx.push("all")
+  pcall(function()
+    gfx.setCanvas(canvas)
+    gfx.origin()
+    gfx.setScissor()
+    gfx.clear(0, 0, 0, 1)
+    gfx.setColor(1, 1, 1, 1)
+    local span = ww * S
+    local x0 = math.floor((M.WIDTH - span) / 2)
+    while x0 > 0 do x0 = x0 - span end
+    local field = gfx.newQuad(0, 0, ww, rows, ww, wh)
+    local strip
+    if period > 0 then
+      strip = gfx.newQuad(0, rows - period, ww, period, ww, wh)
+    else
+      strip = gfx.newQuad(0, rows - 1, ww, 1, ww, wh)
+    end
+    local x = x0
+    while x < M.WIDTH do
+      gfx.draw(wall, field, x, 0, 0, S, S)
+      local y = rows * S
+      if period > 0 then
+        while y < M.HEIGHT do
+          gfx.draw(wall, strip, x, y, 0, S, S)
+          y = y + period * S
+        end
+      else
+        gfx.draw(wall, strip, x, y, 0, S, M.HEIGHT - y)
+      end
+      x = x + span
+    end
+    painted = true
+  end)
+  gfx.pop()
+  if not painted then return nil end
+  pcall(function() canvas:setFilter("nearest", "nearest") end)
+  if entry.enemyPlat then
+    G3.platform = G3.cutPlatform(entry.enemyPlat, entry.bgImage or wall)
+  end
+  return canvas
+end
+
+-- M.load's Gen 3 arm. The same ladder as Gen 1: a player's drop-in for this
+-- kind of place, else the cart's own background, else the authored PNG --
+-- and nothing is locked in before the map is known, so a fight entered in the
+-- instant before the field loads still upgrades on a later frame.
+function M.loadGen3(modFacade)
+  modFacade = modFacade or mod
+  local ctx = M.gen3MapContext()
+  if ctx.mapId == nil and ctx.def == nil then return nil end
+  local key = M.gen3TerrainKey(ctx)
+  local kind = M.arenaKindGen3(key, ctx)
+  local layers = { bg = nil, field = nil }
+  local okL, got = pcall(M.customArenaLayers, modFacade, kind)
+  if okL and type(got) == "table" then layers = got end
+  local function withField(base)
+    if base == nil or layers.field == nil then return base end
+    local ok, mixed = pcall(M.compositeArena, base, layers.field)
+    if ok and mixed ~= nil then return mixed end
+    return base
+  end
+  if layers.bg ~= nil then
+    -- a drop-in paints its own ground; no cart platform under the seats
+    G3.platform = nil
+    return lockArena(withField(layers.bg))
+  end
+  local rom = M.composeGen3Arena(key)
+  if rom then return lockArena(withField(rom)) end
+  G3.platform = nil
+  local path = (kind == "indoor") and Config.BATTLEFIELD_ARENA_INDOOR
+    or Config.BATTLEFIELD_ARENA
+  local img = loadArenaImage(modFacade, path)
+  if img then return lockArena(withField(img)) end
+  if layers.field ~= nil then return lockArena(layers.field) end
+  if type(path) == "string" and path ~= ""
+      and modFacade and modFacade.log and modFacade.log.warn then
+    modFacade.log:warn("could not build the Gen 3 battlefield arena for %s; "
+      .. "the theatre paints the two-platform stand-in -- re-import the ROM "
+      .. "cache (battle backgrounds) or reinstall the mod so %s is present",
+      tostring(key or "this map"), tostring(path))
+  end
+  return nil
+end
+
+-- The platform the composed arena cut out, { image, w, h, feetDy }, or nil
+-- (no Gen 3 arena yet, or a drop-in that paints its own ground). Read-only;
+-- the shot drivers and the suite assert on it.
+function M.gen3Platform()
+  return G3.platform
+end
+
+-- The cart's platform under one seated monster, at the seat (a lunge or a
+-- faint moves the monster, not the ground). False when this arena has none.
+function G3.drawPlatform(gfx, mon)
+  local plat = G3.platform
+  if not (plat and plat.image and mon and mon.side) then return false end
+  local feet = math.floor(num(mon.y, 0) + M.MON_DRAW3_FEET)
+  return pcall(function()
+    gfx.setColor(1, 1, 1, 1)
+    gfx.draw(plat.image, math.floor(num(mon.x, 0) - plat.w / 2),
+      feet - plat.feetDy)
+  end) == true
+end
+M.MON_DRAW3_FEET = 64 - math.ceil(64 * M.MON_TOP_REACH)
+
+-- ------- the humans
+
+-- A walker's sheet on this cart and the frame it faces the field with:
+-- (sprite record, frame index, flip). `h.spriteId` is an OBJ_EVENT_GFX_* name
+-- (a player's presence look or Gen.trainerWalkSpriteId's pick for an NPC), a
+-- number, or nil; a peer's version / gender map it through the cart's own link
+-- rule (Gen3.viewerGfxFor, contract C3).
+--
+-- Only a peer's look is fenced.  A human described by a peer (it carries the
+-- peer's `version` / `gender`) goes through Gen3.viewerGfxFor alone, which
+-- draws curated looks and maps anything else to the link rule -- a wire name
+-- never picks a raw cart graphic.  A local human (an NPC trainer's walker, our
+-- own look) is this cart's own data, so its name is drawn as itself first;
+-- viewerGfxFor would otherwise turn every NPC class outside the look table
+-- into the player's figure.
+function G3.walker(h)
+  local Ow = Gen3.engine("src.core.game3.ow_sprites")
+  if not Ow then return nil end
+  local sprite = h.spriteId
+  local gid = tonumber(sprite)
+  local peer = h.version ~= nil or h.gender ~= nil
+  if not gid and not peer and type(sprite) == "string" then
+    gid = Gen3.gfxId(sprite)
+  end
+  if not gid then
+    local ok, id = pcall(Gen3.viewerGfxFor, sprite, h.version, h.gender)
+    gid = ok and tonumber(id) or nil
+  end
+  if not gid then return nil end
+  local okS, spr = pcall(Ow.getDraw or Ow.get, gid)
+  if not (okS and type(spr) == "table" and spr.image and spr.quads) then return nil end
+  local frame, flip = 0, false
+  if type(Ow.pose) == "function" then
+    local okP, f, fl = pcall(Ow.pose, spr, h.facing or "right", 0, false)
+    if okP then frame, flip = f or 0, fl and true or false end
+  end
+  return spr, frame, flip
+end
+M.walker3 = G3.walker
+
+-- One human on a Gen 3 field, feet on the row y: an NPC trainer as the cart's
+-- own front pic (facing the camera, the way every Gen 3 battle shows one), a
+-- player as their overworld walker at 2x, turned to face the field.
+function G3.drawHuman(h)
+  local gfx = g()
+  if not (gfx and h) then return end
+  local x, y = num(h.x, 0), num(h.y, 0)
+  if h.trainerPic ~= nil then
+    -- a TRAINER_PIC_* id, or the pic itself when the screen already has it
+    local img = h.trainerPic
+    if type(img) == "number" or type(img) == "string" then
+      img = M.gen3TrainerPic(img)
+    elseif not (type(img) == "userdata" or (type(img) == "table" and img.getDimensions)) then
+      img = nil
+    end
+    if img then
+      local ok = pcall(function()
+        local iw, ih = img:getDimensions()
+        gfx.setColor(1, 1, 1, 1)
+        gfx.draw(img, math.floor(x - iw / 2),
+          math.floor(y - ih + M.picFloorPad(img)))
+      end)
+      if ok then return end
+    end
+  end
+  local spr, frame, flip = G3.walker(h)
+  local quad = spr and spr.quads[frame]
+  if spr and quad then
+    local s = M.HUMAN_SCALE
+    local w = num(spr.width, 16) * s
+    local hh = num(spr.height, 32) * s
+    local dx = math.floor(x - w / 2)
+    local dy = math.floor(y - hh)
+    local ok = pcall(function()
+      gfx.setColor(1, 1, 1, 1)
+      if flip then
+        gfx.draw(spr.image, quad, dx + w, dy, 0, -s, s)
+      else
+        gfx.draw(spr.image, quad, dx, dy, 0, s, s)
+      end
+    end)
+    if ok then return end
+  end
+  -- Placeholder silhouette when neither a pic nor a walker resolves.
+  pcall(function()
+    local w, hh = G3.humanBox()
+    gfx.setColor(0.15, 0.15, 0.2, 0.85)
+    gfx.rectangle("fill", x - w / 2, y - hh, w, hh, 2, 2)
+    gfx.setColor(1, 1, 1, 1)
+  end)
+end
+
 -- `game` is threaded in from `M.draw` for the Gen 2 rung alone: everything
 -- else here is generation-free, and a caller with no game simply gets the
 -- Gen 1 ladder (which is also what a headless test that hands over neither
@@ -3196,10 +4369,16 @@ local function drawMonShadow(gfx, x, y, w, alpha)
   end)
 end
 
--- fx: an M.fxSeat record, or nil for the neutral draw.
-local function drawMonIcon(mon, frame, fx)
+-- fx: an M.fxSeat record, or nil for the neutral draw. g3: this is a Gen 3
+-- field (whole-pixel pics stood on their own feet, the cart's platform under
+-- the seat, 32x32 animated icons) -- false / nil is the Gen 1 / Gen 2 draw,
+-- untouched.
+local function drawMonIcon(mon, frame, fx, g3)
   local gfx = g()
   if not gfx then return end
+  -- The cart's platform belongs to the seat, so it is there whether or not
+  -- the monster is: under a ball rocking on it, under a faint's fade.
+  local platformed = g3 and G3.drawPlatform(gfx, mon) or false
   fx = type(fx) == "table" and fx or NO_FX
   -- Inside a ball: not even the shadow, or the seat reads as still occupied.
   if fx.hidden then return end
@@ -3213,22 +4392,55 @@ local function drawMonIcon(mon, frame, fx)
   -- Prefer battle FRONT art; bag icons are a last resort (and must be cropped).
   local img = resolveDrawable(mon.front)
   local fromIcon = false
+  local icon3Quad = nil
+  -- Gen 3: a Substitute is up, so the cart's doll stands in the seat (the
+  -- monster is behind it and not drawn), or the plush stand-in when this
+  -- cache has no doll.
+  local doll = g3 and mon.substitute and true or false
+  if doll then
+    img = M.gen3SubstituteDoll(false)
+    if not img then
+      if not platformed then drawMonShadow(gfx, x, y + box * 0.28, box, alpha) end
+      M.drawDollStandIn(gfx, x, mon.y + M.MON_DRAW3_FEET, 40, alpha, mon.facing == "right")
+      return
+    end
+  end
   if not img then
-    img = resolveDrawable(mon.icon)
+    if g3 then
+      img, icon3Quad = M.gen3IconFrame(mon.icon, M.gen3IconBob(frame))
+    else
+      img = resolveDrawable(mon.icon)
+    end
     fromIcon = img ~= nil
   end
 
-  drawMonShadow(gfx, x, y + box * 0.28, box, alpha)
+  -- The platform is the ground contact on a cart arena; a shadow on top of it
+  -- would be a second one.
+  if not platformed then
+    drawMonShadow(gfx, x, y + box * 0.28, box, alpha)
+  end
 
   local drawn = false
   if img then
     pcall(function()
       if img.setFilter then pcall(function() img:setFilter("nearest", "nearest") end) end
       local iw, ih = img:getDimensions()
-      local quad = fromIcon and iconFrameQuad(img) or nil
+      local quad = nil
+      if fromIcon then
+        if g3 then quad = icon3Quad else quad = iconFrameQuad(img) end
+      end
       local p = M.monDrawParams(mon, iw, ih, {
         x = x, y = y, iconFrame = quad ~= nil, scale = fx.scale,
+        integer = g3 or nil, iconSize = (g3 and quad ~= nil) and 32 or nil,
       })
+      if g3 and not fromIcon then
+        -- Stand the art on the box floor, as the cart's pic offset does, then
+        -- lift a floater by the cart's own elevation for it (a doll sits on
+        -- the ground whatever it stands in for).
+        p.y = p.y + M.picFloorPad(img) * p.sy
+        local elev = doll and 0 or num(mon.elevation, 0)
+        if elev > 0 then p.y = p.y - elev * p.sy end
+      end
       -- A spawn at t == 0 has nothing to draw yet; the shadow already marks
       -- the seat, so do not fall through to the placeholder box.
       if p.scale <= 0 then drawn = true; return end
@@ -3296,7 +4508,9 @@ local function drawCard(card, eng)
     panel(gfx, x, y, w, h)
 
     local pad = 7
-    local sp = M.CARD_SPRITE
+    -- card.sprite is Gen 3's 64 (layout sets it); nil is Gen 1 / Gen 2's 48.
+    local g3card = card.sprite ~= nil
+    local sp = card.sprite or M.CARD_SPRITE
     local spriteY = y + 20
     local sprite = model.front
     if sprite then
@@ -3305,6 +4519,13 @@ local function drawCard(card, eng)
         local iw, ih = sp, sp
         if sprite.getDimensions then iw, ih = sprite:getDimensions() end
         local sc = math.min(sp / math.max(iw, 1), sp / math.max(ih, 1))
+        if g3card then
+          -- Whole pixels, standing on the box floor like the field pic.
+          sc = math.max(1, math.floor(sc + 0.5))
+          gfx.draw(sprite, math.floor(x + (w - iw * sc) / 2),
+            math.floor(spriteY + sp - ih * sc + M.picFloorPad(sprite) * sc), 0, sc, sc)
+          return
+        end
         gfx.draw(sprite, x + (w - iw * sc) / 2, spriteY + (sp - ih * sc) / 2,
           0, sc, sc)
       end)
@@ -3388,15 +4609,28 @@ local function drawPlate(plate)
         chipX = chipX + drawStatusChip(gfx, micro, model.status, chipX, statusY, 12) + 2
       end
       if model.confused then
-        drawStatusChip(gfx, micro, "CNF", chipX, statusY, 12)
+        chipX = chipX + drawStatusChip(gfx, micro, "CNF", chipX, statusY, 12) + 2
       end
+      local figuresW = 0
       if plate.numbers then
         -- Exact figures on your own side only, per series convention.
         withFont(gfx, M.FONT_SECONDARY, function(secondary)
           local hpText = ("%d/%d"):format(model.shownHp, model.maxHp)
+          figuresW = widthWith(secondary, hpText)
           setColor(gfx, TEXT_MUTED)
-          gfx.print(hpText, chipRight - widthWith(secondary, hpText), statusY - 1)
+          gfx.print(hpText, chipRight - figuresW, statusY - 1)
         end)
+      end
+      if model.owner then
+        -- Whose monster (M.PLATE_OWNER_CHARS): in whatever the chips and the
+        -- figures leave of the status row, or not at all.
+        local room = chipRight - chipX - (figuresW > 0 and figuresW + 4 or 0)
+        if room >= M.PLATE_OWNER_MIN_W then
+          local tag = fitLine(micro, model.owner, room)
+          setColor(gfx, TEXT_MUTED)
+          local tagX = plate.numbers and chipX or (chipRight - widthWith(micro, tag))
+          gfx.print(tag, tagX, statusY)
+        end
       end
       withFont(gfx, M.FONT_PRIMARY, function(primary)
         setColor(gfx, TEXT_ON)
@@ -3705,6 +4939,34 @@ local function seatOf(layout, side, seatIndex)
   return nil
 end
 
+-- The hand of the trainer standing on `side`: the figure paired with seat
+-- `seatIndex` when one is asked for and stands there, else the side's first
+-- figure.  nil when nobody stands on that side.
+local function throwerHand(layout, side, seatIndex)
+  local first, match = nil, nil
+  for _, h in ipairs(listOf(layout.humans)) do
+    if h.side == side then
+      if first == nil then first = h end
+      if seatIndex ~= nil and h.index == seatIndex then
+        match = h
+        break
+      end
+    end
+  end
+  local thrower = match or first
+  if not thrower then return nil end
+  return thrower.x,
+    thrower.y - math.floor(num(thrower.drawH, M.HUMAN_DRAW) / 2)
+end
+
+-- A side's edge column at mid-field height: where a throw starts with no
+-- trainer to start it.
+local function edgeHand(side)
+  local edge = HUMAN_PAD + math.floor(M.HUMAN_DRAW / 2)
+  return side == "ally" and edge or (M.WIDTH - edge),
+    M.FIELD_TOP + math.floor(M.FIELD_HEIGHT * 0.5)
+end
+
 -- Where a thrown ball starts, as the thrower's shoulder (the top of the
 -- sprite) rather than its centre.
 --
@@ -3721,28 +4983,21 @@ end
 -- the side's first trainer, which is who threw it before this field existed.
 -- No trainer on that side at all (a wild side, a headless layout) still falls
 -- back to the side's edge column at mid-field height.
+--
+-- **The figure, never a seat.** A catch ball leaves the trainer whether or not
+-- that trainer has a monster out: in the Safari Zone and the old man's
+-- tutorial side a fields nothing for the whole fight, and the cart's throw
+-- there (B_ANIM_BALL_THROW_WITH_TRAINER) is the trainer's own -- the arc
+-- starts at the figure on our edge, not at the empty square a monster of ours
+-- would stand on (`throwerHand`; tests/gen3_battlefield.lua pins it).
 local function ballOrigin(layout, targetSide, own, seatIndex)
   local side = targetSide
   if not own then side = (targetSide == "foe") and "ally" or "foe" end
-  local first, match = nil, nil
-  for _, h in ipairs(listOf(layout.humans)) do
-    if h.side == side then
-      if first == nil then first = h end
-      if own and seatIndex ~= nil and h.index == seatIndex then
-        match = h
-        break
-      end
-    end
-  end
-  local thrower = match or first
-  if thrower then
-    return thrower.x,
-      thrower.y - math.floor(num(thrower.drawH, M.HUMAN_DRAW) / 2)
-  end
-  local edge = HUMAN_PAD + math.floor(M.HUMAN_DRAW / 2)
-  return side == "ally" and edge or (M.WIDTH - edge),
-    M.FIELD_TOP + math.floor(M.FIELD_HEIGHT * 0.5)
+  local x, y = throwerHand(layout, side, own and seatIndex or nil)
+  if x then return x, y end
+  return edgeHand(side)
 end
+M.ballOrigin = ballOrigin
 
 -- The counts M.seatAnchor wants, read off the layout the renderer already
 -- holds: a caller passes nothing new to get an effect drawn at an empty seat.
@@ -4361,6 +5616,43 @@ local function vfxAnchor(layout, side, seatIndex)
   return M.seatAnchor(side, seatIndex, anchorCounts(layout, side))
 end
 
+-- Does `side` have any monster on the arena at all?
+local function sideFielded(layout, side)
+  for _, m in ipairs(listOf(layout.mons)) do
+    if m.side == side then return true end
+  end
+  return false
+end
+
+-- Where a travelling effect (projectile / beam) leaves from, or nil when it
+-- names no origin (it degrades to a burst at the target, as ever):
+--
+--   * `fromTrainer` ("ally" | "foe"): thrown by that side's trainer -- the
+--     Safari's bait, rock and POKeBLOCK (Vfx.GENERAL_LOOK3 `from =
+--     "trainer"`): the figure's hand, else the side's edge column, a catch
+--     ball's own rule (`ballOrigin`);
+--   * `fromSide` / `fromSeat`: that seat, or the square it is about to
+--     occupy -- except, on Gen 3, a side with no monster on the arena at all
+--     and a trainer standing on it (a fight where side a fields nothing, pret
+--     battle_controller_safari.c: the sprite there is the trainer's), whose
+--     throw leaves the trainer rather than an empty square.
+local function vfxOrigin(layout, e)
+  local thrower = (e.fromTrainer == "ally" or e.fromTrainer == "foe") and e.fromTrainer or nil
+  if thrower then
+    local x, y = throwerHand(layout, thrower)
+    if x then return x, y end
+    return edgeHand(thrower)
+  end
+  local fromSide = (e.fromSide == "foe" or e.fromSide == "ally") and e.fromSide or nil
+  if not fromSide then return nil end
+  if onGen3() and not seatOf(layout, fromSide, e.fromSeat) and not sideFielded(layout, fromSide) then
+    local x, y = throwerHand(layout, fromSide)
+    if x then return x, y end
+  end
+  return vfxAnchor(layout, fromSide, e.fromSeat)
+end
+M.vfxOrigin = vfxOrigin
+
 -- One `vfx` entry, end to end: resolve its look, work out where it plays, and
 -- hand the particles to the burst above.
 --
@@ -4404,6 +5696,10 @@ local function drawVfx(layout, e)
 
   local x, y = vfxAnchor(layout, side, e.seatIndex)
   local burstT = t
+  -- A travelling delivery's launch point (`vfxOrigin`): the seat it came
+  -- from, or the trainer who threw it.
+  local ox, oy = nil, nil
+  if delivery == "projectile" or delivery == "beam" then ox, oy = vfxOrigin(layout, e) end
 
   if delivery == "self" then
     if fromSide then x, y = vfxAnchor(layout, fromSide, e.fromSeat) end
@@ -4411,8 +5707,7 @@ local function drawVfx(layout, e)
     x = M.MIDLINE
     y = M.FIELD_TOP + math.floor(M.FIELD_HEIGHT * 0.5)
     R = R * M.FX_VFX_FIELD
-  elseif delivery == "projectile" and fromSide then
-    local ox, oy = vfxAnchor(layout, fromSide, e.fromSeat)
+  elseif delivery == "projectile" and ox then
     local travel = M.FX_VFX_TRAVEL
     if t < travel then
       -- Additive for the styles that are light: a spark in flight is
@@ -4428,8 +5723,7 @@ local function drawVfx(layout, e)
       return
     end
     burstT = (t - travel) / (1 - travel)
-  elseif delivery == "beam" and fromSide then
-    local ox, oy = vfxAnchor(layout, fromSide, e.fromSeat)
+  elseif delivery == "beam" and ox then
     -- Ember / spark / psi beams are light; they want additive the same way
     -- the burst does. Ice and water streams are matter and do not.
     local stream = (styleName == "ember" or styleName == "spark"
@@ -4801,10 +6095,20 @@ end
 -- menu around it. The caller's pcall would have failed the whole widget and
 -- sent a live fight to the GB chrome over a decoration.
 local function drawListPreview(gfx, row, rect, facing)
+  local g3 = onGen3()
   local img = resolveDrawable(row.front)
   local fromIcon = false
+  local icon3Quad = nil
   if not img then
-    img = resolveDrawable(row.icon)
+    if g3 then
+      -- The cart's two-frame bob, on the wall clock: the band has no frame
+      -- counter of its own.
+      local t = 0
+      pcall(function() t = love.timer.getTime() * 60 end)
+      img, icon3Quad = M.gen3IconFrame(row.icon, M.gen3IconBob(t))
+    else
+      img = resolveDrawable(row.icon)
+    end
     fromIcon = img ~= nil
   end
   if not img then return end
@@ -4815,17 +6119,32 @@ local function drawListPreview(gfx, row, rect, facing)
       pcall(function() img:setFilter("nearest", "nearest") end)
     end
     local iw, ih = img:getDimensions()
-    local quad = fromIcon and iconFrameQuad(img) or nil
+    local quad = nil
+    if fromIcon then
+      if g3 then quad = icon3Quad else quad = iconFrameQuad(img) end
+    end
     local cx = rect.x + rect.size / 2
     local p = M.monDrawParams({ drawW = rect.size, facing = facing }, iw, ih,
-      { x = cx, y = rect.y, iconFrame = quad ~= nil })
+      { x = cx, y = rect.y, iconFrame = quad ~= nil,
+        integer = g3 or nil, iconSize = (g3 and quad ~= nil) and 32 or nil })
     if p.scale <= 0 or p.h <= 0 then return end
     -- Centred in the box, not feet-anchored to a seat centre: the band has no
     -- ground line for the pic to stand on. Only the y monDrawParams computed
     -- is replaced -- its scale, its flip and its horizontal anchor are the
     -- parts that make this the same sprite the field draws.
     local ty = rect.y + math.floor((rect.size - p.h) / 2)
-    drawMonShadow(gfx, cx, ty + p.h - 2, p.w, alpha)
+    local feet = ty + p.h
+    if g3 and not fromIcon then
+      -- A GBA pic's art is not centred in its cell: centre the art itself, and
+      -- put the contact shadow under its feet rather than under the cell.
+      local b = M.picBounds(img)
+      if b then
+        local artMid = (b.top + b.bottom + 1) / 2 * p.sy
+        ty = math.floor(rect.y + rect.size / 2 - artMid)
+        feet = ty + (b.bottom + 1) * p.sy
+      end
+    end
+    drawMonShadow(gfx, cx, feet - 2, p.w, alpha)
     gfx.setColor(1, 1, 1, alpha)
     if quad then
       gfx.draw(img, quad, p.x, ty, 0, p.sx, p.sy)
@@ -5010,6 +6329,7 @@ function M.draw(battle, ctx, eng)
     -- per `pcall` it makes, and the answer cannot change inside a frame.
     local okGen, drawGen = pcall(Gen.generation, drawGame)
     local drawGen2 = okGen and drawGen == 2
+    local drawGen3 = okGen and drawGen == 3
     local layout = M.layout(ctx)
     local hasFx = #layout.fx > 0
     local gfx = g()
@@ -5031,11 +6351,16 @@ function M.draw(battle, ctx, eng)
       drawArena(drawGame)
 
       for _, h in ipairs(layout.humans) do
-        pcall(drawHuman, h, layout.frame, eng, drawGame, drawGen2)
+        if drawGen3 then
+          pcall(G3.drawHuman, h)
+        else
+          pcall(drawHuman, h, layout.frame, eng, drawGame, drawGen2)
+        end
       end
       for _, mon in ipairs(layout.mons) do
         pcall(drawMonIcon, mon, layout.frame,
-          hasFx and M.fxSeat(layout.fx, mon.side, mon.seatIndex) or nil)
+          hasFx and M.fxSeat(layout.fx, mon.side, mon.seatIndex) or nil,
+          drawGen3)
       end
       if layout.evolveCenter then
         local evo = layout.evolveCenter
@@ -5048,13 +6373,31 @@ function M.draw(battle, ctx, eng)
         }, layout.frame, {
           dx = 0, dy = 0, alpha = 1, scale = 1,
           flash = evo.flash, hidden = false,
-        })
+        }, drawGen3)
       end
       -- Balls / poofs sit above the mons (a ball occludes the seat it lands
       -- on) but under the HUD, which never yields the field.
       if hasFx then pcall(drawFieldFx, layout) end
+      -- The weather, over the field and under the HUD, the order the cart
+      -- layers its own rain and sandstorm in: Gen 3's `weather` events, and
+      -- Gold's RAIN DANCE / SUNNY DAY / SANDSTORM, read off the referee's
+      -- lines (MediatedBattle.weatherOfLine2).  Red has none to state.
+      if (drawGen3 or drawGen2) and layout.weather then
+        pcall(M.drawWeather, layout.weather, 0, M.FIELD_TOP, M.WIDTH,
+          M.FIELD_HEIGHT, layout.frame, 1)
+      end
       for _, plate in ipairs(layout.plates) do
-        pcall(drawPlate, plate)
+        -- A seat's own HUD shake (ENEMY_HUD_SHAKE_ANIM) moves its plate alone.
+        local hud = hasFx and plate.mon
+          and M.fxPlateShake(layout.fx, plate.side, plate.mon.seatIndex) or 0
+        if hud ~= 0 then
+          local moved = {}
+          for k, v in pairs(plate) do moved[k] = v end
+          moved.x = plate.x + hud
+          pcall(drawPlate, moved)
+        else
+          pcall(drawPlate, plate)
+        end
       end
       -- After the plates and before the pointer: the chips sit in the two
       -- corners the plates never reach, so the order between those two is free

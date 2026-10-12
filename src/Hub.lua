@@ -7,7 +7,8 @@
 -- engine's own link code, and its `mmo.relay` payloads pass through unread.
 --
 -- **Battle does not.** From PROTOCOL 10 a battle this hub brokers is
--- resolved *here*, by BattleSim/Turn (Gen1) or BattleSim2/Turn (Gen2) per
+-- resolved *here*, by BattleSim/Turn (Gen1), BattleSim2/Turn (Gen2) or
+-- BattleSim3/Turn (Gen 3: FireRed, LeafGreen, Emerald -- PROTOCOL 30) per
 -- `opts.generation`, and the clients receive an ordered stream of events
 -- they draw rather than rolling their own. The mediated-battles section
 -- below is that plumbing, and server/lib/relay.js runs the same one over
@@ -47,7 +48,14 @@ local Rank = need("Rank")
 
 -- Wave 2 T2d: pick the mediated-battle twin at Hub.new from hub generation.
 -- Gen1 (default) keeps BattleSim; Gen2 never loads Gen1 Turn for refereeing.
+-- Gen 3 referees on BattleSim3, whose bag catalog is Items.bagEffect keyed by
+-- numeric pret item id -- Wire.effectsFor(3) puts it behind the one
+-- `itemEffect` the bag paths below call, the same adapter Wire proves an
+-- upload against, so the proof and the spend read one table.
 local function battleSimFor(generation)
+  if generation == 3 then
+    return need("BattleSim3/Turn"), Wire.effectsFor(3)
+  end
   if generation == 2 then
     return need("BattleSim2/Turn"), need("BattleSim2/Effects")
   end
@@ -247,10 +255,15 @@ M.Entropy = Entropy
 
 function M.new(opts)
   opts = opts or {}
-  -- PROTOCOL 20 generation lock. Default 1 when omitted so existing Gen1
-  -- fixtures and deploys keep working; Gen2 hubs MUST pass generation:2
-  -- (HostServer / CLI -- twin of server/lib/relay.js opts.generation).
-  local generation = Wire.generation(opts.generation)
+  -- PROTOCOL 20 generation lock, 1, 2 or 3 (3 from PROTOCOL 30: FireRed,
+  -- LeafGreen and Emerald share one Gen 3 hub).  Default 1 when omitted so
+  -- existing Gen 1 fixtures and deploys keep working; Gen 2 and Gen 3 hubs
+  -- MUST pass their generation (HostServer passes the boot's -- twin of
+  -- server/lib/relay.js opts.generation).  Read with Wire.int rather than
+  -- Wire.generation: this is the host's own number, not a stranger's hello,
+  -- and a value outside 1..3 here is an embedding bug that the fixture
+  -- default covers the same way the Node constructor does.
+  local generation = Wire.int(opts.generation, 1, Wire.GENERATION_MAX) or 1
   local Turn, Effects = battleSimFor(generation)
   return setmetatable({
     limit = Config.clampPlayers(opts.maxPlayers),
@@ -510,6 +523,11 @@ local function presenceOf(hub, client)
     -- the B button or the bike, so the client is the only authority and this
     -- is what it last reported.
     fast = client.fast == true,
+    -- The cart they said hello from (PROTOCOL 30), fixed for the session.
+    -- With presence because it is how a viewer reads `sprite`: on a Gen 3
+    -- hub a FireRed and an Emerald player draw from two graphics tables that
+    -- share no player name.  Nil when the hello carried none.
+    version = client.version,
     profile = client.profile,
     -- Carried with presence rather than with the card: a rating moves while
     -- the player is standing there, and the card is a snapshot of their
@@ -653,6 +671,7 @@ function M:admit(client)
 
   client.name = hello.name
   client.sprite = hello.sprite or Config.defaultSpriteFor(self.generation)
+  client.version = hello.version
   client.profile = hello.profile
   client.map, client.x, client.y = hello.map, hello.x, hello.y
   client.facing = hello.facing or "down"
@@ -1384,6 +1403,81 @@ local function battleSeconds(clock)
   return math.floor(tonumber(clock) or 0)
 end
 
+-- The fights whose outcome may carry Pay Day coins: the sim's own EXP_MODES
+-- (src/BattleSim3/Turn.lua `_checkOver`; the Gen 1 / Gen 2 referees' K11
+-- coins follow the same rule), the three where side a is players and side b
+-- is the hub's NPC seats.  1v1 / coop_pvp are link rules and pay none.  Twin
+-- of relay.js PAY_DAY_MODES.
+local PAY_DAY_MODES = { wild = true, coop_wild = true, coop_npc = true }
+
+-- The fights a mid-fight learn or level-up (`mmo.battle_moveset`) is heard
+-- in: the fights against the computer, the referees' EXP_MODES again.  No
+-- cart gains experience in a link battle -- pokered GainExperience (engine/
+-- battle/experience.asm) returns at once on LINK_STATE_BATTLING, pokecrystal /
+-- pokegold GiveExperiencePoints (engine/battle/core.asm) on a non-zero
+-- wLinkMode, pokeemerald / pokefirered Cmd_getexp (battle_script_commands.c)
+-- skips to its last state under BATTLE_TYPE_LINK -- and a battle learns a
+-- move only from a level-up's learnset or the evolution one brings, so in a
+-- 1v1 / coop_pvp fight no monster's level, stats or moves ever change.  An
+-- honest client sends nothing there (the referees emit no `exp` in a link
+-- fight, and the client's level-up path is the only sender); a message that
+-- arrives anyway is a forgery -- 999 stats re-sent every turn, or a one-slot
+-- "learn" of a move it never had -- against another player, and is dropped
+-- whole.  Twin of relay.js LEARN_MODES.
+local LEARN_MODES = { wild = true, coop_wild = true, coop_npc = true }
+
+-- Whether a referee's verdict carries its Pay Day coins onto the broadcast
+-- (contract K11 of docs/plans/gen12-referee-gaps-fix.md).  Every generation's
+-- outcome -- a knockout, a catch, a run, a forfeit -- reaches one copy, in
+-- M:settleMediated, so this is the whole rule:
+--
+--   * a positive count only: Lua reads a 0 as true where the JS twin reads it
+--     as false, so "no coins" is spelled as the field's absence on both
+--     (every reader reads a 0 as absent anyway);
+--   * a fight against the computer only (PAY_DAY_MODES): the mode test keeps
+--     the field off a player-vs-player fight even if a sim ever set it;
+--   * an escape (reason `run`) pays on Red alone.  pokered's EndOfBattle adds
+--     wTotalPayDayMoney whenever wBattleResult is still 0, and a Teleport /
+--     Whirlwind / Roar (SwitchAndTeleportEffect) or POKE DOLL escape only
+--     sets wEscapedFromBattle -- so the Gen 1 referee reports coins on those.
+--     Gold calls every escape a DRAW (SetBattleDraw from Teleport and
+--     Whirlwind / Roar, PokeDollEffect's own, the run command's in
+--     TryToRunAwayFromBattle, WildFled_EnemyFled_LinkBattleCanceled), and
+--     ExitBattle skips CheckPayDay unless wBattleResult is WIN; Gen 3 gives
+--     the money only from HandleEndTurn_BattleWon.  Their referees never
+--     report coins on a run, and this keeps the field off one even if a sim
+--     ever set it.
+--
+-- `generation` is the hub's own.  Twin of paysDay in server/lib/relay.js.
+local function paysDay(generation, mode, outcome)
+  local coins = tonumber(outcome.payDay)
+  if not (coins and coins > 0 and PAY_DAY_MODES[mode]) then return false end
+  if outcome.reason == "run" then return generation == 1 end
+  return true
+end
+
+-- The cart family a fighter entry's `family` names, keyed by the cart the
+-- player's hello named (Wire.VERSIONS).  Gen 3 (BattleSim3 Turn.FAMILIES,
+-- docs/plans/gen3-battle-sheet.md §1.1): obedience reads it for one rule --
+-- FireRed / LeafGreen exempt Focus Punch from the random-move branch, Emerald
+-- does not -- so one Gen 3 hub seating both carts has to say whose mon is
+-- whose, or every Emerald mon in a co-op fight plays FireRed's rule.  Gen 2
+-- (contract K6 of docs/plans/gen12-referee-fidelity.md, Gen.family's names):
+-- BattleSim2 reads side a's first fighter for the rule Gold / Silver and
+-- Crystal disagree on -- TruncateHL_BC loops on Crystal outside a link battle
+-- and makes one pass on Gold / Silver (pokegold effect_commands.asm) -- so a
+-- Gold hub seating a Crystal player has to say so.  The hub's own word, from
+-- the hello it admitted, never a field off the wire: a party carries no
+-- `family` and none is read.  A cart not listed (no version in the hello;
+-- every Gen 1 cart) leaves the field off, and the referee plays its default
+-- (frlg, gs).  The hello admitted only a cart of this hub's generation
+-- (Wire.version), so a key is always this hub's own.  Twin of relay.js
+-- CART_FAMILY.
+local CART_FAMILY = {
+  gold = "gs", silver = "gs", crystal = "crystal",
+  firered = "frlg", leafgreen = "frlg", emerald = "rse",
+}
+
 -- The fight this connection is in, when the hub is the one running it.  nil
 -- for a player who is not fighting, and for a co-op group still on the legacy
 -- client-simulated path.
@@ -1508,6 +1602,7 @@ function M:openMediatedBattle(id, plan)
     ruleset = nil,
     parties = {},      -- seat id -> the sanitised party that filled it
     bags = {},         -- player id -> { [itemId] = count } from party.bag
+    bagNames = {},     -- Gen 3: player id -> { [itemId] = display name }
     bagHold = {},      -- player id -> itemId held until turn resolves
     sim = nil,
     settled = false,
@@ -1584,6 +1679,7 @@ function M:fillBattleParty(record, client, party)
     -- never reaches this branch, so their own bag is not wiped by that upload.
     record.bags = record.bags or {}
     record.bags[client.id] = self:bagMap(party.bag)
+    self:noteBagNames(record, client.id, party.bag)
     return true
   end
 
@@ -1595,13 +1691,36 @@ function M:fillBattleParty(record, client, party)
     hand[#hand + 1] = mon
   end
 
+  -- One trainer, so every seat it is dealt across is that trainer: each
+  -- carries the party's display name and Red move-choice layers (Wire.battleParty
+  -- reads `name` on Red / Gold and `aiMods` on Red, wave 6 of
+  -- docs/plans/gen12-referee-gaps-fix.md) -- tryStartSim names the seat and
+  -- hands the layers to the referee from here.  K16 of
+  -- docs/plans/gen12-referee-remaining-gaps.md rides the same way: Red's
+  -- `aiClass` and Gold's `trainerItems`, `aiFlags`, `itemSwitch` and
+  -- `baseReward`.  The same tables on every seat, as `aiMods` is -- one
+  -- trainer, one record; what a 2v2 shares is the referee's to say.
+  --
+  -- Gold's `countSpeciesTypes` (K23) is the one fact about the party rather
+  -- than the trainer: the types of the species numbered the uploaded party's
+  -- size, which the referee reads as BaseData[wOTPartyCount] for the seat it
+  -- sits on.  So it rides only onto a seat dealt the whole party -- the count
+  -- it was stated for; a seat holding part of a 2v2's deal has another count,
+  -- and carries none (the referee then reads slot 1's own types, Crystal's
+  -- walk, rather than a species for a count that is not this seat's).
   local kept, dropped = {}, {}
   for at, npcId in ipairs(record.npcIds) do
     if dealt[at] and #dealt[at] > 0 then
       kept[#kept + 1] = npcId
+      local whole = #dealt[at] == #party.mons
       record.parties[npcId] = {
         battle = party.battle, side = party.side,
         badges = party.badges, mons = dealt[at],
+        name = party.name, aiMods = party.aiMods,
+        aiClass = party.aiClass, trainerItems = party.trainerItems,
+        aiFlags = party.aiFlags, itemSwitch = party.itemSwitch,
+        baseReward = party.baseReward,
+        countSpeciesTypes = whole and party.countSpeciesTypes or nil,
       }
     else
       dropped[npcId] = true
@@ -1623,6 +1742,7 @@ function M:fillBattleParty(record, client, party)
   record.bags = record.bags or {}
   if kept[1] and not self:isWildSeat(record, kept[1]) then
     record.bags[kept[1]] = self:bagMap(party.bag)
+    self:noteBagNames(record, kept[1], party.bag)
   end
   return true
 end
@@ -1653,19 +1773,62 @@ local function movesetDeltaOk(old, incoming)
   return false
 end
 
--- Mid-fight learn / replace (PROTOCOL 28). Twin of Relay.applyBattleMoveset.
--- Unchanged ids keep the hub's PP and combat fields; a transformed battler
--- is left alone so this does not end Transform a turn early.
-function M:applyBattleMoveset(record, client, payload)
-  if not (record and record.sim and payload) then return false end
-  local fighter = record.sim.byId and record.sim.byId[client.id]
-  if not (fighter and type(fighter.mons) == "table") then return false end
+-- Gen 3's moveset apply.  BattleSim3 keeps the battler apart from the party
+-- mon (`fighter.b`, whose `moves` is the mon's list until Transform / Mimic
+-- lays an overlay copy over it), and its rows carry the four fields the Gen 3
+-- sim branches on (num, target, priority, flags).  So the party list is always
+-- rewritten -- it is what the fight goes on with after the next switch and
+-- what the overlay drops back to -- and the active battler takes the new list
+-- only when it is not wearing an overlay: a Transform is left alone exactly as
+-- the older sims leave a transformed mon alone.  Twin of relay.js.
+local function moveRow3(prev, nm)
+  if prev and prev.id == nm.id then
+    return {
+      id = prev.id, name = prev.name ~= nil and prev.name or nm.name,
+      num = prev.num ~= nil and prev.num or nm.num,
+      pp = prev.pp, maxPp = prev.maxPp ~= nil and prev.maxPp or nm.maxPp,
+      power = prev.power, accuracy = prev.accuracy,
+      type = prev.type ~= nil and prev.type or nm.type,
+      effect = prev.effect, chance = prev.chance,
+      target = prev.target ~= nil and prev.target or nm.target,
+      priority = prev.priority ~= nil and prev.priority or nm.priority,
+      flags = prev.flags ~= nil and prev.flags or nm.flags,
+    }
+  end
+  return {
+    id = nm.id, name = nm.name, num = nm.num, pp = nm.pp,
+    maxPp = nm.maxPp ~= nil and nm.maxPp or nm.pp,
+    power = nm.power, accuracy = nm.accuracy, type = nm.type,
+    effect = nm.effect, chance = nm.chance, target = nm.target,
+    priority = nm.priority, flags = nm.flags,
+  }
+end
+
+local function applyBattleMoveset3(fighter, payload)
   local mon = fighter.mons[payload.mon + 1]
-  if not mon or mon.transformed then return false end
+  if not mon then return false end
   local incoming = payload.moves
   if type(incoming) ~= "table" or #incoming == 0 then return false end
   local old = type(mon.moves) == "table" and mon.moves or {}
   if not movesetDeltaOk(old, incoming) then return false end
+  local nextMoves = {}
+  for i, nm in ipairs(incoming) do nextMoves[i] = moveRow3(old[i], nm) end
+  local b = fighter.b
+  local active = b ~= nil and b.mon == mon
+  mon.moves = nextMoves
+  if active and not b.overlay then b.moves = nextMoves end
+  return true
+end
+
+-- The Gen 1 / Gen 2 move list a learn leaves on a live battler.  Unchanged
+-- ids keep the hub's PP and combat fields -- `highCrit` among them -- with
+-- only what the hub's row never stated (a name, a max PP, a type, the K8
+-- PP Ups and Gold priority) filled from the client's; a new id takes the
+-- client's row whole.  `highCrit` is carried as the sims' copyMove spells it
+-- (a boolean): before contract K8 this rebuild named only the nine core
+-- fields, so a learn silently cost every move on the mon its high-crit flag.
+-- Twin of nextMoves12 in server/lib/relay.js.
+local function nextMoves12(old, incoming)
   local nextMoves = {}
   for i, nm in ipairs(incoming) do
     local prev = old[i]
@@ -1677,36 +1840,271 @@ function M:applyBattleMoveset(record, client, payload)
         power = prev.power, accuracy = prev.accuracy,
         type = prev.type ~= nil and prev.type or nm.type,
         effect = prev.effect, chance = prev.chance,
+        highCrit = prev.highCrit,
+        ppUps = prev.ppUps ~= nil and prev.ppUps or nm.ppUps,
+        priority = prev.priority ~= nil and prev.priority or nm.priority,
+        -- The referee's own note, never the wire's: the base PP its maximum
+        -- is a GetMaxPP over (Red's copyMove, BattleSim Effects.basePpOf), or
+        -- the base a Gold MIMIC / TRANSFORM / SKETCH copy came from
+        -- (BattleSim2 Effects.basePp).  Dropped, a level-up's re-send left a
+        -- Red row whose next 63-PP wrap (stepPp's borrow) kept the old
+        -- maximum instead of re-reading GetMaxPP over the moved PP Up bits.
+        basePp = prev.basePp,
       }
     else
       nextMoves[i] = {
         id = nm.id, name = nm.name, pp = nm.pp, maxPp = nm.maxPp,
         power = nm.power, accuracy = nm.accuracy, type = nm.type,
         effect = nm.effect, chance = nm.chance,
+        highCrit = nm.highCrit == true,
+        ppUps = nm.ppUps, priority = nm.priority,
       }
     end
   end
-  mon.moves = nextMoves
+  return nextMoves
+end
+-- Exported with the delta rule above so a referee that runs without a hub --
+-- the solo path, src/SoloBattle.lua -- applies a learn by the same two rules
+-- rather than a third copy of them.  Twin exports in server/lib/relay.js.
+M.movesetDeltaOk = movesetDeltaOk
+M.nextMoves12 = nextMoves12
+
+-- Every id the same, in the same slots: nothing for the carts' LearnMove to
+-- do.  A level-up with no new move at that level still re-sends the list the
+-- client already had (contract K9 rides the moveset), and LearnMove runs only
+-- for a new move -- pokered LearnMoveFromLevelUp (evos_moves.asm) and
+-- pokecrystal LearnLevelMoves (evolve.asm) call it only on a learnset row of
+-- the new level -- so such a re-send is no learn at all.
+local function sameIds12(old, incoming)
+  if #old ~= #incoming then return false end
+  for i = 1, #incoming do
+    local prev = old[i]
+    if not (prev and prev.id == incoming[i].id) then return false end
+  end
   return true
 end
 
+-- The party's own move list beneath a live battler's MIMIC: `base` (the
+-- battle list, or the one put aside at a Transform) with every slot a MIMIC
+-- wrote while the monster was itself given back the row it held
+-- (`mon.preMimic`, keyed by the 1-based slot -- BattleSim Effects'
+-- MIMIC_EFFECT keeps it and `restoreMoves` gives it back at a switch-out).
+-- The carts' MIMIC writes the battle struct alone (pokered MimicEffect,
+-- pokecrystal BattleCommand_Mimic), so the party slot still holds MIMIC, and
+-- its PP is the cart's:
+--
+--   * Red: DecrementPP writes the battle and the party PP alike while the
+--     monster is not TRANSFORMed, so the party's MIMIC has the slot's PP --
+--     the one the copy is spending (`restoreMoves` reads it the same way);
+--   * Gold: CheckMimicUsed stops BattleCommand_DoTurn's party spend on a
+--     slot whose party move is MIMIC (the copy has its own 5 PP), so the
+--     party's MIMIC keeps the PP the saved row was taken with.
+--
+-- No saved rows: `base` itself.  Twin of partyMoves12 in server/lib/relay.js.
+local function partyMoves12(generation, base, mimic)
+  if type(mimic) ~= "table" then return base end
+  local out = {}
+  for i, row in ipairs(base) do
+    local own = mimic[i]
+    if type(own) == "table" then
+      local back = {}
+      for k, v in pairs(own) do back[k] = v end
+      if generation == 1 and row.pp ~= nil then back.pp = row.pp end
+      out[i] = back
+    else
+      out[i] = row
+    end
+  end
+  return out
+end
+
+-- Where a Gen 1 / Gen 2 learn lands on a live battler, and whether it did.
+--
+-- A learn is judged against the PARTY list, the one the client's sheet is --
+-- never the battle list a Transform or a MIMIC laid over it, against which an
+-- honest learn reads as two changes and was refused:
+--
+--   * Transformed, the party list is the one the referee put aside at
+--     Transform -- `mon.preTransform.moves` (BattleSim2 Effects
+--     TRANSFORM_EFFECT, BattleSim Effects.applyPrimary's TransformEffect_) --
+--     which a switch-out or a faint gives back (BattleSim2 Turn
+--     `_undoTransform`, BattleSim Effects.untransform), the way the carts
+--     reload the battle struct from the party (InitBattleMon /
+--     LoadBattleMonFromParty);
+--   * under a MIMIC used while the monster was itself, the slots it wrote
+--     are given back their own rows (`partyMoves12`).
+--
+-- The learn is written into the party list -- the one put aside when there
+-- is one, so the switch-out restores the learned list rather than the one
+-- from before it; a Mimic'd slot's saved row is folded into it then, so
+-- nothing gives the old row back over the learned list.  What the battle
+-- struct does is the cart's LearnMove, which runs only for a new move
+-- (`sameIds12`: a re-send of the same ids leaves the fight as it is):
+--
+--   * Red: pokered LearnMove (learn_move.asm) copies the whole party list
+--     and its PP over wBattleMonMoves / wBattleMonPP whenever the learner is
+--     the monster out -- no TRANSFORMED check -- so a transformed monster
+--     fights on with its own (learned) moves and their party PP under the
+--     copied types and stats, and a MIMIC's copy is gone.  Reproduced: the
+--     battle list becomes a copy of the party's, and while TRANSFORMed the
+--     PP it spends never reaches the party list (DecrementPP stops before the
+--     party copy), so the two are separate tables;
+--   * Gold: pokecrystal / pokegold LearnMove (learn.asm) makes the same copy
+--     only when SUBSTATUS_TRANSFORMED is clear: an untransformed monster's
+--     MIMIC copy is gone too, while a transformed one's copied moves stay in
+--     the fight until the switch-out.
+--
+-- Before wave 4 a Red re-send overwrote a transformed battler's copied moves
+-- (a level-up with no new move ended the Transform's moveset), and a learn
+-- under a MIMIC was refused.  A transformed battler with no list put aside
+-- (a referee that keeps none) is left alone: replacing its copies would end
+-- the Transform a turn early.  Twin of learnTo in server/lib/relay.js.
+local function learnTo(generation, mon, incoming)
+  if type(incoming) ~= "table" or #incoming == 0 then return false end
+  local saved = nil
+  if mon.transformed then
+    saved = mon.preTransform
+    if type(saved) ~= "table" then return false end
+  end
+  local list = mon.moves
+  if saved then list = saved.moves end
+  local base = type(list) == "table" and list or {}
+  local mimic = type(mon.preMimic) == "table" and mon.preMimic or nil
+  local party = partyMoves12(generation, base, mimic)
+  if not movesetDeltaOk(party, incoming) then return false end
+  local learnt = not sameIds12(party, incoming)
+  if saved then
+    saved.moves = nextMoves12(party, incoming)
+    if mimic then mon.preMimic = nil end
+    if generation == 1 and learnt then mon.moves = nextMoves12(party, incoming) end
+    return true
+  end
+  -- Itself, the battle list is the party list but for a MIMIC's slots: with
+  -- none, the re-send rewrites it as it always did (unchanged ids keep the
+  -- hub's rows, nextMoves12); with one, only a learn replaces it.
+  if learnt or not mimic then
+    mon.moves = nextMoves12(party, incoming)
+    if mimic then mon.preMimic = nil end
+  end
+  return true
+end
+-- Exported beside the two rules it is built from, for the same caller: a
+-- referee with no hub (src/SoloBattle.lua) lands a learn where a hub would.
+M.learnTo = learnTo
+
+-- Mid-fight learn / replace (PROTOCOL 28) and level-up (contract K9 of
+-- docs/plans/gen12-referee-gaps-fix.md). Twin of Relay.applyBattleMoveset.
+--
+-- Moves: unchanged ids keep the hub's PP and combat fields (nextMoves12); a
+-- learn is judged against, and lands in, the party list -- the one a
+-- Transform put aside (`preTransform.moves`), a MIMIC's slots given back
+-- (`preMimic`) -- and reaches the battle list only as the cart's LearnMove
+-- does: for a new move alone, on Red whatever the Transform, on Gold only
+-- untransformed.  learnTo has the rule and the carts' reasons.
+--
+-- Level-up: when the payload states a `level`, `stats` or `maxHp`, the hub forwards
+-- them to the referee's K9 API once the moves are settled:
+--
+--   record.sim:levelUp(playerId, monIndex, level, stats, maxHp)
+--
+--     playerId  the sender's seat (`client.id`, the sim's byId key)
+--     monIndex  1-BASED party index -- the sim's own convention on both
+--               twins (fighter.mons[i] here, monAt(fighter, i) in JS) --
+--               so the wire's 0-based `mon` plus one
+--     level     1..LEVEL_MAX, or nil when the payload stated none
+--     stats     the dialect's `stats` block (Wire.battleMoveset), or nil
+--     maxHp     1..HP_MAX, or nil
+--
+-- always forwarded whatever became of the moves -- a transformed mon still
+-- grew, and a learn refused as a rewrite does not undo the level it came
+-- with.  Guarded on the method existing: the Gen 1 / Gen 2 referees
+-- implement it, BattleSim3 never does, and a hub whose sim predates it
+-- simply applies the moves as before.
+--
+-- Who judges what, layer by layer:
+--
+--   * Wire.battleMoveset (the sanitiser) checks shape and bounds alone: the
+--     dialect's move rows, a level within 1..LEVEL_MAX, a `stats` block of
+--     the dialect's keys within the sheet's stat bounds, a max HP within
+--     1..HP_MAX.  It judges no claim;
+--   * this hub decides whether the message is heard at all -- only in the
+--     fights against the computer (LEARN_MODES: no cart levels or learns in
+--     a link battle, so in a 1v1 / coop_pvp fight it is dropped whole, on
+--     every generation) and only for the sender's own seat -- and what a
+--     move list may change (learnTo: one slot appended or replaced, every
+--     unchanged row keeping the hub's PP and combat fields);
+--   * the referee's levelUp decides what a level claim rebuilds (the cart's
+--     in-battle CalcStats, the stages, badge boosts, the HP step) and which
+--     claims it refuses -- each generation's Turn.levelUp says which.
+--
+-- Returns whether anything reached the referee (a move list or a level-up).
+function M:applyBattleMoveset(record, client, payload)
+  if not (record and record.sim and payload) then return false end
+  if not LEARN_MODES[record.mode] then return false end
+  local fighter = record.sim.byId and record.sim.byId[client.id]
+  if not (fighter and type(fighter.mons) == "table") then return false end
+  local mon = fighter.mons[payload.mon + 1]
+  if not mon then return false end
+  local applied
+  if self.generation == 3 then applied = applyBattleMoveset3(fighter, payload)
+  else applied = learnTo(self.generation, mon, payload.moves) end
+  local grew = payload.level ~= nil or payload.stats ~= nil or payload.maxHp ~= nil
+  if grew and type(record.sim.levelUp) == "function" then
+    local taken = record.sim:levelUp(client.id, payload.mon + 1, payload.level, payload.stats, payload.maxHp)
+    applied = self.generation ~= 3 or taken == true or applied
+  end
+  return applied
+end
+
 -- List of `{id, count}` → lookup map. Empty / nil → empty map (no items).
+--
+-- Keys are strings on every generation, because that is how a choice names
+-- an item (Wire.battleChoice's `item` is an id-shaped string).  A Gen 3 bag
+-- arrives with numeric pret ids (Wire.battleBag) and a Gen 3 choice spells
+-- the same id as a numeric string ("13"), so a number is keyed by its
+-- tostring -- which is also exactly how the JS twin's object keys spell it.
 function M:bagMap(entries)
   local map = {}
   for _, entry in ipairs(entries or {}) do
-    if type(entry) == "table" and type(entry.id) == "string"
-       and type(entry.count) == "number" and entry.count > 0 then
-      map[entry.id] = entry.count
+    if type(entry) == "table" and type(entry.count) == "number" and entry.count > 0 then
+      if type(entry.id) == "string" then
+        map[entry.id] = entry.count
+      elseif type(entry.id) == "number" then
+        map[tostring(entry.id)] = entry.count
+      end
     end
   end
   return map
 end
 
--- Shallow copy of an id→count bag map (or nil when empty / absent).
+-- Gen 3's display names for one seat's bag (`name` on a Wire.battleBag entry),
+-- keyed like bagMap, so the referee can say "Ann used POTION!" rather than
+-- "Ann used an item!" (BattleSim3 Turn's fallback): a Gen 3 bag id is a pret
+-- number, which names nothing.  Nothing on the older generations: a Red /
+-- Gold bag id is the item's own name in the cart's words, and their referees
+-- spell the line from it themselves (BattleSim / BattleSim2 Turn `itemLabel`
+-- -- underscores as spaces, POKé, GUARD SPEC.'s stop), "TWINS AMY & MAY used
+-- X ATTACK on FOE!" on Gold, so there is no name for a hub to keep.
+function M:noteBagNames(record, seat, entries)
+  if self.generation ~= 3 then return end
+  local names = {}
+  for _, entry in ipairs(entries or {}) do
+    if type(entry) == "table" and type(entry.name) == "string" and entry.id ~= nil then
+      names[tostring(entry.id)] = entry.name
+    end
+  end
+  record.bagNames = record.bagNames or {}
+  record.bagNames[seat] = names
+end
+
+-- Shallow copy of an id→count bag map (or nil when empty / absent).  A Gen 3
+-- fighter's bag is keyed by the numeric id inside BattleSim3; it comes back
+-- keyed by string, the hub's spelling (see bagMap).
 function M:cloneBagMap(src)
   if type(src) ~= "table" then return nil end
   local out, any = {}, false
   for id, count in pairs(src) do
+    if type(id) == "number" then id = tostring(id) end
     if type(id) == "string" and type(count) == "number" and count > 0 then
       out[id] = count
       any = true
@@ -1716,10 +2114,32 @@ function M:cloneBagMap(src)
   return out
 end
 
+-- The bag a Gen 3 fighter opens with: BattleSim3's list form, numeric ids in
+-- id order, each with the display name its owner uploaded.  nil for none.
+function M:simBag3(record, seat, bag)
+  local names = record.bagNames and record.bagNames[seat] or {}
+  local list = {}
+  for id, count in pairs(bag or {}) do
+    local n = Wire.itemId3(id)
+    if n and type(count) == "number" and count > 0 then
+      list[#list + 1] = { id = n, count = count, name = names[id] }
+    end
+  end
+  if #list == 0 then return nil end
+  table.sort(list, function(a, b) return a.id < b.id end)
+  return list
+end
+
 -- One trainer, one bag. After Turn.create each NPC fighter holds a clone, so
 -- a 2v2 would otherwise drink the kit twice. Alias the remaining seats onto
 -- the first fighter's bag (and the hub sheet) so a potion spent on either
 -- box is spent once. Wildlife is skipped: those seats carry no bag.
+--
+-- The kit's names go with it (Gen 3): only the first seat was ever given the
+-- bag, so only its fighter holds the display names noteBagNames kept, and a
+-- second seat drinking the shared potion was narrated "TRAINER used an
+-- item!" beside the first seat's "TRAINER used POTION!".  The older sims keep
+-- no names, and nothing is written for them.
 function M:shareNpcBags(record)
   local seats = record and record.npcIds
   if not (record and record.sim and type(seats) == "table" and #seats >= 2) then
@@ -1731,7 +2151,10 @@ function M:shareNpcBags(record)
   record.bags = record.bags or {}
   for i = 2, #seats do
     local other = record.sim.byId[seats[i]]
-    if other then other.bag = primary.bag end
+    if other then
+      other.bag = primary.bag
+      if primary.bagNames ~= nil then other.bagNames = primary.bagNames end
+    end
     record.bags[seats[i]] = record.bags[seats[1]]
   end
 end
@@ -1817,13 +2240,42 @@ function M:tryStartSim(record)
     -- Youngster does not spam potions they never carried.
     record.bags = record.bags or {}
     local bag = record.bags[seat]
+    if self.generation == 3 then bag = self:simBag3(record, seat, bag)
+    else bag = bag and self:cloneBagMap(bag) or nil end
+    -- A human seat is named by its connection, never by a payload; an NPC seat
+    -- by the trainer's display name its party brought (wave 6: Wire.npcName,
+    -- Red / Gold, which the referee prints -- pokered's AI item line is
+    -- "<wTrainerName> used <ITEM> on <MON>!"), else "TRAINER" as before.  Its
+    -- Red move-choice layers (`aiMods`) ride on the NPC seat alone: the Red
+    -- referee reads them for a computer trainer seat (BattleSim Turn
+    -- `copyAiMods`), and a human's party has no business naming any.  So do
+    -- the computer's item / switch facts (K16 of
+    -- docs/plans/gen12-referee-remaining-gaps.md): Red's TrainerAI record
+    -- (`aiClass`) and Gold's TrainerClassAttributes bytes (`trainerItems`,
+    -- `aiFlags`, `itemSwitch`, `baseReward`), each as Wire.battleParty read it.
+    local npc = self:isNpcSeat(record, seat)
     return {
       playerId = seat,
       name = (client and client.name)
-        or (self:isNpcSeat(record, seat) and "TRAINER" or seat),
+        or (npc and (party.name or "TRAINER") or seat),
+      aiMods = npc and party.aiMods or nil,
+      aiClass = npc and party.aiClass or nil,
+      trainerItems = npc and party.trainerItems or nil,
+      aiFlags = npc and party.aiFlags or nil,
+      itemSwitch = npc and party.itemSwitch or nil,
+      baseReward = npc and party.baseReward or nil,
+      -- Gold's count-as-species types (K23), as fillBattleParty left them on
+      -- this seat (a seat dealt the whole party alone).
+      countSpeciesTypes = npc and party.countSpeciesTypes or nil,
       mons = party.mons,
       badges = party.badges,
-      bag = bag and self:cloneBagMap(bag) or nil,
+      bag = bag,
+      -- Gen 2 and Gen 3 only, and only a human seat's: an NPC seat has no
+      -- connection and so no cart, and the referees read side a's anyway.
+      -- Every human is still connected here -- a seat that drops while the
+      -- field is assembling calls the fight off (leaveBattle).
+      family = ((self.generation == 2 or self.generation == 3) and client)
+        and CART_FAMILY[client.version] or nil,
     }
   end
 
@@ -1850,19 +2302,56 @@ function M:tryStartSim(record)
   -- constructed, which is not something a connection can reach.
   local seed = (type(self.forceBattleSeed) == "number")
     and self.forceBattleSeed or self:battleSeed()
-  local battle, why = self.Turn.create({
+  local rules = record.ruleset
+  local createOpts = {
     id = record.id,
     mode = record.mode,
     seed = seed,
-    chart = record.ruleset.chart,
-    specialTypes = record.ruleset.specialTypes,
-    metronomePool = record.ruleset.metronomePool,
+    chart = rules.chart,
+    specialTypes = rules.specialTypes,
+    -- Gen 1 / Gen 2: the chart's axis by name, which the referee names a move's
+    -- type through -- Gold's badge type boost and side-effect type checks
+    -- (BattleSim2 `_typeIdOf`), Red's POISON immunity and FIRE thaw (BattleSim
+    -- `typeIndexOf`); never on Gen 3.
+    typeIds = rules.typeIds,
+    metronomePool = rules.metronomePool,
     choiceTimeout = Config.BATTLE_CHOICE_TIMEOUT,
     reconnectGrace = Config.BATTLE_RECONNECT_GRACE,
     resolveTimeout = Config.BATTLE_RESOLVE_TIMEOUT,
     now = battleSeconds(self.clock),
     sides = { a = roster(record.sides.a), b = roster(record.sides.b) },
-  })
+  }
+  -- Gen 3's ruleset is the ordered type table and the packed move pool, plus
+  -- the field a wild fight opens on (docs/plans/gen3-battle-sheet.md §3).
+  if self.generation == 3 then
+    createOpts.typeTable = rules.typeTable
+    createOpts.movePool = rules.movePool
+    createOpts.terrain = rules.terrain
+    createOpts.weather = rules.weather
+    createOpts.underwater = rules.underwater
+  end
+  -- Gold's wTimeOfDay, the host's cart clock (Wire.battleRuleset reads it on
+  -- a Gen 2 hub alone), for MORNING SUN / SYNTHESIS / MOONLIGHT
+  -- (BattleSim2 Turn.create's `opts.timeOfDay`; absent is its link reading).
+  if self.generation == 2 then
+    createOpts.timeOfDay = rules.timeOfDay
+  end
+  -- Gold's wBattleType (K21 of docs/plans/gen12-referee-remaining-gaps.md;
+  -- Wire.battleRuleset reads it on a Gen 2 hub alone), for the LURE BALL's
+  -- BATTLETYPE_FISH (BattleSim2 Turn.create's `opts.battleType`; absent reads
+  -- as no fishing fight).
+  if self.generation == 2 then
+    createOpts.battleType = rules.battleType
+  end
+  -- Red's TypeEffects order (Wire.battleRuleset reads `chartOrder` on a Gen 1
+  -- hub alone, wave 5), which decides a dual type's effectiveness line and
+  -- its "doesn't affect" / "missed" -- the last row AdjustDamageForMoveType
+  -- applied (BattleSim Turn.create's `opts.chartOrder`; absent is its
+  -- product reading).
+  if self.generation == 1 then
+    createOpts.chartOrder = rules.chartOrder
+  end
+  local battle, why = self.Turn.create(createOpts)
   if not battle then
     -- Turn.create answers a reason rather than raising, and this file owns no
     -- logger, so the refusal goes out the seam that already exists for "a
@@ -1961,8 +2450,18 @@ function M:flushBattle(record)
   -- Fighter bags are authoritative after resolve (Turn spends on item use,
   -- including NPC auto-pick). Sync the hub sheet and drop holds so we never
   -- double-spend with commitBagHolds.
-  if record.sim.phase ~= "choice" then
+  --
+  -- On Gen 3 the sheet also follows the sim after every turn that resolved,
+  -- not only when the phase is caught outside choice: a turn that resolves and
+  -- opens the next one inside the same call is back in choice by the time this
+  -- runs, and the sheet would go on proving a potion the sim already spent.
+  -- (The older generations keep their behaviour byte for byte; the sim still
+  -- refuses an overdrawn item there, so the gap is a stale sheet, not a free
+  -- heal.)
+  if record.sim.phase ~= "choice"
+     or (self.generation == 3 and record.bagTurn ~= record.sim.turn) then
     self:syncBagsFromSim(record)
+    record.bagTurn = record.sim.turn
   end
   for _, event in ipairs(record.sim:drainEvents()) do
     self:broadcastBattle(record, Wire.BATTLE_EVENT, event)
@@ -2147,6 +2646,15 @@ function M:settleMediated(record, outcome)
   if outcome.reason then payload.reason = outcome.reason end
   if outcome.caught then payload.caught = outcome.caught end
   if outcome.catcher then payload.catcher = outcome.catcher end
+  -- Pay Day coins: side a's total on a knockout win (BattleSim3 `_checkOver`;
+  -- the Gen 1 / Gen 2 referees' `outcome().payDay` from contract K11 of
+  -- docs/plans/gen12-referee-gaps-fix.md; none under link rules), and on Red
+  -- on an escape too -- `paysDay` has the rule.  A broadcast is already side
+  -- a only here: in the three NPC modes every member is a human seated on
+  -- side a (`openMediatedBattle` puts the npc seats alone on side b).  On a
+  -- run, side a may be the losers list (the referee calls the side that fled
+  -- the loser) and is still the side the coins are for.
+  if paysDay(self.generation, record.mode, outcome) then payload.payDay = outcome.payDay end
   self:broadcastBattle(record, Wire.BATTLE_OUTCOME, payload)
 
   local match = self.matches[record.id]
@@ -2421,9 +2929,17 @@ handlers[Wire.HELLO] = function(self, client, msg)
     return self:refuseClient(client, ("This game speaks protocol %d; yours "
       .. "speaks %s."):format(Config.PROTOCOL, tostring(msg.proto)))
   end
-  -- PROTOCOL 20: missing generation defaults to 1 (Wire.generation). Same
-  -- sentence as server/lib/relay.js so a client cannot tell which path refused.
+  -- PROTOCOL 20: missing generation defaults to 1 (Wire.generation); 3 is a
+  -- generation from PROTOCOL 30, so a FireRed or Emerald client is refused by
+  -- a Gen 1 or Gen 2 hub here instead of being read as Gen 1.  A generation
+  -- this hub has never heard of is refused too, never guessed.  Same
+  -- sentences as server/lib/relay.js so a client cannot tell which path
+  -- refused it.
   local generation = Wire.generation(msg.generation)
+  if generation == nil then
+    return self:refuseClient(client, ("This hub is for generation %d; yours "
+      .. "is not a generation it knows."):format(self.generation))
+  end
   if generation ~= self.generation then
     return self:refuseClient(client, ("This hub is for generation %d; yours "
       .. "is generation %d."):format(self.generation, generation))
@@ -2449,6 +2965,10 @@ handlers[Wire.HELLO] = function(self, client, msg)
     name = name,
     playerId = playerId,
     generation = generation,
+    -- Only a cart of the generation just admitted (Wire.version): a viewer
+    -- maps this player's sprite through it, and a version that contradicts
+    -- the room would map it for a cart nobody here is playing.
+    version = Wire.version(msg.version, generation),
     sprite = Wire.spriteId(msg.sprite) or Config.defaultSpriteFor(self.generation),
     profile = Wire.profile(msg.profile),
     map = Wire.mapId(msg.map),
@@ -3258,7 +3778,7 @@ handlers[Wire.BATTLE_RULESET] = function(self, client, msg)
   if not record or record.sim then return end
   if client.id ~= record.hostId then return end
 
-  local ruleset = Wire.battleRuleset(msg)
+  local ruleset = Wire.battleRuleset(msg, self.generation)
   if not ruleset then
     return noteDrop(self, client,
       "the ruleset is not a shape we can fight under")
@@ -3293,7 +3813,10 @@ handlers[Wire.BATTLE_CHOICE] = function(self, client, msg)
   local record = mediatedOf(self, client)
   if not record or not record.sim then return end
 
-  local choice = Wire.battleChoice(msg)
+  -- The hub's generation, so each field is read where its cart has it: Gen
+  -- 3's `dexCaught` on a Gen 3 hub, BATON PASS's `pass` on a Gen 2 or Gen 3
+  -- hub (wave 5: Gold's too), Red's MIMIC pick `mimic` on a Gen 1 hub.
+  local choice = Wire.battleChoice(msg, self.generation)
   if not choice or choice.battle ~= record.id then return end
   -- Item choices are proved against the bag uploaded with the party
   -- (PROTOCOL 15). A missing stack costs the message and nothing else —
@@ -3323,7 +3846,7 @@ end
 handlers[Wire.BATTLE_MOVESET] = function(self, client, msg)
   local record = mediatedOf(self, client)
   if not record or not record.sim then return end
-  local payload = Wire.battleMoveset(msg)
+  local payload = Wire.battleMoveset(msg, self.generation)
   if not payload or payload.battle ~= record.id then return end
   self:applyBattleMoveset(record, client, payload)
 end

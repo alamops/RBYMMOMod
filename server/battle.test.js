@@ -33,6 +33,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const { damage, accuracy, crit, status, Effects } = require('./lib/battle');
+const { plainBattleLine } = require('./lib/sanitize');
 
 const FIXTURE = path.join(__dirname, '..', 'tests', 'fixtures', 'battle_sim_vectors.json');
 const vectors = JSON.parse(fs.readFileSync(FIXTURE, 'utf8'));
@@ -52,7 +53,7 @@ function expectFields(actual, expected, label) {
 
 test('fixture pack is the one this suite was written against', () => {
   assert.strictEqual(vectors.version, 1, 'fixture version bumped -- reread the notes before touching this');
-  for (const group of ['damage', 'accuracy', 'crit', 'status']) {
+  for (const group of ['damage', 'accuracy', 'crit', 'status', 'obedience', 'side']) {
     assert.ok(Array.isArray(vectors[group]) && vectors[group].length > 0, `${group} vectors present`);
   }
 });
@@ -126,6 +127,34 @@ test('either stat over 255 quarters both', () => {
   assert.strictEqual(damage.clampStats(256, 2).defense, 1, 'and a quartered stat floors at 1');
 });
 
+// .scaleStats keeps only the low byte of each scaled word (core.asm
+// :4107-4135): the cart divides by that byte, and hangs when it is 0, where the
+// referee holds the divisor at 1.
+test('the scaled stats are bytes: a wrap past 1023, and a divisor clamp', () => {
+  assert.deepStrictEqual(
+    damage.clampStats(200, 1100),
+    { attack: 50, defense: 19, statClamped: true },
+    '1100 / 4 = 275 wraps to 19',
+  );
+  assert.strictEqual(damage.clampStats(100, 1024).defense, 1,
+    '1024 / 4 = 256 wraps to 0, held at 1 instead of freezing');
+  assert.strictEqual(damage.clampStats(300, 3).defense, 1,
+    '3 / 4 = 0, held at 1 instead of freezing');
+  assert.strictEqual(damage.clampStats(2, 300).attack, 1,
+    'the attack word is bumped to 1 before its byte is taken');
+});
+
+test('Explosion halves the scaled defence, and 997 caps before the multipliers', () => {
+  const after = damage.compute({ level: 50, power: 170, attack: 100, defense: 300, explode: true, roll: 255 });
+  assert.strictEqual(after.defense, 37, '300 scales to 75, THEN halves to 37');
+  assert.strictEqual(after.base, 52, 'not the 51 a halve-then-scale order deals');
+  const capped = damage.compute({
+    level: 100, power: 200, attack: 250, defense: 10, stab: true, roll: 255,
+  });
+  assert.strictEqual(capped.base, 999, 'the quotient stops at 997, then +2');
+  assert.strictEqual(capped.damage, 1498, 'STAB still applies on top of the cap');
+});
+
 test('accuracy vectors', async (t) => {
   for (const v of vectors.accuracy) {
     await t.test(v.id, () => {
@@ -165,10 +194,14 @@ test('focus energy is kept as the bug it is', () => {
   const plain = crit.threshold(100, {});
   const focused = crit.threshold(100, { focusEnergy: true });
   assert.ok(focused < plain, 'Focus Energy makes crits rarer in Gen1');
+  // CriticalHitTest halves for Focus Energy BEFORE the high-crit doubling
+  // chain (core.asm :4478-4540): 50 -> 25 -> 50 -> 100. A "quarter it, then
+  // times eight" shortcut lands on 96 -- the number this asserted until the
+  // referee followed the cart's shifts.
   assert.strictEqual(
     crit.threshold(100, { focusEnergy: true, highCritMove: true }),
-    96,
-    'quartered first, multiplied after, clamped last',
+    100,
+    'halved by Focus Energy, then doubled twice by the high-crit chain',
   );
   assert.strictEqual(crit.threshold(1, {}), 0, 'a threshold of 0 can never beat a roll of 0');
 });
@@ -218,12 +251,161 @@ test('confusion self-hits exactly half the time and shares the damage formula', 
   }
   assert.strictEqual(selfHits, status.CONFUSION_HIT_ROLL, '128/256');
 
-  const viaStatus = status.confusionTick(state, 0).selfDamage;
+  // `.IsConfused` hurts on 128..255 (R1e).
+  const viaStatus = status.confusionTick(state, 255).selfDamage;
   const viaDamage = damage.compute({
     level: 50, power: status.CONFUSION_POWER, attack: 100, defense: 100,
     stab: false, typeEffect: [100], crit: false, roll: 255,
   }).damage;
   assert.strictEqual(viaStatus, viaDamage, 'the self-hit is the ordinary formula, not a second one');
+});
+
+// CheckForDisobedience's pieces, each fed the exact BattleRandom sequence the
+// case names: a scripted generator that hands the bytes out in order and
+// throws past the end, so a piece that draws one byte too many fails rather
+// than reading a default -- and `draws` says how many it actually took, which
+// is the half of the contract a verdict alone cannot show.
+function scripted(bytes) {
+  let used = 0;
+  return {
+    byte() {
+      used += 1;
+      if (used > bytes.length) throw new Error('drew past the scripted bytes');
+      return bytes[used - 1];
+    },
+    used: () => used,
+  };
+}
+
+const OBEDIENCE = {
+  cap: (input) => {
+    const set = {};
+    for (const id of input.badges) set[id] = true;
+    return { cap: status.obedienceCap(set) };
+  },
+  roll: (input) => {
+    const rng = scripted(input.bytes);
+    const verdict = status.obedienceRoll(input.level, input.cap, rng);
+    return { verdict, draws: rng.used() };
+  },
+  nap: (input) => {
+    const rng = scripted(input.bytes);
+    const turns = status.napTurns(rng);
+    return { turns, draws: rng.used() };
+  },
+  loaf: (input) => {
+    const rng = scripted(input.bytes);
+    const line = status.loafLine(rng);
+    return { line, draws: rng.used() };
+  },
+  random: (input) => {
+    const moves = input.pp.map((pp, i) => ({ pp, ppUps: input.ppUps ? input.ppUps[i] : undefined }));
+    const rng = scripted(input.bytes);
+    const slot = status.disobedientMove(moves, input.selected, input.disabled,
+      input.struggling, rng);
+    return { slot, draws: rng.used() };
+  },
+};
+
+test('obedience vectors', async (t) => {
+  for (const v of vectors.obedience) {
+    await t.test(v.id, () => {
+      const handler = OBEDIENCE[v.in.step];
+      assert.ok(handler, `${v.id}: no handler for obedience step ${v.in.step}`);
+      expectFields(handler(v.in), v.out, v.id);
+    });
+  }
+});
+
+// Red's side-effect odds (pokered engine/battle/effects.asm): the threshold
+// table and its explicit override, the computer's extra stat-drop miss, and
+// each routine run on one target with the exact bytes the case names -- the
+// scripted generator above, so `draws` pins what a routine checks before it
+// rolls as firmly as what it does after.
+const orNull = (value) => (value === undefined ? null : value);
+
+const SIDE = {
+  threshold: (input) => {
+    const threshold = Effects.sideThreshold(input.effectId, input.chance);
+    return { threshold, proc: input.roll < threshold };
+  },
+  computerMiss: (input) => ({ miss: input.roll < Effects.COMPUTER_DROP_MISS }),
+  // TryRunningFromBattle's wild odds (Effects.runOdds; the referee's `_tryRun`):
+  // null for a getaway that draws no byte, else a byte at or under them escapes.
+  runOdds: (input) => {
+    const odds = Effects.runOdds(input.playerSpeed, input.enemySpeed, input.attempts);
+    return { odds, escaped: odds === null || input.roll <= odds };
+  },
+  apply: (input) => {
+    const t = input.target;
+    const mon = {
+      species: 'Beta', status: orNull(t.status), types: t.types,
+      substitute: orNull(t.substitute), confusion: orNull(t.confusion),
+      mist: t.mist === true,
+      stats: { atk: 40, def: 40, spd: 40, spc: 40 },
+    };
+    Effects.ensureBattleStats(mon);
+    Object.assign(mon.stages, t.stages || {});
+    const rng = scripted(input.bytes);
+    const out = Effects.applySide({
+      effectId: input.effectId, chance: input.chance, rng,
+      targetMon: mon, targetFighter: { slot: 3, side: 'b' },
+      userFighter: { slot: 0, side: 'a' },
+      moveType: orNull(input.moveType), poisonType: orNull(input.poisonType),
+      fireType: orNull(input.fireType), computerMover: input.computerMover === true,
+    });
+    return {
+      proc: out.proc, draws: rng.used(), status: orNull(mon.status),
+      flinch: mon.flinch === true, confused: (mon.confusion || 0) > 0,
+      stage: input.stat ? mon.stages[input.stat] : null,
+      // The line as a reader without K17's marks reads it (W's
+      // plainBattleLine: no `^a` / `^b`, each K18 break a space) -- the
+      // fixture's sentence.
+      said: orNull(plainBattleLine(out.messages[0])),
+    };
+  },
+};
+
+test('side-effect vectors', async (t) => {
+  for (const v of vectors.side) {
+    await t.test(v.id, () => {
+      const handler = SIDE[v.in.step];
+      assert.ok(handler, `${v.id}: no handler for side step ${v.in.step}`);
+      expectFields(handler(v.in), v.out, v.id);
+    });
+  }
+});
+
+// Red's side-effect odds, re-derived from the expressions pokered writes them
+// as (engine/battle/effects.asm, RGBDS `percent` = `* $ff / 100`), so a typo
+// in the table cannot hide behind a vector built from the same typo.
+test("the side-effect table is the cart's expressions", () => {
+  const percent = (n) => Math.floor(n * 255 / 100);
+  const cart = {
+    2: percent(20) + 1, 77: percent(20) + 1, 33: percent(40) + 1,
+    4: percent(10) + 1, 5: percent(10) + 1, 6: percent(10) + 1,
+    34: percent(30) + 1, 35: percent(30) + 1, 36: percent(30) + 1,
+    31: percent(10) + 1, 37: percent(30) + 1,
+    68: percent(33) + 1, 69: percent(33) + 1, 70: percent(33) + 1,
+    71: percent(33) + 1, 76: percent(10),
+  };
+  assert.deepStrictEqual({ ...Effects.SIDE_THRESHOLD }, cart);
+  for (const id of Object.keys(cart)) {
+    assert.strictEqual(Effects.sideThreshold(Number(id), 0), cart[id], `chance 0 reads effect ${id}'s`);
+  }
+  assert.strictEqual(Effects.COMPUTER_DROP_MISS, percent(25) + 1);
+  assert.strictEqual(Effects.sideThreshold(4, 30), percent(30), 'an explicit percent has no + 1');
+  assert.strictEqual(Effects.sideThreshold(0, 100), 0, 'no routine, no threshold');
+});
+
+test('the nibble swap behind two of the rolls is a self-inverse bijection', () => {
+  const seen = new Set();
+  for (let b = 0; b <= 255; b++) {
+    const s = status.swapNibbles(b);
+    seen.add(s);
+    assert.strictEqual(status.swapNibbles(s), b, `swap(swap(${b}))`);
+  }
+  assert.strictEqual(seen.size, 256);
 });
 
 test('the turn a mon snaps out of confusion is a turn it acts', () => {
@@ -298,11 +480,15 @@ test('JS formula edge inputs match Lua coercion', () => {
     'null paralysis roll coerces the same way');
 
   // confusionTick forwards atk/def aliases into Damage.compute.
+  // `.IsConfused` hurts on 128..255 (R1e); below it, and with no byte, not.
+  assert.strictEqual(status.confusionTick({ turnsRemaining: 3 }, 0).selfHit, false, 'roll 0 keeps its head');
+  assert.strictEqual(status.confusionTick({ turnsRemaining: 3 }, undefined).selfHit, false,
+    'no byte is no self-hit');
   const selfHit = status.confusionTick(
     { turnsRemaining: 3, level: 50, atk: 100, def: 100 },
-    0,
+    255,
   );
-  assert.strictEqual(selfHit.selfHit, true, 'roll 0 self-hits');
+  assert.strictEqual(selfHit.selfHit, true, 'roll 255 self-hits');
   assert.ok(selfHit.selfDamage > 0, 'atk/def aliases produce self-hit damage');
 });
 
@@ -337,12 +523,21 @@ function applyPrimary(effectId, user, target) {
   });
 }
 
-test('applyPrimary fails foe-targeting effects through a substitute', () => {
+// R1c: only the routines that ask CheckTargetSubstitute -- the primary stat
+// drops, PoisonEffect, ConfusionEffect -- stop at a doll (effects.asm
+// :1436-1446); SleepEffect never asks, so SLEEP lands behind one. (A
+// generator stuck on 0 would spin `.setSleepCounter` forever; REDRAW_GUARD
+// answers 1 turn.)
+test('applyPrimary stops only the CheckTargetSubstitute routines at a doll', () => {
   const user = dummyMon();
   const target = dummyMon({ species: 'Beta', substitute: 40 });
   const sleep = applyPrimary(32, user, target);
-  assert.strictEqual(sleep.nothing, true, 'SLEEP_EFFECT vs substitute is nothing');
-  assert.strictEqual(target.status, undefined, 'SLEEP_EFFECT does not land through a substitute');
+  assert.strictEqual(sleep.nothing, false, 'SLEEP_EFFECT reaches the monster behind a substitute');
+  assert.strictEqual(target.status, 'sleep', 'SLEEP_EFFECT lands through a substitute');
+  assert.strictEqual(target.statusTurns, 1, 'a stream of zero bytes is the guard\'s 1 turn');
+
+  const confuse = applyPrimary(49, dummyMon(), dummyMon({ species: 'Beta', substitute: 40 }));
+  assert.strictEqual(confuse.nothing, true, 'CONFUSION_EFFECT vs substitute is nothing');
 
   const growl = applyPrimary(18, dummyMon(), dummyMon({ species: 'Beta', substitute: 40 }));
   assert.strictEqual(growl.nothing, true, 'Growl vs substitute is nothing');
@@ -361,4 +556,155 @@ test('applyPrimary fails foe-targeting effects through a substitute', () => {
   const lands = applyPrimary(32, dummyMon(), exposed);
   assert.strictEqual(lands.nothing, false, 'SLEEP_EFFECT still lands with no substitute');
   assert.strictEqual(exposed.status, 'sleep', 'SLEEP_EFFECT sets sleep when the target is exposed');
+});
+
+// CantLowerAnymore (pokered effects.asm): `cp ATTACK_DOWN_SIDE_EFFECT; ret nc`
+// -- a side-effect drop that finds the stage already at -6 fails without a
+// word, as it does at a stat of 1; a primary at -6 still prints its line.
+test('a side-effect drop at -6 is silent; a primary at -6 is not', () => {
+  const floored = () => {
+    const mon = dummyMon({ species: 'Beta' });
+    Effects.ensureBattleStats(mon);
+    mon.stages.spd = -6;
+    return mon;
+  };
+  const sideTarget = floored();
+  const side = Effects.applySide({
+    effectId: 70, chance: 100, rng: { byte() { return 0; } },
+    targetMon: sideTarget, targetFighter: { slot: 3, side: 'b' },
+    userFighter: { slot: 0, side: 'a' },
+  });
+  assert.strictEqual(side.proc, true, 'the side effect procs');
+  assert.deepStrictEqual(side.messages, [], 'and says nothing at -6');
+  assert.deepStrictEqual(side.events, [], 'nor emits a stat event');
+  assert.strictEqual(sideTarget.stages.spd, -6, 'the stage stays at -6');
+
+  const primary = applyPrimary(20, dummyMon(), floored());
+  // CantLowerAnymore's NothingHappenedText (R1b, effects.asm :705-710).
+  assert.deepStrictEqual(primary.messages, ['Nothing happened!'],
+    'the primary at -6 says so');
+});
+
+// R1b: DisableEffect never asks CheckTargetSubstitute (effects.asm
+// :1286-1367), so it reaches the monster behind a doll; CalcStat
+// (home/move_mon.asm) is what GetEnemyMonStat and a K9 level-up compute.
+test('DisableEffect reaches the monster behind a doll; CalcStat', () => {
+  const target = dummyMon({ species: 'Beta', substitute: 40 });
+  const out = applyPrimary(86, dummyMon(), target);
+  assert.strictEqual(out.nothing, false, 'DISABLE_EFFECT is not stopped by a substitute');
+  assert.ok(target.disable, 'DISABLE_EFFECT locks a move behind a substitute');
+  assert.strictEqual(Effects.calcStat(70, 9, 30, null, false), 52, 'no stat exp');
+  assert.strictEqual(Effects.calcStat(45, 0, 16, 0, true), 40, 'HP: + level + 10');
+  assert.strictEqual(Effects.calcStat(255, 15, 100, 65535, false), 608, 'full stat exp: + 255 / 4');
+  assert.strictEqual(Effects.hpDv({ atk: 10, def: 9, spd: 12, spc: 15 }), 5, 'the HP DV from the low bits');
+});
+
+// RP1 (gen12-referee-gaps-fix polish): GetMaxPP over the PP Up bits the byte
+// holds now (Effects.getMaxPp; engine/items/item_effects.asm GetMaxPP /
+// AddBonusPP), the base behind a sheet's stated maximum (basePpOf),
+// ItemUsePPRestore's `.restorePP` (restorePp) -- a slot past its wrap brought
+// DOWN to the maximum, MAX ETHER's whole-byte compare -- and a MIMIC's
+// switch-out re-reading GetMaxPP over the bits its slot holds by then.
+// tests/battle_sim_effects.lua's twin.
+test('GetMaxPP, the base behind it, .restorePP and a MIMIC\'s switch-out', () => {
+  assert.strictEqual(Effects.getMaxPp(35, 0), 35, 'GetMaxPP: no PP Up is the base');
+  assert.strictEqual(Effects.getMaxPp(35, 3), 56, '...each PP Up adds a fifth of it');
+  assert.strictEqual(Effects.getMaxPp(40, 3), 61, '...capped at 7 a PP Up');
+  assert.strictEqual(Effects.getMaxPp(10, 1), 12, '...a fifth of 10 is 2');
+  assert.strictEqual(Effects.basePpOf(56, 3), 35, 'the base behind 56 with three PP Ups');
+  assert.strictEqual(Effects.basePpOf(61, 3), 40, '...behind 61');
+  assert.strictEqual(Effects.basePpOf(18, 0), 18, '...with none, the maximum itself');
+  assert.strictEqual(Effects.basePpOf(17, 1), null, '...and none behind 17 with one (16, then 18)');
+  assert.strictEqual(Effects.basePpOf(99, 0), null, '...nor past the six bits a base fits in');
+
+  let m = { pp: 63, ppUps: 0, maxPp: 35 };
+  assert.strictEqual(Effects.restorePp(m, 10), true, 'ETHER on a slot past its wrap: restored');
+  assert.strictEqual(m.pp, 35, '...brought down to GetMaxPP (63 + 10 is past it)');
+  assert.strictEqual(Effects.restorePp(m, 10), false, 'ETHER at the maximum: `ret z`, no effect');
+  m = { pp: 30, ppUps: 0, maxPp: 35 };
+  assert.strictEqual(Effects.restorePp(m, 10), true, 'ETHER: 10 more...');
+  assert.strictEqual(m.pp, 35, '...kept at the maximum');
+  m = { pp: 5, ppUps: 2, maxPp: 49 };
+  Effects.restorePp(m, 10);
+  assert.strictEqual(`${m.pp}/${m.ppUps}`, '15/2', 'ETHER below the maximum: +10, the PP Ups beside it');
+  m = { pp: 20, ppUps: 1, maxPp: 20 };
+  assert.strictEqual(Effects.restorePp(m, true), true,
+    'MAX ETHER on a full move with a PP Up: the whole byte is not the maximum -- restored');
+  assert.strictEqual(m.pp, 20, '...to what it had');
+  m = { pp: 20, ppUps: 0, maxPp: 20 };
+  assert.strictEqual(Effects.restorePp(m, true), false, 'MAX ETHER on a full move with none: no effect');
+  m = { pp: 63, ppUps: 3, maxPp: 56 };
+  assert.strictEqual(Effects.restorePp(m, true), true, 'MAX ETHER past a wrap: restored');
+  assert.strictEqual(m.pp, 56, '...down to the maximum');
+
+  const user = dummyMon({ moves: [{
+    id: 'MIMIC', name: 'MIMIC', pp: 1, maxPp: 12, basePp: 10, ppUps: 1, power: 0,
+    accuracy: 255, type: 0, effect: 82, chance: 0,
+  }] });
+  Effects.applyPrimary({
+    effectId: 82, rng: { byte() { return 0; } }, userMon: user,
+    targetMon: dummyMon({ species: 'Beta' }), userFighter: { slot: 1, side: 'a' },
+    targetFighter: { slot: 2, side: 'b' }, moveIndex: 1, mimicSlot: 1,
+  });
+  assert.strictEqual(`${user.moves[0].maxPp}/${user.moves[0].basePp}`, '12/10',
+    "MIMIC's copy keeps MIMIC's GetMaxPP and the base behind it (the ETHER reads the party's MIMIC)");
+  user.moves[0].pp = 63; // a borrow, as DecrementPP leaves it
+  user.moves[0].ppUps = 0;
+  Effects.restoreMoves(user);
+  const back = user.moves[0];
+  assert.strictEqual(`${back.id}:${back.pp}/${back.ppUps}/${back.maxPp}`, 'MIMIC:63/0/10',
+    "the switch-out's MIMIC: the slot's byte, and GetMaxPP over the PP Ups it holds now");
+});
+
+// FX-R1: ItemUseBall's Rand1 loop, its W > 255 capture, PSYWAVE's two ranges,
+// and an OHKO's wDamage -- each fed a scripted byte stream, so the draws
+// themselves are the claim (twin of tests/battle_sim_effects.lua's block).
+test('FX-R1: ball Rand1 redraw, W > 255, PSYWAVE ranges, OHKO wDamage', () => {
+  const wild = { catchRate: 45, hp: 100, maxHp: 100 };
+  // GREAT BALL: 201 and 255 are redrawn (`cp b / jr c, .loop` against 200),
+  // 46 kept -- over the rate of 45 by one: no Rand2, broken free.
+  let rng = scripted([201, 255, 46]);
+  assert.strictEqual(Effects.catchAttempt('GREAT_BALL', wild, rng).caught, false,
+    'GREAT BALL: Rand1 46 > rate 45 fails');
+  assert.strictEqual(rng.used(), 3, '...after redrawing 201 and 255 (ItemUseBall `.loop`)');
+  // ULTRA BALL: 151 is redrawn too (the second `cp b`, against 150).
+  rng = scripted([151, 200, 45, 0]);
+  assert.strictEqual(Effects.catchAttempt('ULTRA_BALL', wild, rng).caught, true,
+    'ULTRA BALL: 151 and 200 redrawn, 45 passes, Rand2 0 catches');
+  assert.strictEqual(rng.used(), 4, '...four bytes');
+  rng = scripted([255]);
+  assert.strictEqual(Effects.catchAttempt('POKE_BALL', wild, rng).caught, false,
+    'POKé BALL: 255 kept, over the rate');
+  assert.strictEqual(rng.used(), 1, '...one byte');
+  // W > 255 captures before Rand2 (`jr nz, .captured`): HP 4 of 100 is a
+  // quarter of 1, so W = 100 * 255 / 12 = 2125.
+  rng = scripted([10]);
+  assert.strictEqual(Effects.catchAttempt('POKE_BALL', { catchRate: 45, hp: 4, maxHp: 100 }, rng).caught,
+    true, 'W > 255: captured on Rand1 alone');
+  assert.strictEqual(rng.used(), 1, '...no Rand2 drawn');
+  rng = scripted([77]);
+  assert.strictEqual(Effects.catchAttempt('MASTER_BALL', wild, rng).caught, true, 'MASTER BALL catches');
+  assert.strictEqual(rng.used(), 1, "...after the one byte `.loop` drew first");
+
+  // PSYWAVE at level 2 (b = 3): the player's [1, 3) redraws a 0; the
+  // computer's [0, 3) keeps it.
+  rng = scripted([0, 3, 2]);
+  assert.strictEqual(Effects.psywaveDamage(2, rng, false), 2, "the player's PSYWAVE redraws 0 and 3");
+  assert.strictEqual(rng.used(), 3, '...three bytes');
+  rng = scripted([3, 0]);
+  assert.strictEqual(Effects.psywaveDamage(2, rng, true), 0,
+    "the computer's PSYWAVE keeps a 0 (core.asm :4776-4789)");
+  assert.strictEqual(rng.used(), 2, '...after redrawing 3');
+  assert.strictEqual(Effects.psywaveDamage(1, scripted([]), false), 1,
+    "the player's b of 1 freezes the cart: 1, no draw");
+  assert.strictEqual(Effects.setDamage({ moveId: 'PSYWAVE', userMon: { level: 2 },
+    rng: scripted([0]), computerMover: true }), 0, "setDamage passes the computer's range on");
+
+  // OneHitKOEffect_'s $FFFF through STAB (a 16-bit add: 32766) and the rows
+  // (each quotient's low two bytes).
+  assert.strictEqual(Effects.ohkoDamage(false, []), 65535, 'OHKO: no STAB, no row');
+  assert.strictEqual(Effects.ohkoDamage(true, []), 32766, 'STAB wraps: 65535 + 32767 = 32766');
+  assert.strictEqual(Effects.ohkoDamage(false, [200]), 65534, 'a 2x row: 131070 keeps its low word');
+  assert.strictEqual(Effects.ohkoDamage(true, [50, 50]), 8191, 'STAB then two halving rows');
+  assert.strictEqual(Effects.ohkoDamage(false, [0]), 0, 'an immunity row: 0');
 });

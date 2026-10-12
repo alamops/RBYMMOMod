@@ -23,6 +23,7 @@
 #
 #   curl -fsSL .../scripts/run-server.sh | bash -s -- --port 25565
 #   curl -fsSL .../scripts/run-server.sh | bash -s -- --generation 2
+#   curl -fsSL .../scripts/run-server.sh | bash -s -- --generation 3
 #   curl -fsSL .../scripts/run-server.sh | bash -s -- --version vX.Y.Z
 #
 # From a checkout (uses this tree, does not fetch):
@@ -79,10 +80,13 @@ Options:
   --port <n>            Host port friends type (default 7788). Container
                         port stays 7788; this only remaps the left side of
                         compose.yml's ports: line.
-  --generation, -g <1|2>
-                        Hub lock: 1 = Red/Blue/Yellow (default), 2 = Gold.
-                        Written into server/.env as RBY_MMO_GENERATION so
-                        first-boot init and every later start see it.
+  --generation, -g <1|2|3>
+                        Hub lock: 1 = Red/Blue/Yellow (default), 2 = Gold/
+                        Silver/Crystal, 3 = FireRed, LeafGreen and Emerald
+                        (one Gen 3 hub admits all three; needs a release on
+                        protocol 30 or newer). Written into server/.env as
+                        RBY_MMO_GENERATION so first-boot init and every
+                        later start see it.
   --open-firewall       If ufw is on PATH, allow 7788/tcp (and OpenSSH).
                         Off by default — opening a port is a choice.
   --no-start            Fetch / install Docker and write server/.env,
@@ -141,8 +145,35 @@ normalize_generation() {
   case "${1:-}" in
     1) printf '1\n' ;;
     2) printf '2\n' ;;
-    *) fail "--generation: expected 1 (RBY) or 2 (Gold), got $1" ;;
+    3) printf '3\n' ;;
+    *) fail "--generation: expected 1 (RBY), 2 (Gold) or 3 (FireRed/LeafGreen/Emerald), got $1" ;;
   esac
+}
+
+# Whether a release on PROTOCOL `proto` can hold generation lock `gen`.
+# Gen 1 and Gen 2 locks are older than every release this script can fetch;
+# a Gen 3 lock needs PROTOCOL 30, and an older hub's config.js reads 3 as
+# "not 1 or 2" and quietly runs a Gen 1 hub. An unreadable protocol is not
+# evidence either way, so it passes.
+gen_lock_supported() {
+  local gen="${1:-}" proto="${2:-}"
+  [ "$gen" = 3 ] || return 0
+  case "$proto" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  [ "$proto" -ge 30 ]
+}
+
+# Stop, naming the fix, when a Gen 3 lock is about to be written for a hub
+# that cannot hold it. A warning was not enough: the build went on and the
+# hub came up a Gen 1 hub refusing every FireRed / LeafGreen / Emerald
+# player, the warning long scrolled away above the build log. Called before
+# server/.env is written and before anything is built or started.
+# Twin of upgrade-server.sh's.
+refuse_unsupported_gen_lock() {
+  local gen="${1:-}" proto="${2:-}" where="${3:-}"
+  gen_lock_supported "$gen" "$proto" && return 0
+  fail "generation ${gen} needs a hub on protocol 30 or newer; ${where} is on protocol ${proto}, which reads 3 as 1 and would refuse every FireRed / LeafGreen / Emerald player. Stopped before server/.env was written or anything was started. Use a release on protocol 30 or newer (an existing tree moves with: bash scripts/upgrade-server.sh --dir ${where} --version <tag>), or pass --generation 1 or 2."
 }
 
 # Portable newest vX.Y.Z from a list of tags, no GNU sort -V, no python.
@@ -398,13 +429,13 @@ published_host_port() {
 generation_from_config_json() {
   local file="$1"
   [ -f "$file" ] || return 0
-  sed -n 's/.*"generation"[[:space:]]*:[[:space:]]*\([12]\).*/\1/p' "$file" | head -n 1
+  sed -n 's/.*"generation"[[:space:]]*:[[:space:]]*\([123]\).*/\1/p' "$file" | head -n 1
 }
 
 # Generation locked on the volume. Empty if unknown.
 # Prefer config.json on the volume over `config get`: the latter is the
 # effective config (env already applied), so a compose-injected 1 would
-# hide a Gold lock still sitting in the file.
+# hide a Gold or Gen 3 lock still sitting in the file.
 container_generation() {
   local g tmp
   tmp="$(mktemp "${TMPDIR:-/tmp}/rby-mmo-cfg.XXXXXX")"
@@ -412,7 +443,7 @@ container_generation() {
     g="$(generation_from_config_json "$tmp" || true)"
     rm -f "$tmp"
     case "$g" in
-      1|2) printf '%s\n' "$g"; return 0 ;;
+      1|2|3) printf '%s\n' "$g"; return 0 ;;
     esac
   else
     rm -f "$tmp"
@@ -420,7 +451,7 @@ container_generation() {
   g="$("${DOCKER[@]}" exec "$CONTAINER_NAME" rby-mmo-hub config get generation 2>/dev/null || true)"
   g="$(printf '%s' "$g" | tr -d '[:space:]')"
   case "$g" in
-    1|2) printf '%s\n' "$g"; return 0 ;;
+    1|2|3) printf '%s\n' "$g"; return 0 ;;
   esac
 }
 
@@ -494,7 +525,7 @@ Hub is up.
   protocol   ${proto}
   directory  ${root}
   port       ${PORT}   (friends type <this-machine>:${PORT})
-  generation ${GENERATION}   (1 = RBY, 2 = Gold)
+  generation ${GENERATION}   (1 = RBY, 2 = Gold, 3 = FireRed / LeafGreen / Emerald)
 
 Join code (this terminal only — it is not in docker compose logs):
 
@@ -549,9 +580,35 @@ self_test() {
   [ "$got" = 1 ] || fail "normalize_generation 1 -> $got"
   got="$(normalize_generation 2)"
   [ "$got" = 2 ] || fail "normalize_generation 2 -> $got"
-  if got="$(normalize_generation 3 2>/dev/null)"; then
-    fail "normalize_generation 3 should fail, got $got"
+  got="$(normalize_generation 3)"
+  [ "$got" = 3 ] || fail "normalize_generation 3 -> $got"
+  for bad in 0 4 gen3 ''; do
+    if got="$(normalize_generation "$bad" 2>/dev/null)"; then
+      fail "normalize_generation '$bad' should fail, got $got"
+    fi
+  done
+  gen_lock_supported 1 20 || fail "gen_lock_supported 1 20 should pass"
+  gen_lock_supported 2 29 || fail "gen_lock_supported 2 29 should pass"
+  gen_lock_supported 3 30 || fail "gen_lock_supported 3 30 should pass"
+  gen_lock_supported 3 31 || fail "gen_lock_supported 3 31 should pass"
+  gen_lock_supported 3 unknown || fail "gen_lock_supported 3 unknown should pass"
+  if gen_lock_supported 3 29; then
+    fail "gen_lock_supported 3 29 should fail: a protocol-29 hub has no Gen 3"
   fi
+  # The refusal is a stop, not a warning: it exits non-zero (in a subshell
+  # here, since fail exits) and names the remedy.
+  ( refuse_unsupported_gen_lock 3 30 /srv/hub ) || fail "refuse_unsupported_gen_lock 3 30 should pass"
+  ( refuse_unsupported_gen_lock 2 29 /srv/hub ) || fail "refuse_unsupported_gen_lock 2 29 should pass"
+  ( refuse_unsupported_gen_lock 3 unknown /srv/hub ) 2>/dev/null \
+    || fail "refuse_unsupported_gen_lock 3 unknown should pass"
+  if ( refuse_unsupported_gen_lock 3 29 /srv/hub ) 2>/dev/null; then
+    fail "refuse_unsupported_gen_lock 3 29 should stop the install"
+  fi
+  got="$( ( refuse_unsupported_gen_lock 3 29 /srv/hub ) 2>&1 || true)"
+  case "$got" in
+    *"protocol 30 or newer"*"--generation 1 or 2"*) ;;
+    *) fail "refuse_unsupported_gen_lock should name the fix, got: $got" ;;
+  esac
   tmp="$(mktemp "${TMPDIR:-/tmp}/rby-mmo-self.XXXXXX")"
   printf 'FOO=1\nRBY_MMO_HOST_PORT=7788\n' > "$tmp"
   write_env_key "$tmp" RBY_MMO_HOST_PORT 25565
@@ -568,6 +625,12 @@ self_test() {
   printf '{"listen":{"port":7788},"generation":2}\n' > "$tmp"
   got="$(generation_from_config_json "$tmp")"
   [ "$got" = 2 ] || fail "generation_from_config_json -> $got"
+  printf '{"listen":{"port":7788},"generation":3}\n' > "$tmp"
+  got="$(generation_from_config_json "$tmp")"
+  [ "$got" = 3 ] || fail "generation_from_config_json gen 3 -> $got"
+  write_env_key "$tmp" RBY_MMO_GENERATION 3
+  got="$(env_key "$tmp" RBY_MMO_GENERATION)"
+  [ "$got" = 3 ] || fail "write_env_key generation 3 -> $got"
   rm -f "$tmp"
   printf 'self-test ok\n'
 }
@@ -655,7 +718,7 @@ fi
 if [ "$EXPLICIT_GEN" -eq 0 ]; then
   preserved="$(env_key "${DIR}/server/.env" RBY_MMO_GENERATION)"
   case "$preserved" in
-    1|2) GENERATION="$preserved" ;;
+    1|2|3) GENERATION="$preserved" ;;
   esac
 fi
 if [ "$EXPLICIT_PORT" -eq 0 ]; then
@@ -755,7 +818,7 @@ cd "${DIR}/server"
 # Preserve port and generation on re-run / leftover container unless the
 # operator passed the flag. Default 1 / 7788 is only for a genuine first
 # boot. Compose interpolates empty generation as unset, but writing 1
-# here on a Gold volume would still lock it back to RBY.
+# here on a Gold or Gen 3 volume would still lock it back to RBY.
 if [ "$EXPLICIT_PORT" -eq 0 ]; then
   prev_port="$(env_host_port "${DIR}/server/.env")"
   if [ -z "$prev_port" ]; then
@@ -773,17 +836,22 @@ fi
 
 prev="$(env_key "${DIR}/server/.env" RBY_MMO_GENERATION)"
 case "$prev" in
-  1|2) ;;
+  1|2|3) ;;
   *) prev="$(container_generation || true)" ;;
 esac
 if [ "$EXPLICIT_GEN" -eq 0 ]; then
   case "$prev" in
-    1|2) GENERATION="$prev" ;;
+    1|2|3) GENERATION="$prev" ;;
   esac
 elif [ -n "$prev" ] && [ "$prev" != "$GENERATION" ]; then
   warn "generation changing ${prev} → ${GENERATION}."
   warn "Clients of gen ${prev} will be refused. This hub only admits the generation it is locked to."
 fi
+
+# Refused before anything is written or built, while another --version is
+# still one flag away: the tree about to run is the one whose PROTOCOL
+# decides whether a Gen 3 lock means anything to it.
+refuse_unsupported_gen_lock "$GENERATION" "$(protocol_of "$DIR")" "$DIR"
 
 write_env_key "${DIR}/server/.env" RBY_MMO_HOST_PORT "$PORT"
 write_env_key "${DIR}/server/.env" RBY_MMO_GENERATION "$GENERATION"

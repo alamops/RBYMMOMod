@@ -21,9 +21,19 @@
 --     snaps out on is a free one -- unlike sleep.  Otherwise it self-hits on
 --     roll < 128, and the self-hit is a typeless 40-power physical hit using
 --     the confused side's *own* attack against its *own* defence, with no
---     STAB, no type chart, no crit, and a fixed max roll.
+--     STAB, no type chart, no crit, and a fixed max roll.  Those are the
+--     stored battle stats, and the defence arrives doubled when the
+--     *opponent* has Reflect up -- the cart's quirk, applied by Turn's
+--     `_runGates`, which knows who the opponent is.  The scaling and the 997
+--     cap are Damage.compute's, as for any hit.
 --   * **Paralysis** full-stops on roll < 63 (63/256, not the 25% the manual
 --     claims) and quarters speed.
+--   * **Obedience** is pokered's CheckForDisobedience (core.asm :3830-4007),
+--     the one gate that only a traded monster of the player's meets: a badge
+--     cap, three rolls, and the five ways a monster over the cap spends the
+--     turn.  The pieces live here as functions of the RNG alone -- every
+--     branch of the cart's routine, its draws and its arithmetic -- and Turn's
+--     `_obey` says what each verdict does to the field.
 --
 -- Every "a sixteenth" is max(1, floor(maxHp/16)), so a 10 HP monster still
 -- takes 1 rather than 0 -- burn and poison can always eventually kill.
@@ -38,13 +48,29 @@ local Damage = need("BattleSim/Damage")
 
 local M = {}
 
-local floor, max = math.floor, math.max
+local floor, max, min = math.floor, math.max, math.min
 
--- 63/256 before the move; 128/256 for a confusion self-hit.
+-- 63/256 before the move (bytes 0..62); 128/256 for a confusion self-hit
+-- (bytes 128..255, `confusionSelfHit`).
 M.PARALYSIS_STOP_ROLL = 63
 M.CONFUSION_HIT_ROLL = 128
 M.CONFUSION_POWER = 40
 M.RESIDUAL_DIVISOR = 16
+
+-- CheckForDisobedience's ladder, highest badge first (core.asm :3855-3868):
+-- the first one held names the highest level that always obeys.  101 is
+-- "every level" -- the cart compares the cap against the level and a level
+-- is at most 100 -- and none of the four is 10.
+M.OBEDIENCE_CAPS = {
+  { badge = "EARTHBADGE", cap = 101 },
+  { badge = "MARSHBADGE", cap = 70 },
+  { badge = "RAINBOWBADGE", cap = 50 },
+  { badge = "CASCADEBADGE", cap = 30 },
+}
+M.OBEDIENCE_BASE_CAP = 10
+
+-- `.monDoesNothing`'s four lines, by `BattleRandom & 3` (core.asm :3917-3932).
+M.LOAF_LINES = { "loafing", "wont_obey", "turned_away", "ignored_orders" }
 
 local function int(value, fallback)
   local n = tonumber(value)
@@ -120,18 +146,128 @@ function M.confusionTick(state, roll)
              canMove = true, selfDamage = 0 }
   end
 
+  return { turnsRemaining = left, snappedOut = false, selfHit = true,
+           canMove = false, selfDamage = M.selfHitDamage(state) }
+end
+
+-- `.IsConfused` (core.asm :3426-3428; the enemy's `cp $80`, :5767-5768):
+-- `call BattleRandom / cp 50 percent + 1 / jr c, .TriedToUseDisabledMoveCheck`
+-- -- a byte below 128 jumps PAST the self-hit, so the monster hurts itself on
+-- 128..255.  No byte (nothing was drawn) is no self-hit.
+function M.confusionSelfHit(roll)
+  local r = int(roll, nil)
+  return r ~= nil and r >= M.CONFUSION_HIT_ROLL
+end
+
+-- HandleSelfConfusionDamage (core.asm :3672-3710): a typeless 40-power hit of
+-- the monster's own Attack into its own Defense, no crit, no random factor.
+-- Two routes reach it -- a confused monster's self-hit and a disobedient one
+-- that "won't obey" -- and both get this one number.  state: { level,
+-- attack | atk, defense | def }, the Defense already doubled by the caller
+-- when the opponent's Reflect is up.
+function M.selfHitDamage(state)
+  state = state or {}
   local hit = Damage.compute(
     { level = state.level, attack = state.attack, atk = state.atk },
     { defense = state.defense, def = state.def },
     { power = M.CONFUSION_POWER },
     { crit = false, stab = false, typeEffect = { 100 }, roll = Damage.ROLL_MAX })
-
-  return { turnsRemaining = left, snappedOut = false, selfHit = true,
-           canMove = false, selfDamage = hit.damage or 0 }
+  return hit.damage or 0
 end
 
-function M.confusionSelfHit(roll)
-  return int(roll, 255) < M.CONFUSION_HIT_ROLL
+-- ------- obedience (CheckForDisobedience, core.asm :3830-4007)
+--
+-- Every BattleRandom below is one `rng:byte()`, in the cart's order, and every
+-- loop redraws exactly where the cart's does -- the parity contract is the
+-- draw count, so the loops are the cart's and not a "fairer" equivalent.
+
+-- `swap a`: the two nibbles of a byte exchanged.
+function M.swapNibbles(b)
+  b = int(b, 0) % 256
+  return (b % 16) * 16 + floor(b / 16)
+end
+
+-- The highest level that obeys, from the set of badge ids the seat holds.
+function M.obedienceCap(badges)
+  if type(badges) == "table" then
+    for _, rung in ipairs(M.OBEDIENCE_CAPS) do
+      if badges[rung.badge] then return rung.cap end
+    end
+  end
+  return M.OBEDIENCE_BASE_CAP
+end
+
+-- The three rolls, and nothing they lead to.  Answers "obeys", "random" (try
+-- another move: `.useRandomMove`), "nap", "selfhit" ("won't obey" and the
+-- self-hit) or "nothing" (`.monDoesNothing`).
+--
+--   b = c = cap; d = level (a byte); b = min(255, c + d)   (`add b`, carry -> $ff)
+--   c >= d                       -> obeys, no draw
+--   loop1: r = swap(R) until r < b;  r < c -> obeys
+--   loop2: r = R until r < b;        r < c -> random move
+--   b = d - c; r = swap(R) - b:  borrow -> nap;  r >= b -> nothing;  else selfhit
+--
+-- b > c >= 10 whenever a roll is drawn at all, so both loops always have bytes
+-- they accept.
+function M.obedienceRoll(level, cap, rng)
+  local d = min(255, max(0, int(level, 1)))
+  local c = int(cap, M.OBEDIENCE_BASE_CAP)
+  if c >= d then return "obeys" end
+  local b = min(255, c + d)
+  local r
+  repeat r = M.swapNibbles(rng:byte()) until r < b
+  if r < c then return "obeys" end
+  repeat r = rng:byte() until r < b
+  if r < c then return "random" end
+  b = d - c
+  r = M.swapNibbles(rng:byte())
+  if r < b then return "nap" end
+  if r - b >= b then return "nothing" end
+  return "selfhit"
+end
+
+-- `.monNaps`: `add a / swap a / and SLP_MASK`, redrawn while it comes out 0,
+-- so 1..7 turns -- written into the status byte whole by the caller.
+function M.napTurns(rng)
+  local turns
+  repeat
+    turns = M.swapNibbles((rng:byte() * 2) % 256) % 8
+  until turns > 0
+  return turns
+end
+
+-- `.monDoesNothing`: one draw, `and 3`, picks the line (M.LOAF_LINES).
+function M.loafLine(rng)
+  return M.LOAF_LINES[(rng:byte() % 4) + 1]
+end
+
+-- `.useRandomMove`: the slot (1-based) used instead of `selected`, or nil when
+-- the cart refuses and falls to `.monDoesNothing` -- one move known, any move
+-- disabled, Struggle selected, or no PP outside the selected slot (the cart's
+-- sum of all four PP, each `and PP_MASK`, against the selected one's).  None
+-- of the refusals draws.  `.chooseMove` then redraws `R & 3` until it names
+-- a slot that exists, is not the selected one and has a PP byte that is not
+-- 0 -- the RAW byte (`ld a, [hl] / and a`, core.asm :3988-3992), PP Ups
+-- included, so a slot at 0 PP with a PP Up on it (K8 `ppUps`) can be the
+-- move used instead.  The refusals guarantee a slot with masked PP, so the
+-- loop ends.
+local function rawPp(move)
+  return int(move.pp, 0) + 64 * (int(move.ppUps, 0) % 4)
+end
+
+function M.disobedientMove(moves, selected, disabled, struggling, rng)
+  if type(moves) ~= "table" or #moves < 2 then return nil end
+  if disabled or struggling then return nil end
+  local others = false
+  for i = 1, #moves do
+    if i ~= selected and int(moves[i].pp, 0) > 0 then others = true end
+  end
+  if not others then return nil end
+  local slot
+  repeat
+    slot = (rng:byte() % 4) + 1
+  until slot ~= selected and moves[slot] ~= nil and rawPp(moves[slot]) > 0
+  return slot
 end
 
 -- ------- residuals

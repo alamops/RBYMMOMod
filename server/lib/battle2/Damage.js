@@ -12,24 +12,52 @@
  * Differs from Gen1 (lib/battle/Damage.js) on purpose:
  *
  *   * Special is SpA vs SpD (sheet keys spa/spd; legacy spc fills both).
- *   * No 255-stat pair clamp.
- *   * Crit is a flat x2 after the base product (not a doubled level term).
+ *   * No 255-stat pair clamp inside compute(): the cart's own fold to a byte
+ *     is TruncateHL_BC, run by the caller on the stats it chose
+ *     (`truncateStats` below), and compute() takes the pair it hands back.
+ *   * Crit is a flat x2 after the base product and the type-boost item
+ *     (BattleCommand_DamageCalc's .CriticalMultiplier, pokecrystal engine/
+ *     battle/effect_commands.asm:3108), not a doubled level term. WHICH
+ *     stats a crit reads is not decided here: CheckDamageStatsCritical
+ *     (:2660) keeps the boosted pair only when the defender's stage is
+ *     strictly lower than the attacker's, and otherwise reads the unmodified
+ *     stats -- no stages, badges, burn, paralysis or screens. Turn makes that
+ *     choice before it calls in.
  *   * After base (+ optional item boost + crit): cap at 997 then +2
  *     (MIN_DAMAGE), so every non-immune damaging hit leaves DamageCalc ≥ 2.
+ *   * DoBadgeTypeBoosts (input.badgeTypeBoost) next, ahead of STAB: an
+ *     eighth of the running damage, at least 1.
  *   * STAB is floor(d * 15/10); type rows are percents applied one at a time
  *     as floor(d * pct/100), with a non-immune floor of 1.
- *   * Variation last: floor(d * roll / 100) for roll in 85..100, only when
- *     running damage ≥ 2; final clamp 1..999.
+ *   * Rage's RageDamage (input.rageCount) next: x(count + 1), 16-bit.
+ *   * Variation last: floor(d * roll / 255) for roll in 217..255 (the
+ *     cart's rotated byte; wave 4), only when
+ *     running damage ≥ 2, at least 1. NO cap after it: DamageCalc's 997 + 2
+ *     is the only one; STAB, the matchup, RageDamage and the variation keep
+ *     their own 16-bit results, so a hit can pass 999 (Bide's store, Counter).
+ *   * `double` is DoubleDamage / DoubleMinimizeDamage, run by the caller after
+ *     the variation: a 16-bit shift whose carry pins $ffff.
+ *   * The referee-gaps run's wave 3 (R2c) splits `compute` into the cart's own
+ *     commands (the Lua twin carries the notes): `calc` (DamageCalc, with the
+ *     wCurDamage it adds to), `stab` (weather, badge, STAB, matchup, and the
+ *     c register it leaves), `applyRoll` / `varies` (no draw and no change
+ *     under 2) and the word multipliers `multiply` / `doubleTimes`.
  *
  * Flat `compute(input)` shape matches the Gen1 JS twin and the fixture; Lua
  * takes (attacker, defender, move, opts). Physical vs special: input.physical
  * (default true). When false, reads spa (or spc) vs spd (or spc).
  */
 
-const ROLL_MIN = 85;
-const ROLL_MAX = 100;
+// BattleCommand_DamageVariation's multiplier: a rotated BattleRandom byte,
+// 217..255, and the damage is x/255 of it (wave 4; the Lua twin cites it).
+const ROLL_MIN = 217;
+const ROLL_MAX = 255;
+// DamageCalc's tail: the base held at MAX_DAMAGE - MIN_DAMAGE (997) and
+// MIN_DAMAGE added -- the one cap Gold's damage has.
 const MAX_DAMAGE = 999;
 const MIN_DAMAGE = 2;
+// The 16-bit register every later step keeps (wCurDamage).
+const WORD_MAX = 65535;
 
 const idiv = (a, b) => Math.floor(a / b);
 
@@ -96,18 +124,140 @@ function base(level, power, attack, defense) {
   return value;
 }
 
+// TruncateHL_BC (pokecrystal engine/battle/effect_commands.asm:2614-2658):
+// fold the attack / defense pair the damage formula multiplies into a byte
+// each. While either is 255 or more, both are shifted right twice -- a value
+// the shift empties becomes 1 -- and what comes out are the low bytes.
+//
+// `onePass` stops after one pass with no re-check, so a stat still past 1023
+// after it keeps only its low byte -- the wrap bug docs/bugs_and_glitches.md
+// names. Crystal takes that exit in a link battle (`wLinkMode ==
+// LINK_COLOSSEUM`); Gold and Silver have no loop at all (pokegold
+// effect_commands.asm:2625), so they always fold once. Which one a fight is
+// rides on the fight's cart family (Turn `_onePassTruncate`, contract K6). A
+// wrapped 0 is not repaired here: a defense of 0 is lifted to 1 by DamageCalc
+// (`compute` below) and an attack of 0 leaves the base at 0. Returns
+// { attack, defense }.
+function truncateStats(attack, defense, onePass) {
+  let a = Math.max(0, int(attack, 0));
+  let d = Math.max(0, int(defense, 0));
+  while (a > 255 || d > 255) {
+    d = Math.floor(d / 4);
+    if (d === 0) d = 1;
+    a = Math.floor(a / 4);
+    if (a === 0) a = 1;
+    if (onePass) break;
+  }
+  return { attack: a % 256, defense: d % 256 };
+}
+
+// BattleCommand_DamageVariation: nothing for 0 or 1 (no roll is drawn for
+// them: `varies`), otherwise floor(d * roll / 255) -- roll 217..255 -- at
+// least 1 and NOT capped (see the header).
+function varies(modified) {
+  return Math.max(0, int(modified, 0)) >= 2;
+}
+
 function applyRoll(modified, roll) {
   const d = Math.max(0, int(modified, 0));
-  if (d < 2) return Math.max(1, d);
+  if (d < 2) return d;
   let r = int(roll, ROLL_MAX);
   if (r < ROLL_MIN) r = ROLL_MIN;
   if (r > ROLL_MAX) r = ROLL_MAX;
-  return Math.max(1, Math.min(MAX_DAMAGE, idiv(d * r, 100)));
+  return Math.max(1, idiv(d * r, ROLL_MAX));
+}
+
+// DoubleDamage / BattleCommand_DoubleMinimizeDamage: wCurDamage shifted left
+// as a 16-bit pair, a carry out pinning it at $ffff.
+function double(damage) {
+  return Math.min(WORD_MAX, Math.max(0, int(damage, 0)) * 2);
+}
+
+// `count` of those shifts in a row (RolloutPower's / FuryCutter's doublings).
+function doubleTimes(damage, count) {
+  let d = Math.max(0, int(damage, 0));
+  for (let i = 0; i < Math.max(0, int(count, 0)); i += 1) {
+    d = double(d);
+    if (d >= WORD_MAX) return WORD_MAX;
+  }
+  return d;
+}
+
+// BattleCommand_TripleKick: wCurDamage plus itself `times - 1` more times,
+// pinned at $ffff.
+function multiply(damage, times) {
+  const b = Math.max(0, int(damage, 0));
+  let d = b;
+  for (let i = 2; i <= Math.max(1, int(times, 1)); i += 1) {
+    d += b;
+    if (d > WORD_MAX) return WORD_MAX;
+  }
+  return d;
+}
+
+// BattleCommand_DamageCalc on the registers it multiplies (the Lua twin
+// carries the notes): null for power 0, else the base, the type-boost item,
+// the crit's x2 (pinned at $ffff), plus `carry` (its high byte into the
+// quotient first), held at 997, plus MIN_DAMAGE.
+function calc(level, power, attack, defense, opts) {
+  const o = opts || {};
+  const p = Math.max(0, int(power, 0));
+  if (p <= 0) return null;
+  let d = base(level, p, attack, Math.max(1, int(defense, 1)));
+  if (o.itemBoostPercent !== undefined && o.itemBoostPercent !== null
+      && int(o.itemBoostPercent, 0) !== 0) {
+    d = idiv(d * (100 + int(o.itemBoostPercent, 0)), 100);
+  }
+  if (o.crit) d = Math.min(WORD_MAX, d * 2);
+  const carry = Math.max(0, int(o.carry, 0)) % (WORD_MAX + 1);
+  const q = d + idiv(carry, 256);
+  let sum = q + carry;
+  if (q > MAX_DAMAGE - MIN_DAMAGE || sum > MAX_DAMAGE - MIN_DAMAGE) {
+    sum = MAX_DAMAGE - MIN_DAMAGE;
+  }
+  return sum + MIN_DAMAGE;
+}
+
+// BattleCommand_Stab on wCurDamage `d` (the Lua twin carries the notes):
+// the weather's tenths (a quotient past 16 bits pinned, 0 raised to 1), the
+// badge eighth, STAB (hl + hl >> 1 with no carry kept, the c register left
+// holding the low byte of hl >> 1) and the matchup rows (0 stays 0, else at
+// least 1; a row of 0 is the immunity). Returns { damage, immune, cReg }.
+function stab(damage, opts) {
+  const o = opts || {};
+  let d = Math.max(0, int(damage, 0));
+  const tenths = int(o.weatherTenths, null);
+  if (tenths !== null) {
+    d = idiv(d * tenths, 10);
+    if (d > WORD_MAX) d = WORD_MAX;
+    if (d === 0) d = 1;
+  }
+  if (o.badgeTypeBoost) d = Math.min(WORD_MAX, d + Math.max(1, Math.floor(d / 8)));
+  let cReg = null;
+  if (o.stab) {
+    const half = Math.floor(d / 2);
+    cReg = half % 256;
+    d = (d + half) % (WORD_MAX + 1);
+  }
+  let immune = false;
+  const effect = o.typeEffect !== undefined && o.typeEffect !== null
+    ? o.typeEffect : o.typeEff;
+  for (const pct of percents(effect)) {
+    if (pct <= 0) {
+      immune = true;
+      d = 0;
+    } else if (d > 0) {
+      d = idiv(d * pct, 100);
+      if (d === 0) d = 1;
+    }
+  }
+  return { damage: d, immune, cReg };
 }
 
 /*
  * compute({ level, power, attack|atk, defense|def, spa|spc, spd|spc,
- *           stab, typeEffect|typeEff, crit, roll, physical, itemBoostPercent })
+ *           stab, typeEffect|typeEff, crit, roll, physical, itemBoostPercent,
+ *           badgeTypeBoost, rageCount, weatherTenths, carry, kicks })
  *
  * Flat shape for the fixture / hub call sites. `roll` null/undefined asks for
  * the band: then `damage` is null and minDamage/maxDamage bound it.
@@ -144,35 +294,31 @@ function compute(input) {
     return result;
   }
 
-  let d = baseVal;
-
-  if (src.itemBoostPercent !== undefined && src.itemBoostPercent !== null
-      && int(src.itemBoostPercent, 0) > 0) {
-    d = idiv(d * (100 + int(src.itemBoostPercent, 0)), 100);
-  }
-
-  if (src.crit) d *= 2;
-
-  // Cap at DAMAGE_CAP then add MIN_DAMAGE (engine DamageCalc tail).
-  d = Math.min(d, MAX_DAMAGE - MIN_DAMAGE) + MIN_DAMAGE;
-
-  if (src.stab) d = idiv(d * 15, 10);
-
+  // DamageCalc (`calc`), TRIPLE KICK's kicks, then Stab (`stab`).
+  let d = calc(src.level, power, attack, defense, {
+    crit: src.crit, itemBoostPercent: src.itemBoostPercent, carry: src.carry,
+  });
+  if (src.kicks !== undefined && src.kicks !== null) d = multiply(d, src.kicks);
   const effect = src.typeEffect !== undefined && src.typeEffect !== null
     ? src.typeEffect : src.typeEff;
-
-  for (const pct of percents(effect)) {
-    if (pct <= 0) {
-      result.modified = 0;
-      result.immune = true;
-      result.damage = 0;
-      result.minDamage = 0;
-      result.maxDamage = 0;
-      return result;
-    }
-    d = idiv(d * pct, 100);
-    if (d === 0) d = 1;
+  const stabbed = stab(d, {
+    weatherTenths: src.weatherTenths, badgeTypeBoost: src.badgeTypeBoost,
+    stab: src.stab, typeEffect: effect,
+  });
+  d = stabbed.damage;
+  if (stabbed.immune) {
+    result.modified = 0;
+    result.immune = true;
+    result.damage = 0;
+    result.minDamage = 0;
+    result.maxDamage = 0;
+    return result;
   }
+
+  // BattleCommand_RageDamage, between Stab and DamageVariation in Rage's
+  // script: x(count + 1), a carry out of the 16-bit sum pinning it at $ffff.
+  const rage = Math.max(0, int(src.rageCount, 0));
+  if (rage > 0) d = Math.min(WORD_MAX, d * (rage + 1));
 
   result.modified = d;
   result.minDamage = applyRoll(d, ROLL_MIN);
@@ -198,9 +344,15 @@ function hasStab(moveType, attackerTypes) {
 
 module.exports = {
   compute,
+  calc,
+  stab,
+  varies,
+  multiply,
+  doubleTimes,
   hasStab,
   levelTerm,
   base,
+  truncateStats,
   applyRoll,
   idiv,
   int,
@@ -211,4 +363,6 @@ module.exports = {
   ROLL_MAX,
   MAX_DAMAGE,
   MIN_DAMAGE,
+  WORD_MAX,
+  double,
 };

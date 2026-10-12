@@ -69,11 +69,16 @@ function toNumber(value) {
 //                 brought and which are healthy / statused / down. Ball states
 //                 and nothing else -- no species, no level, no moves -- which
 //                 is exactly what the classic ball row reveals.
+//   held       -- a held item acted (Gold's one kind of its own, contract K3 of
+//                 docs/plans/gen12-referee-fidelity.md; Wire.BATTLE_EVENTS2):
+//                 whose, the item id, and whether the mon still holds it. The
+//                 referee's own `msg` sentence follows it.
 const KINDS = {
   msg: true, anim: true, damage: true, drain: true, faint: true,
   send: true, status: true, stat: true, switch: true, item: true,
   run: true, turn: true, over: true, wait: true, reconnect: true,
   chose: true, unchose: true, moves: true, exp: true, team: true,
+  held: true,
 };
 
 // Every key an event may carry, and the type it carries. `battle` and `seq` are
@@ -94,6 +99,9 @@ const KINDS = {
 // `confused` is the fight-local volatile (not a Wire.STATUSES token): 1 on
 // send when the newcomer is already confused, and 1/0 on a status event for
 // inflict / snap-out. It never occupies `status`, so PSN and confusion coexist.
+//
+// `stage` is a `stat` event's signed stat stage after the change, -6..6
+// (contract K10): `amount` rides beside it, but the wire's is unsigned.
 const FIELDS = {
   battle: 'string',
   seq: 'number',
@@ -112,6 +120,10 @@ const FIELDS = {
   mon: 'number',
   team: 'string',
   confused: 'number',
+  stage: 'number',
+  // Contract K22: an `anim` playing a move's clip for a beat that is not its
+  // user's own use of the move says `true` (the Lua twin explains).
+  quiet: 'boolean',
 };
 
 // ------------------------------------------------------------------
@@ -128,8 +140,9 @@ const FIELDS = {
 //     `text` carries the sentence either way.
 const SHAPES = {
   msg: { text: true },
-  anim: { slot: true, side: true, text: 'move or ball-anim id',
-    amount: 'shake count on SHAKE_ANIM (0-3)' },
+  anim: { slot: true, side: true, text: 'move id, ball-anim id, or a cart status clip (`<X>_ANIM`, K20)',
+    amount: "shake count on SHAKE_ANIM (0-3); 1 on a charge's first turn",
+    quiet: 'true when the clip is not the monster using its move (K22)' },
   damage: {
     slot: true, side: true, amount: true, hp: 'hp left',
     status: 'set when a residual dealt it',
@@ -171,6 +184,10 @@ const SHAPES = {
     mon: 'party index (0-5) of the mon banking this share; absent means the active one' },
   team: { slot: 'the seat whose roster this is', side: true,
     team: 'one token per party member, in party order: o / s / x' },
+  held: { slot: true, side: true,
+    mon: 'party index (0-5) of the mon whose item acted',
+    text: 'the item id (not prose: a client matches it against its own save)',
+    amount: '1 the mon still holds `text` (or now does: Thief), 0 it holds nothing' },
 };
 
 // ------------------------------------------------------------------
@@ -264,6 +281,8 @@ function coerce(key, value) {
     if (n === null) return undefined;
     return Math.floor(n);
   }
+  // A flag is kept only as `true`: `false` is the absence it would mean.
+  if (FIELDS[key] === 'boolean') return value === true ? true : undefined;
   if (typeof value !== 'string' || value === '') return undefined;
   return value;
 }
@@ -275,6 +294,15 @@ function coerce(key, value) {
  * treats null as "do not emit" and carries on, and the suites assert null never
  * happens for the kinds it actually sends.
  */
+// K17 / K18 (the Lua twin explains): a `msg` line's marks and breaks, the cap
+// it is held to, and the plain sentence the other kinds carry.
+const BATTLE_LINE_MAX = 80;
+// A name mark (`^a` / `^b`) and a side-word mark (`^A` / `^B`) alike go.
+function plainLine(text) {
+  if (typeof text !== 'string') return text;
+  return text.replace(/\^[abAB]/g, '').replace(/-\n/g, '-').replace(/\n/g, ' ');
+}
+
 function build(kind, fields) {
   if (!own(KINDS, kind)) return null;
   const out = { t: kind };
@@ -290,6 +318,8 @@ function build(kind, fields) {
       }
     }
   }
+  // K17 / K18 ride the `msg` line alone: a `status` / `stat` sentence is plain.
+  if (kind !== 'msg' && typeof out.text === 'string') out.text = plainLine(out.text);
   return out;
 }
 
@@ -332,4 +362,6 @@ module.exports = {
   build,
   check,
   toNumber,
+  BATTLE_LINE_MAX,
+  plainLine,
 };

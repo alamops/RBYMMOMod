@@ -8,6 +8,17 @@
 --   Gen 1: the extractor decodes town-map entries into game.data.field.townMap
 --   Gen 2: map headers carry a landmark byte / LANDMARK_* id, and the names
 --          live in game.data.gen2Landmarks (no data.field.townMap)
+--   Gen 3: map headers carry a region-map section, named by the cart's own
+--          section table (Gen3.mapName: map_sections_extract on FireRed and
+--          LeafGreen, the rse mapsec pack on Emerald) -- the words the map
+--          name popup shows
+--
+-- Gen 3 has one wrinkle the other two do not: a hub mixes carts, so a
+-- FireRed player's roster can hold an Emerald player standing in an EM_* map
+-- their own cart has no section for.  Gen3.mapName answers both -- this
+-- cart's sections for its own family, and the id cleaned into words (prefix
+-- off, CamelCase and digits split) for the other -- so a Hoenn town reads as
+-- a Hoenn town on a Kanto screen rather than as a raw id.
 --
 -- That is also the only place they may come from.  A committed id -> name
 -- table would be ROM-derived data sitting in this repo, which this mod may
@@ -20,6 +31,11 @@
 -- while a screen is being built, from inside a mod callback, so an
 -- unexpected shape has to cost a nice name and nothing else.  Nothing here
 -- raises -- including a Gen 2 boot whose game.data.field is nil.
+
+local need = ...
+-- Gen3 answers nothing off a Gen 3 boot (every function checks Gen3.active
+-- first), so requiring it costs a Gen 1 / Gen 2 lookup nothing.
+local Gen3 = type(need) == "function" and need("Gen3") or nil
 
 local M = {}
 
@@ -43,6 +59,23 @@ local function tidyName(named)
   one = one:match("^%s*(.-)%s*$") or one
   if one == "" then return nil end
   return one
+end
+
+-- A Gen 3 map id: FR_* (FireRed / LeafGreen), SEVII_* (the legacy Sevii
+-- spelling the engine still accepts) or EM_* (Emerald).
+local function gen3MapId(mapId)
+  return mapId:find("^FR_") ~= nil or mapId:find("^EM_") ~= nil
+    or mapId:find("^SEVII_") ~= nil
+end
+
+local function gen3Name(mapId)
+  if not (type(Gen3) == "table" and type(Gen3.active) == "function"
+          and Gen3.active() and gen3MapId(mapId)) then
+    return nil
+  end
+  local ok, name = pcall(Gen3.mapName, mapId)
+  if not ok then return nil end
+  return tidyName(name)
 end
 
 -- Gen 2: map def.landmark is either a LANDMARK_* string or the cart byte
@@ -82,6 +115,11 @@ end
 -- screen shows for that.
 function M.name(game, mapId)
   if type(mapId) ~= "string" or mapId == "" then return nil end
+
+  -- Gen 3 first, and for either family's ids: a Gen 3 map id is never a
+  -- town-map or landmark key, so the two lookups below could only miss.
+  local gen3 = gen3Name(mapId)
+  if gen3 then return gen3 end
 
   local entries = locations(game)
   local entry = type(entries) == "table" and entries[mapId] or nil

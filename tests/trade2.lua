@@ -313,6 +313,39 @@ do
   check(warns[#warns]:find("START") ~= nil,
     "naming somewhere the player can go from")
 
+  -- ------- an apply that answered nothing is a failed trade, not a success
+  --
+  -- Trade2:apply warns and returns nil when it cannot land the mon (no slot,
+  -- a malformed record); it does not raise.  Reading only the pcall result
+  -- took that for success: "a POKeMON was traded over!", a save, and APPLIED
+  -- sent -- while nothing changed in this party.
+  do
+    local said, sent, wrote = {}, {}, 0
+    local failSessions = Sessions.new({}, {
+      say = function(_, text, onDone)
+        said[#said + 1] = text
+        if onDone then onDone() end
+        return { kind = "box" }
+      end,
+    })
+    local failGame = {
+      data = {}, save = { generation = 2, party = {} },
+      writeSave = function() wrote = wrote + 1 return true end,
+    }
+    local session = {
+      trade = { stage = "done", myPick = 1, apply = function() return nil end },
+      net = { send = function(_, msg) sent[#sent + 1] = msg end },
+    }
+    failSessions:advanceTrade(failGame, session)
+    eq(said[#said], "The trade failed\nto complete.",
+      "a nil apply on Gold is reported as a failed trade")
+    eq(wrote, 0, "and nothing is saved over the party it did not change")
+    for _, text in ipairs(said) do
+      check(not text:find("traded over", 1, true),
+        "and no 'traded over!' line claims a mon arrived", text)
+    end
+  end
+
   stubMod.ui = nil
   Gen.generation = realGen
 end

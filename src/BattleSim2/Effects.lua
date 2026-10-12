@@ -1,16 +1,71 @@
 -- Gen2 move-effect ids and stat-stage multipliers (light port of Gen1 Effects).
 --
--- Same 87-slot pret-ordered table as BattleSim/Effects.lua for now; stage and
--- sheet keys are Gen2: atk/def/spe/spa/spd (Sp.Def). Calcium / X_SPECIAL write
--- spa. Held-item hooks and a full Gen2 effect jump table are follow-up.
+-- The same 87-slot pret-ordered table as BattleSim/Effects.lua (ids 0..86),
+-- which Gold's EFFECT_* names fold onto where a Gen 1 handler is the cart's
+-- command (`idOf`), and after it the Gold-native rows (87..MAX_EFFECT_ID):
+-- the scripts whose commands no Gen 1 id runs -- SP. DEF / ACCURACY down,
+-- ATTACK / DEFENSE / ALL up, FLAME WHEEL and SACRED FIRE, STOMP, TWISTER,
+-- SNORE, THUNDER, TRI ATTACK, GUST, EARTHQUAKE and SKY ATTACK
+-- (docs/plans/gen12-referee-known-gaps.md section 13) -- and, from the
+-- referee-gaps run's wave 2, SLEEP TALK, LOCK-ON, SAFEGUARD and TOXIC
+-- (102..105), and from its wave 3 the Gold-only damage formulas, protection,
+-- COUNTER / MIRROR COAT, FUTURE SIGHT, PURSUIT, the weather moves and the
+-- fixed-damage scripts Gold names apart (106..132), and from its wave 4 the
+-- status and field scripts -- ATTRACT, BATON PASS, BELLY DRUM, CONVERSION2,
+-- CURSE, DESTINY BOND, ENCORE, FORESIGHT, HEAL BELL, MEAN LOOK, NIGHTMARE,
+-- PAIN SPLIT, PERISH SONG, PSYCH UP, RAPID SPIN, SKETCH, SPIKES, SPITE, the
+-- SP. DEF stat moves (AMNESIA), SWAGGER, TELEPORT and SKULL BASH (133..157).
+-- Stage and sheet keys
+-- are Gen2: atk/def/spe/spa/spd (Sp.Def). Calcium / X_SPECIAL write spa.
 --
 -- No love, no engine modules, no mod facade.
 
 local need = ...
 
+-- For the burn / paralysis tail of `battleStat`, so the halving and the
+-- quartering are one rule with one owner rather than a second copy here.
+local Status = need("BattleSim2/Status")
+-- The HELD_PREVENT_* tokens the status commands ask about (Items.prevents).
+local Items = need("BattleSim2/Items")
+
 local M = {}
 
 local floor, max, min = math.floor, math.max, math.min
+
+-- A battler's name the way the cart prints it through a prefixing macro --
+-- `<USER>` / `<TARGET>` (home/text.asm PlaceMoveUsersName /
+-- PlaceMoveTargetsName -> PlaceBattlersName, which writes EnemyText's
+-- "Enemy " before wEnemyMonNickname on the enemy's turn and nothing before
+-- wBattleMonNickname): contract K17 of docs/plans/gen12-referee-remaining-
+-- gaps.md.  The referee is one narrator for both sides, so it cannot know
+-- whose "Enemy" a name is; it writes the monster's side as a mark -- `^a` or
+-- `^b`, stamped on every monster as it is copied in (`mon.mark`, Turn
+-- `create`) -- immediately before the name, and each client prints the
+-- prefix its own cart would (nothing on its own side).  The one helper every
+-- marked line goes through, so the audit is a grep: a line that names a
+-- battler bare (`.species` with no `M.name`) is a line the cart prints with
+-- `text_ram` -- the obedience lines, BEAT UP's party member, a species name
+-- from wStringBuffer1, "Gotcha!", the send-outs -- each one commented where
+-- it is built.  A monster with no mark (a synthetic sheet a vector test
+-- builds) prints bare, as it always did.
+function M.name(mon)
+  return (mon.mark or "") .. mon.species
+end
+local nameOf = M.name
+
+-- The cart's status animations (pokecrystal ANIM_<X>, sent as `<X>_ANIM`;
+-- contract K20) a command here plays, queued at the line it precedes: `at` is
+-- the index in `out.messages` of the line it plays ahead of (one past the
+-- last for one that plays after every line).  Turn emits them in that place
+-- (`_sayResult`) on the seat of `fighter`, the monster the clip plays over
+-- (PlayOpponentBattleAnim's switched turn: the target), and gives SLP / CONF
+-- their player variant there (`_statusAnim`).
+local function statusAnim(out, fighter, id)
+  if not fighter then return end
+  out.anims = out.anims or {}
+  out.anims[#out.anims + 1] = { at = #out.messages + 1, fighter = fighter, id = id }
+end
+M.statusAnim = statusAnim
 
 -- pret/pokered effect name order (effect id = index).
 M.NAMES = {
@@ -101,7 +156,178 @@ M.NAMES = {
   [84] = "LEECH_SEED_EFFECT",
   [85] = "SPLASH_EFFECT",
   [86] = "DISABLE_EFFECT",
+  -- The Gold-native rows, each under the cart's own constant (pokecrystal
+  -- constants/move_effect_constants.asm, pokegold the same), the name a Gold
+  -- sheet's `def.effect` carries -- so `idOf` answers them off BY_NAME.  The
+  -- move scripts they stand for are data/moves/effects.asm's (identical in
+  -- pokegold); the moves are data/moves/moves.asm's.
+  [87] = "EFFECT_SP_DEF_DOWN_HIT",    -- CRUNCH, PSYCHIC, SHADOW BALL
+  [88] = "EFFECT_ACCURACY_DOWN_HIT",  -- MUD-SLAP, OCTAZOOKA
+  [89] = "EFFECT_ATTACK_UP_HIT",      -- METAL CLAW
+  [90] = "EFFECT_DEFENSE_UP_HIT",     -- STEEL WING
+  [91] = "EFFECT_ALL_UP_HIT",         -- ANCIENTPOWER
+  [92] = "EFFECT_FLAME_WHEEL",
+  [93] = "EFFECT_SACRED_FIRE",
+  [94] = "EFFECT_STOMP",
+  [95] = "EFFECT_TWISTER",
+  [96] = "EFFECT_SNORE",
+  [97] = "EFFECT_THUNDER",
+  [98] = "EFFECT_TRI_ATTACK",
+  [99] = "EFFECT_GUST",
+  [100] = "EFFECT_EARTHQUAKE",
+  [101] = "EFFECT_SKY_ATTACK",
+  -- The referee-gaps run's wave 2 (R2b): the scripts whose own command the
+  -- referee runs now -- BattleCommand_SleepTalk, BattleCommand_LockOn (LOCK-ON
+  -- and MIND READER), BattleCommand_Safeguard -- and EFFECT_TOXIC, which used
+  -- to fold onto POISON_EFFECT (66) and so never badly poisoned: it shares
+  -- BattleCommand_Poison with it and differs in `.check_toxic`.
+  [102] = "EFFECT_SLEEP_TALK",
+  [103] = "EFFECT_LOCK_ON",
+  [104] = "EFFECT_SAFEGUARD",
+  [105] = "EFFECT_TOXIC",
+  -- The referee-gaps run's wave 3 (R2c): every Gold script the referee used to
+  -- fold onto a Gen 1 handler or onto 0, whose own commands it runs now (Turn
+  -- `_useMove`; the move scripts are data/moves/effects.asm's).
+  [106] = "EFFECT_RETURN",          -- BattleCommand_HappinessPower
+  [107] = "EFFECT_FRUSTRATION",     -- BattleCommand_FrustrationPower
+  [108] = "EFFECT_HIDDEN_POWER",    -- HiddenPowerDamage
+  [109] = "EFFECT_REVERSAL",        -- FLAIL, REVERSAL: ConstantDamage's .reversal
+  [110] = "EFFECT_MAGNITUDE",       -- BattleCommand_GetMagnitude
+  [111] = "EFFECT_PRESENT",         -- BattleCommand_Present
+  [112] = "EFFECT_TRIPLE_KICK",     -- TripleKick / KickCounter / EndLoop
+  [113] = "EFFECT_FURY_CUTTER",     -- BattleCommand_FuryCutter
+  [114] = "EFFECT_ROLLOUT",         -- CheckRollout / RolloutPower
+  [115] = "EFFECT_DEFENSE_CURL",    -- DefenseUp + BattleCommand_Curl
+  [116] = "EFFECT_BEAT_UP",         -- BattleCommand_BeatUp / EndLoop
+  [117] = "EFFECT_PURSUIT",         -- BattleCommand_Pursuit / PursuitSwitch
+  [118] = "EFFECT_FALSE_SWIPE",     -- BattleCommand_FalseSwipe
+  [119] = "EFFECT_FUTURE_SIGHT",    -- CheckFutureSight / FutureSight
+  [120] = "EFFECT_PROTECT",         -- PROTECT, DETECT: BattleCommand_Protect
+  [121] = "EFFECT_ENDURE",          -- BattleCommand_Endure
+  [122] = "EFFECT_COUNTER",         -- BattleCommand_Counter
+  [123] = "EFFECT_MIRROR_COAT",     -- BattleCommand_MirrorCoat
+  [124] = "EFFECT_RAIN_DANCE",      -- BattleCommand_StartRain
+  [125] = "EFFECT_SUNNY_DAY",       -- BattleCommand_StartSun
+  [126] = "EFFECT_SANDSTORM",       -- BattleCommand_StartSandstorm
+  [127] = "EFFECT_SOLARBEAM",       -- SkipSunCharge + Charge; rain's x0.5
+  [128] = "EFFECT_MORNING_SUN",     -- BattleCommand_HealMorn
+  [129] = "EFFECT_SYNTHESIS",       -- BattleCommand_HealDay
+  [130] = "EFFECT_MOONLIGHT",       -- BattleCommand_HealNite
+  [131] = "EFFECT_LEVEL_DAMAGE",    -- SEISMIC TOSS, NIGHT SHADE: ConstantDamage
+  [132] = "EFFECT_PSYWAVE",         -- ConstantDamage's .psywave
+  -- The referee-gaps run's wave 4 (R2d): the status and field scripts, each
+  -- under its own command (pokecrystal engine/battle/move_effects/*.asm and
+  -- effect_commands.asm), and the four SP. DEF stat rows that used to fold to
+  -- 0 (AMNESIA said "But nothing happened").  SKULL BASH leaves CHARGE_EFFECT
+  -- (39) because its script raises Defense on the charge turn
+  -- (BattleCommand_Charge's SkipToBattleCommand to `endturn`).
+  [133] = "EFFECT_ATTRACT",         -- BattleCommand_Attract
+  [134] = "EFFECT_BATON_PASS",      -- BattleCommand_BatonPass
+  [135] = "EFFECT_BELLY_DRUM",      -- BattleCommand_BellyDrum
+  [136] = "EFFECT_CONVERSION2",     -- BattleCommand_Conversion2
+  [137] = "EFFECT_CURSE",           -- BattleCommand_Curse
+  [138] = "EFFECT_DESTINY_BOND",    -- BattleCommand_DestinyBond
+  [139] = "EFFECT_ENCORE",          -- BattleCommand_Encore
+  [140] = "EFFECT_FORESIGHT",       -- BattleCommand_Foresight
+  [141] = "EFFECT_HEAL_BELL",       -- BattleCommand_HealBell
+  [142] = "EFFECT_MEAN_LOOK",       -- MEAN LOOK, SPIDER WEB: BattleCommand_ArenaTrap
+  [143] = "EFFECT_NIGHTMARE",       -- BattleCommand_Nightmare
+  [144] = "EFFECT_PAIN_SPLIT",      -- BattleCommand_PainSplit
+  [145] = "EFFECT_PERISH_SONG",     -- BattleCommand_PerishSong
+  [146] = "EFFECT_PSYCH_UP",        -- BattleCommand_PsychUp
+  [147] = "EFFECT_RAPID_SPIN",      -- BattleCommand_ClearHazards after the hit
+  [148] = "EFFECT_SKETCH",          -- BattleCommand_Sketch
+  [149] = "EFFECT_SPIKES",          -- BattleCommand_Spikes
+  [150] = "EFFECT_SPITE",           -- BattleCommand_Spite
+  [151] = "EFFECT_SP_DEF_UP_2",     -- AMNESIA: BattleCommand_SpecialDefenseUp2
+  [152] = "EFFECT_SWAGGER",         -- attackup2 on the target, confusetarget
+  [153] = "EFFECT_TELEPORT",        -- BattleCommand_Teleport
+  [154] = "EFFECT_SP_DEF_UP",       -- BattleCommand_SpecialDefenseUp
+  [155] = "EFFECT_SP_DEF_DOWN",     -- BattleCommand_SpecialDefenseDown
+  [156] = "EFFECT_SP_DEF_DOWN_2",   -- BattleCommand_SpecialDefenseDown2
+  [157] = "EFFECT_SKULL_BASH",      -- Charge, then `endturn` / `defenseup`
 }
+
+-- The last id either table numbers.  The wire carries a Gen 1/2 move's effect
+-- as a byte (Wire.battleMove, sanitize EFFECT_MAX), so this may grow to 255.
+M.MAX_EFFECT_ID = 157
+
+-- The Gold-native ids by name, for the call sites that branch on one --
+-- and the shared rows whose command Gold rewrote (wave 5): CONVERSION, and
+-- EFFECT_FORCE_SWITCH (ROAR, WHIRLWIND) on Red's SWITCH_AND_TELEPORT row.
+M.CONVERSION = 24
+M.FORCE_SWITCH = 28
+M.SP_DEF_DOWN_HIT = 87
+M.ACCURACY_DOWN_HIT = 88
+M.ATTACK_UP_HIT = 89
+M.DEFENSE_UP_HIT = 90
+M.ALL_UP_HIT = 91
+M.FLAME_WHEEL = 92
+M.SACRED_FIRE = 93
+M.STOMP = 94
+M.TWISTER = 95
+M.SNORE = 96
+M.THUNDER = 97
+M.TRI_ATTACK = 98
+M.GUST = 99
+M.EARTHQUAKE = 100
+M.SKY_ATTACK = 101
+M.SLEEP_TALK = 102
+M.LOCK_ON = 103
+M.SAFEGUARD = 104
+M.TOXIC = 105
+M.RETURN = 106
+M.FRUSTRATION = 107
+M.HIDDEN_POWER = 108
+M.REVERSAL = 109
+M.MAGNITUDE = 110
+M.PRESENT = 111
+M.TRIPLE_KICK = 112
+M.FURY_CUTTER = 113
+M.ROLLOUT = 114
+M.DEFENSE_CURL = 115
+M.BEAT_UP = 116
+M.PURSUIT = 117
+M.FALSE_SWIPE = 118
+M.FUTURE_SIGHT = 119
+M.PROTECT = 120
+M.ENDURE = 121
+M.COUNTER = 122
+M.MIRROR_COAT = 123
+M.RAIN_DANCE = 124
+M.SUNNY_DAY = 125
+M.SANDSTORM = 126
+M.SOLARBEAM = 127
+M.MORNING_SUN = 128
+M.SYNTHESIS = 129
+M.MOONLIGHT = 130
+M.LEVEL_DAMAGE = 131
+M.PSYWAVE = 132
+M.ATTRACT = 133
+M.BATON_PASS = 134
+M.BELLY_DRUM = 135
+M.CONVERSION2 = 136
+M.CURSE = 137
+M.DESTINY_BOND = 138
+M.ENCORE = 139
+M.FORESIGHT = 140
+M.HEAL_BELL = 141
+M.MEAN_LOOK = 142
+M.NIGHTMARE = 143
+M.PAIN_SPLIT = 144
+M.PERISH_SONG = 145
+M.PSYCH_UP = 146
+M.RAPID_SPIN = 147
+M.SKETCH = 148
+M.SPIKES = 149
+M.SPITE = 150
+M.SP_DEF_UP_2 = 151
+M.SWAGGER = 152
+M.TELEPORT = 153
+M.SP_DEF_UP = 154
+M.SP_DEF_DOWN = 155
+M.SP_DEF_DOWN_2 = 156
+M.SKULL_BASH = 157
 
 M.CATEGORIES = {
   [0] = "none",
@@ -167,10 +393,37 @@ M.CATEGORIES = {
   [84] = "volatile",
   [85] = "other",
   [86] = "volatile",
+  [87] = "status_side", [88] = "status_side",
+  [89] = "status_side", [90] = "status_side", [91] = "status_side",
+  [92] = "status_side", [93] = "status_side",
+  [94] = "status_side", [95] = "status_side", [96] = "status_side",
+  [97] = "status_side", [98] = "status_side",
+  [99] = "other", [100] = "other",
+  [101] = "charge",
+  [102] = "meta", [103] = "volatile", [104] = "volatile",
+  [105] = "status_primary",
+  [106] = "other", [107] = "other", [108] = "other", [109] = "fixed",
+  [110] = "other", [111] = "other", [112] = "multihit", [113] = "other",
+  [114] = "other", [115] = "stat", [116] = "multihit", [117] = "other",
+  [118] = "other", [119] = "other", [120] = "volatile", [121] = "volatile",
+  [122] = "fixed", [123] = "fixed", [124] = "field", [125] = "field",
+  [126] = "field", [127] = "charge", [128] = "heal", [129] = "heal",
+  [130] = "heal", [131] = "fixed", [132] = "fixed",
+  [133] = "volatile", [134] = "flow", [135] = "stat", [136] = "meta",
+  [137] = "stat", [138] = "volatile", [139] = "volatile", [140] = "volatile",
+  [141] = "heal", [142] = "volatile", [143] = "volatile", [144] = "heal",
+  [145] = "field", [146] = "stat", [147] = "other", [148] = "meta",
+  [149] = "field", [150] = "volatile", [151] = "stat", [152] = "status_primary",
+  [153] = "flow", [154] = "stat", [155] = "stat", [156] = "stat",
+  [157] = "charge",
 }
 
 M.STAGE_MIN = -6
 M.STAGE_MAX = 6
+
+-- BattleCommand_Screen's `ld a, 5`: a Reflect or Light Screen counts five
+-- between-turn ticks (HandleScreens), the turn it went up included.
+M.SCREEN_TURNS = 5
 
 -- Gen1 stage multipliers as percents (25/100 .. 400/100).
 M.STAGE_MULT = {
@@ -180,7 +433,7 @@ M.STAGE_MULT = {
 }
 
 local BY_NAME = {}
-for id = 0, 86 do
+for id = 0, M.MAX_EFFECT_ID do
   BY_NAME[M.NAMES[id]] = id
 end
 
@@ -197,9 +450,18 @@ end
 -- Leer / Hypnosis / Screech worked in engine 1v1 (gen2/Battle.lua) and
 -- failed in every BattleSim2 fight -- 2v2 co-op, mediated PvP, solo-on.
 --
--- Map every EFFECT_* that already has a handler onto that handler.  Gen 2
--- only moves (Protect, Spikes, …) stay unmapped and still no-op honestly.
--- Charge / vanish aliases keep the same ids as before.
+-- Map every EFFECT_* that already has a handler onto that handler.  The
+-- Gold-native rows above answer under their own names (BY_NAME), SKY ATTACK
+-- among them: its script is RazorWind's plus `effectchance` / `flinchtarget`,
+-- which CHARGE_EFFECT does not run.  Gen 2 only moves (Spikes, …) stay
+-- unmapped and still no-op honestly.  Charge / vanish aliases keep the same ids
+-- as before.  Wave 3 (R2c) moved SOLARBEAM (its sun skip and rain halving),
+-- LEVEL_DAMAGE and PSYWAVE (SEISMIC TOSS and NIGHT SHADE deal the user's
+-- level, PSYWAVE its own roll -- as 41 they dealt their sheet power, 1), the
+-- three time-of-day heals (as 56 they healed half whatever the weather) and
+-- DEFENSE_CURL (as 11 it never curled) off these folds onto ids of their own.
+-- Wave 4 (R2d) moved SKULL BASH off 39 onto 157 (its Defense raise) and gave
+-- every status / field script a row of its own (133..156), BY_NAME's.
 local GEN2_EFFECT_ID = {
   EFFECT_NORMAL_HIT = 0,
   EFFECT_SLEEP = 32,
@@ -213,7 +475,6 @@ local GEN2_EFFECT_ID = {
   EFFECT_MIRROR_MOVE = 9,
   EFFECT_ATTACK_UP = 10,
   EFFECT_DEFENSE_UP = 11,
-  EFFECT_DEFENSE_CURL = 11,
   EFFECT_SPEED_UP = 12,
   EFFECT_SP_ATK_UP = 13,
   EFFECT_ACCURACY_UP = 14,
@@ -235,13 +496,8 @@ local GEN2_EFFECT_ID = {
   EFFECT_PAY_DAY = 16,
   EFFECT_OHKO = 38,
   EFFECT_RAZOR_WIND = 39,
-  EFFECT_SOLARBEAM = 39,
-  EFFECT_SKULL_BASH = 39,
-  EFFECT_SKY_ATTACK = 39,
   EFFECT_SUPER_FANG = 40,
   EFFECT_STATIC_DAMAGE = 41,
-  EFFECT_LEVEL_DAMAGE = 41,
-  EFFECT_PSYWAVE = 41,
   EFFECT_TRAP_TARGET = 42,
   EFFECT_FLY = 43,
   EFFECT_DOUBLE_HIT = 44,
@@ -257,9 +513,6 @@ local GEN2_EFFECT_ID = {
   EFFECT_ACCURACY_UP_2 = 54,
   EFFECT_EVASION_UP_2 = 55,
   EFFECT_HEAL = 56,
-  EFFECT_MORNING_SUN = 56,
-  EFFECT_SYNTHESIS = 56,
-  EFFECT_MOONLIGHT = 56,
   EFFECT_TRANSFORM = 57,
   EFFECT_ATTACK_DOWN_2 = 58,
   EFFECT_DEFENSE_DOWN_2 = 59,
@@ -270,7 +523,6 @@ local GEN2_EFFECT_ID = {
   EFFECT_LIGHT_SCREEN = 64,
   EFFECT_REFLECT = 65,
   EFFECT_POISON = 66,
-  EFFECT_TOXIC = 66,
   EFFECT_PARALYZE = 67,
   EFFECT_ATTACK_DOWN_HIT = 68,
   EFFECT_DEFENSE_DOWN_HIT = 69,
@@ -295,13 +547,13 @@ end
 
 function M.nameOf(id)
   id = int(id, nil)
-  if id == nil or id < 0 or id > 86 then return nil end
+  if id == nil or id < 0 or id > M.MAX_EFFECT_ID then return nil end
   return M.NAMES[id]
 end
 
 function M.category(id)
   id = int(id, nil)
-  if id == nil or id < 0 or id > 86 then return nil end
+  if id == nil or id < 0 or id > M.MAX_EFFECT_ID then return nil end
   return M.CATEGORIES[id]
 end
 
@@ -329,26 +581,325 @@ function M.stageMult(stage)
   return M.STAGE_MULT[M.clampStage(stage)]
 end
 
+-- CalcBattleStats (pokecrystal engine/battle/effect_commands.asm:4817-4875):
+-- the unmodified stat times the stage's ratio from data/battle/
+-- stat_multipliers.asm, then a quotient of 0 is raised to 1 and one at or past
+-- MAX_STAT_VALUE is held at 999.  The cart's ratios are num/den pairs (15/10,
+-- 2/1, 25/10 ...); each is the percent above over 100 exactly, so the floor
+-- lands on the same integer.
 function M.applyStage(base, stage)
-  return floor(max(0, int(base, 0)) * M.stageMult(stage) / 100)
+  local value = floor(max(0, int(base, 0)) * M.stageMult(stage) / 100)
+  if value < 1 then return 1 end
+  if value > M.MAX_STAT_VALUE then return M.MAX_STAT_VALUE end
+  return value
 end
 
--- Gen1 ApplyBadgeStatBoosts: ×9/8 when the fighter holds the matching badge.
--- `wireStatKey` is atk/def/spe/spa/spd; `badges` is a set of badge ids → true.
-local BADGE_FOR_STAT = {
-  atk = "BOULDERBADGE",
-  def = "THUNDERBADGE",
-  spe = "SOULBADGE",
-  spa = "VOLCANOBADGE",
-  spd = "MARSHBADGE",
-}
+-- Crystal's badge rules, as gen1recomp ports them (src/battle/gen2/Battle.lua,
+-- the engine every number here was checked against).  `badges` is a set of
+-- Gold badge ids -> true: the eight Johto ids and the eight Kanto ids that
+-- name the rows of the engine's BADGE_TYPE_BOOSTS (ZEPHYR ... RISING, BOULDER
+-- ... EARTH), which is what a Gold client uploads.  Gen 1's BOULDERBADGE-style
+-- ids mean nothing here: Gold has no badge by that name.
+--
+-- A fighter only holds a set where the cart would have applied it -- side a
+-- of a fight against the computer; Turn.create drops it in 1v1 / coop_pvp
+-- (link battles, where Crystal's BadgeStatBoosts returns early) and on side b
+-- (Turn.BADGE_MODES) -- so nothing below has to ask what kind of fight it is.
 
-function M.badgeBoost(statValue, wireStatKey, badges)
+-- BadgeStatBoosts (engine/battle/core.asm:6534; port Battle.lua:209-220,
+-- BADGE_STAT_BOOSTS): every other wJohtoBadges bit boosts a stat, walked
+-- after PlainBadge and MineralBadge swap places, which is what lands Mineral
+-- on Defense and Plain on Speed.  Kanto badges boost no stat; Sp. Def has no
+-- badge of its own and is only ever reached by Glacier's buggy tail below.
+local BADGE_FOR_STAT = {
+  atk = "ZEPHYR",
+  def = "MINERAL",
+  spe = "PLAIN",
+  spa = "GLACIER",
+}
+M.BADGE_FOR_STAT = BADGE_FOR_STAT
+
+-- MAX_STAT_VALUE, the ceiling BoostStat caps a boosted stat at.
+M.MAX_STAT_VALUE = 999
+
+-- BoostStat (engine/battle/core.asm:6590; port Battle.lua:787-792):
+-- raise a stat by an eighth, capped at MAX_STAT_VALUE.  The eighth is a plain
+-- shift, so a stat under 8 gains nothing.
+function M.boostStat(value)
+  local v = max(0, int(value, 0))
+  return min(M.MAX_STAT_VALUE, v + floor(v / 8))
+end
+
+-- BadgeStatBoosts' buggy tail (port Battle.lua:794-809, glacierBoostsSpDef):
+-- the closing Special Defense check does `srl a` assuming `a` still holds the
+-- badge bits, but when GlacierBadge fired for Special Attack the BoostStat
+-- before it overwrote `a` with its cap-check arithmetic.  So with Glacier
+-- owned, whether Sp. Def is ALSO boosted turns on the boosted Sp. Atk:
+--   * at or past the 999 cap `a` leaves as LOW(999) = $e7, odd: boosted;
+--   * otherwise `a` is high(v) - 3 - borrow, the borrow set when low(v) <
+--     LOW(999), and the bit shifted out of it decides.
+-- (pokegold's own comment marks the check buggy.)  `% 256` here is Lua's
+-- floored modulo, which is the byte wrap; the JS twin spells it out.
+function M.glacierBoostsSpDef(boostedSpa)
+  local v = max(0, int(boostedSpa, 0))
+  if v >= M.MAX_STAT_VALUE then return true end
+  local borrow = (v % 256) < 231 and 1 or 0
+  local a = (floor(v / 256) - 3 - borrow) % 256
+  return a % 2 == 1
+end
+
+-- One stat plus its owner's badge boost.  `wireStatKey` is atk/def/spe/spa/
+-- spd.  `spa` is the same monster's Sp. Atk as BadgeStatBoosts finds it --
+-- already staged, because CalcPlayerStats runs CalcBattleStats first -- and
+-- is read only for `spd`: it is what Glacier's tail is decided on.
+function M.badgeBoost(statValue, wireStatKey, badges, spa)
   local base = max(0, int(statValue, 0))
   if type(badges) ~= "table" then return base end
   local badge = BADGE_FOR_STAT[wireStatKey]
-  if not badge or not badges[badge] then return base end
-  return floor(base * 9 / 8)
+  if badge then
+    if badges[badge] then return M.boostStat(base) end
+    return base
+  end
+  if wireStatKey == "spd" and badges.GLACIER
+     and M.glacierBoostsSpDef(M.boostStat(spa)) then
+    return M.boostStat(base)
+  end
+  return base
+end
+
+-- The stat a hit, the turn order or a confusion self-hit reads: the battle
+-- stat, rebuilt the way CalcPlayerStats does it (pokecrystal engine/battle/
+-- effect_commands.asm:4778-4797) --
+--
+--   1. CalcBattleStats: the unmodified stat x the stage ratio, 1..999
+--      (`applyStage`);
+--   2. BadgeStatBoosts (engine/battle/core.asm:6768): +1/8, held at 999, and
+--      Glacier's Sp. Def tail reading the staged-then-boosted Sp. Atk;
+--   3. ApplyPrzEffectOnSpeed / ApplyBrnEffectOnAttack (core.asm:6585-6669):
+--      paralysis quarters Speed and burn halves Attack, each at least 1.
+--
+-- This is the cart's CalcPlayerStats, the rebuild every stage change, Haze
+-- and a status-cure item run (each farcalls it), and a status landing
+-- mid-fight cuts the stat it finds -- already staged and boosted -- so the
+-- order above is also what a hit reads after one.  The cart computes the
+-- stat in another order at three points, which `storedStat` below keeps:
+-- a switch-in (InitBattleMon, LoadEnemyMon), Transform and an in-battle
+-- level-up.
+--
+-- `mon` is a sheet: { stats, stages, status }.  `badges` is its seat's set
+-- (nil for every seat the cart would not boost; see Turn.BADGE_MODES).
+function M.battleStat(mon, key, badges)
+  mon = type(mon) == "table" and mon or {}
+  local stats = type(mon.stats) == "table" and mon.stats or {}
+  local stages = type(mon.stages) == "table" and mon.stages or {}
+  local value = M.applyStage(stats[key], stages[key])
+  local spa = nil
+  if key == "spd" then spa = M.applyStage(stats.spa, stages.spa) end
+  value = M.badgeBoost(value, key, badges, spa)
+  if key == "atk" and mon.status == "burn" then value = Status.burnAttack(value) end
+  if key == "spe" and mon.status == "paralysis" then
+    value = Status.paralysisSpeed(value)
+  end
+  return value
+end
+
+-- ------------------------------------------------------------------
+-- the stored battle stats (docs/plans/gen12-referee-gaps-fix.md, R2b)
+-- ------------------------------------------------------------------
+--
+-- The cart keeps wBattleMonStats -- what a hit and the turn order read -- and
+-- rebuilds it with CalcPlayerStats (`battleStat`, stage -> badge -> status)
+-- on every stage change, Haze and status cure.  Three other writers use
+-- another order, and what they leave stands until the next rebuild:
+--
+--   * "init": InitBattleMon (engine/battle/core.asm:3869-3907), the
+--     player's switch-in -- the party stats, then ApplyStatusEffectOnPlayerStats,
+--     then BadgeStatBoosts: status BEFORE badge -- and InitEnemyMon (:3954),
+--     a link fight's foe, the same with no badge; and GiveExperiencePoints'
+--     in-battle level-up (:7270-7280), ApplyStatLevelMultiplierOnAllStats,
+--     then the status, then the badge -- the same order over the stages.
+--   * "load": LoadEnemyMon (:5963), the computer's switch-in outside a link
+--     fight -- the party stats and nothing else (docs/bugs_and_glitches.md,
+--     "PRZ and BRN stat reductions don't apply to switched Pokemon").
+--   * Transform (move_effects/transform.asm): the target's wEnemyMonStats,
+--     copied as they stand -- its own badge and status in them.
+--
+-- `mon.statSnap` holds such a result with the inputs it was taken from (the
+-- unmodified stats, the stages, the status and the seat's badges).  It stands
+-- while every input does; the first one that moves -- a stage change, a
+-- status landing or cured, a level -- is the cart's rebuild, so the snapshot
+-- is dropped and the read is `battleStat` again.  `dropSnap` is the explicit
+-- form, for the rebuild that may leave every input where it was (Haze on
+-- stages already at 0).
+M.STAT_KEYS = { "atk", "def", "spe", "spa", "spd" }
+local STAGE_KEYS = { "atk", "def", "spe", "spa", "spd", "acc", "eva" }
+
+-- One battle stat in the "init" order: stage, then the status penalty, then
+-- the badge (Glacier's tail reading the staged-and-boosted Sp. Atk, which no
+-- status touches), and in the "load" order: stage alone.
+--
+-- From wave 4, the "pass" order: PassedBattleMonEntrance (engine/battle/
+-- core.asm), BATON PASS's send-out -- InitBattleMon's status penalty and
+-- badge boost over the party stats, THEN ApplyStatLevelMultiplierOnAllStats
+-- multiplying those by the levels the monster was passed.  (The computer's
+-- pass is LoadEnemyMon's party stats and the levels -- the "load" order.)
+local function orderedStat(mon, key, badges, order)
+  local stats = type(mon.stats) == "table" and mon.stats or {}
+  local stages = type(mon.stages) == "table" and mon.stages or {}
+  if order == "pass" then
+    local base = max(1, int(stats[key], 1))
+    if key == "atk" and mon.status == "burn" then base = Status.burnAttack(base) end
+    if key == "spe" and mon.status == "paralysis" then
+      base = Status.paralysisSpeed(base)
+    end
+    base = M.badgeBoost(base, key, badges, stats.spa)
+    return M.applyStage(base, stages[key])
+  end
+  local value = M.applyStage(stats[key], stages[key])
+  if order == "load" then return value end
+  if key == "atk" and mon.status == "burn" then value = Status.burnAttack(value) end
+  if key == "spe" and mon.status == "paralysis" then
+    value = Status.paralysisSpeed(value)
+  end
+  local spa = nil
+  if key == "spd" then spa = M.applyStage(stats.spa, stages.spa) end
+  return M.badgeBoost(value, key, badges, spa)
+end
+
+-- CalcMonStatC (pokecrystal engine/pokemon/move_mon.asm:1424-1610, pokegold
+-- the same) for one stat: ((base + DV) * 2 + GetSquareRoot(stat exp) / 4) *
+-- level / 100, plus 5 -- or, for HP, plus the level and 10 -- held at
+-- MAX_STAT_VALUE.  GetSquareRoot is the smallest root whose square is not
+-- below the stat exp, 1 for none, 255 at most.
+local function squareRoot(exp)
+  local e = max(0, int(exp, 0))
+  for b = 1, 254 do
+    if b * b >= e then return b end
+  end
+  return 255
+end
+
+local function monStat(base, dv, exp, level, hp)
+  local value = (max(0, int(base, 0)) + max(0, int(dv, 0))) * 2 + floor(squareRoot(exp) / 4)
+  value = floor(value * level / 100)
+  value = value + (hp and (level + 10) or 5)
+  if value > M.MAX_STAT_VALUE then value = M.MAX_STAT_VALUE end
+  return value
+end
+
+-- CalcMonStats over a Gold sheet's K7 blocks (`base` keyed hp atk def spe spa
+-- spd, `dvs` atk def spe spc, `statExp` hp atk def spe spc) at `level`:
+-- returns the five stats and the max HP, or nil without `base` and `dvs`.
+-- The HP DV is built from the four's low bits, and both specials read the
+-- one Special DV and stat exp.
+function M.calcMonStats(base, dvs, statExp, level)
+  if type(base) ~= "table" or type(dvs) ~= "table" then return nil end
+  local exp = type(statExp) == "table" and statExp or {}
+  local lv = max(1, int(level, 1))
+  local hpDv = (int(dvs.atk, 0) % 2) * 8 + (int(dvs.def, 0) % 2) * 4
+    + (int(dvs.spe, 0) % 2) * 2 + (int(dvs.spc, 0) % 2)
+  return {
+    stats = {
+      atk = monStat(base.atk, dvs.atk, exp.atk, lv, false),
+      def = monStat(base.def, dvs.def, exp.def, lv, false),
+      spe = monStat(base.spe, dvs.spe, exp.spe, lv, false),
+      spa = monStat(base.spa, dvs.spc, exp.spc, lv, false),
+      spd = monStat(base.spd, dvs.spc, exp.spc, lv, false),
+    },
+    maxHp = monStat(base.hp, hpDv, exp.hp, lv, true),
+  }
+end
+
+-- The five battle stats in `order` ("calc", "init", "load" or "pass").
+function M.calcStats(mon, badges, order)
+  local out = {}
+  for _, key in ipairs(M.STAT_KEYS) do
+    if order == "calc" then
+      out[key] = M.battleStat(mon, key, badges)
+    else
+      out[key] = orderedStat(mon, key, badges, order)
+    end
+  end
+  return out
+end
+
+-- Record `values` as the monster's battle stats, with the inputs they stand on.
+function M.snapStats(mon, badges, values)
+  local stats = type(mon.stats) == "table" and mon.stats or {}
+  local stages = type(mon.stages) == "table" and mon.stages or {}
+  local snap = { values = {}, stats = {}, stages = {}, status = mon.status, badges = badges }
+  for _, key in ipairs(M.STAT_KEYS) do
+    snap.values[key] = values[key]
+    snap.stats[key] = stats[key]
+  end
+  for _, key in ipairs(STAGE_KEYS) do snap.stages[key] = M.clampStage(stages[key]) end
+  mon.statSnap = snap
+end
+
+function M.dropSnap(mon)
+  if type(mon) == "table" then mon.statSnap = nil end
+end
+
+local function snapStands(snap, mon, badges)
+  if snap.status ~= mon.status or snap.badges ~= badges then return false end
+  local stats = type(mon.stats) == "table" and mon.stats or {}
+  local stages = type(mon.stages) == "table" and mon.stages or {}
+  for _, key in ipairs(M.STAT_KEYS) do
+    if snap.stats[key] ~= stats[key] then return false end
+  end
+  for _, key in ipairs(STAGE_KEYS) do
+    if snap.stages[key] ~= M.clampStage(stages[key]) then return false end
+  end
+  return true
+end
+
+-- The battle stat a hit, the turn order or RaiseStat's 999 test reads: the
+-- snapshot while it stands, CalcPlayerStats's order otherwise.
+function M.storedStat(mon, key, badges)
+  if type(mon) ~= "table" then return M.battleStat(mon, key, badges) end
+  local snap = mon.statSnap
+  if snap then
+    if snapStands(snap, mon, badges) then return snap.values[key] end
+    mon.statSnap = nil
+  end
+  return M.battleStat(mon, key, badges)
+end
+
+-- DoBadgeTypeBoosts (pokecrystal engine/battle/misc.asm:146; port
+-- Battle.lua:835-848, badgeTypeBoost; rows from data/types/
+-- badge_type_boosts.asm in the cart's own walk order -- the eight wJohtoBadges
+-- bits, then the eight wKantoBadges bits).  On the player's turn the move's
+-- type is looked up here, each type at most once, and owning that row's badge
+-- adds an eighth to the damage (Damage.compute's `badgeTypeBoost`).  `type`
+-- is the type's registry id, which the ruleset's `typeIds` resolves a move's
+-- chart index to -- PSYCHIC_TYPE is Psychic's, because PSYCHIC is a move.
+M.BADGE_TYPE_BOOSTS = {
+  { badge = "ZEPHYR", type = "FLYING" },
+  { badge = "HIVE", type = "BUG" },
+  { badge = "PLAIN", type = "NORMAL" },
+  { badge = "FOG", type = "GHOST" },
+  { badge = "MINERAL", type = "STEEL" },
+  { badge = "STORM", type = "FIGHTING" },
+  { badge = "GLACIER", type = "ICE" },
+  { badge = "RISING", type = "DRAGON" },
+  { badge = "BOULDER", type = "ROCK" },
+  { badge = "CASCADE", type = "WATER" },
+  { badge = "THUNDER", type = "ELECTRIC" },
+  { badge = "RAINBOW", type = "GRASS" },
+  { badge = "SOUL", type = "POISON" },
+  { badge = "MARSH", type = "PSYCHIC_TYPE" },
+  { badge = "VOLCANO", type = "FIRE" },
+  { badge = "EARTH", type = "GROUND" },
+}
+
+-- Whether a move of type `typeId` is boosted for a fighter holding `badges`.
+-- The first row naming the type answers, as the cart's scan does.
+function M.badgeTypeBoost(typeId, badges)
+  if type(badges) ~= "table" or type(typeId) ~= "string" then return false end
+  for _, row in ipairs(M.BADGE_TYPE_BOOSTS) do
+    if row.type == typeId then return badges[row.badge] == true end
+  end
+  return false
 end
 
 -- ------------------------------------------------------------------
@@ -357,8 +908,9 @@ end
 
 local STAT_LABELS = {
   atk = "ATTACK", def = "DEFENSE", spe = "SPEED",
-  spa = "SP.ATK", spd = "SP.DEF", acc = "ACCURACY", eva = "EVASION",
+  spa = "SPCL.ATK", spd = "SPCL.DEF", acc = "ACCURACY", eva = "EVASION",
 }
+M.STAT_LABELS = STAT_LABELS
 
 -- effect id -> { stat, delta, selfTarget }
 local STAT_EFFECTS = {
@@ -386,6 +938,12 @@ local STAT_EFFECTS = {
   [61] = { stat = "spa", delta = -2, selfTarget = false },
   [62] = { stat = "acc", delta = -2, selfTarget = false },
   [63] = { stat = "eva", delta = -2, selfTarget = false },
+  -- Gold's SP. DEF rows (wave 4): BattleCommand_SpecialDefenseUp / Up2 /
+  -- Down / Down2, which no Gen 1 id names -- AMNESIA is the Up2.
+  [151] = { stat = "spd", delta = 2, selfTarget = true },
+  [154] = { stat = "spd", delta = 1, selfTarget = true },
+  [155] = { stat = "spd", delta = -1, selfTarget = false },
+  [156] = { stat = "spd", delta = -2, selfTarget = false },
 }
 
 local PHASE1_PRIMARY = {
@@ -395,7 +953,100 @@ local PHASE1_PRIMARY = {
   [53] = true, [54] = true, [55] = true, [56] = true, [58] = true, [59] = true,
   [60] = true, [61] = true, [62] = true, [63] = true, [66] = true, [67] = true,
   [84] = true, [85] = true, [86] = true,
+  [103] = true, [104] = true, [105] = true, -- LOCK_ON, SAFEGUARD, TOXIC
+  [115] = true,                             -- DEFENSE_CURL
+  -- Wave 4: the status scripts whose command works on the user and its
+  -- target alone (`applyPrimary` below) -- ATTRACT, BELLY DRUM, CURSE,
+  -- DESTINY BOND, FORESIGHT, MEAN LOOK, NIGHTMARE, PSYCH UP, SPITE, SWAGGER
+  -- and the SP. DEF rows.
+  [133] = true, [135] = true, [137] = true, [138] = true, [140] = true,
+  [142] = true, [143] = true, [146] = true, [150] = true, [151] = true,
+  [152] = true, [154] = true, [155] = true, [156] = true,
 }
+
+-- The 0-power Gold scripts whose command works on the field or the user's
+-- own record, which Turn runs itself (it holds the turn order, the weather
+-- and the clock): PROTECT / DETECT and ENDURE (`_protect`), RAIN DANCE, SUNNY
+-- DAY and SANDSTORM (`_startWeather`), MORNING SUN, SYNTHESIS and MOONLIGHT
+-- (`_timeHeal`).  None of them runs `checkhit`.
+M.FIELD_MOVES = {
+  [120] = true, [121] = true, [124] = true, [125] = true, [126] = true,
+  [128] = true, [129] = true, [130] = true,
+  -- Wave 4: BATON PASS (the switch, `_batonPass`), HEAL BELL (the party,
+  -- `_healBell`), PERISH SONG (every monster on the field, `_perishSong`),
+  -- SKETCH (the party's move list and the link check, `_sketch`), SPIKES
+  -- (the foe's side, `_spikes`) and TELEPORT (the escape, `_teleport`).
+  [134] = true, [141] = true, [145] = true, [148] = true, [149] = true,
+  [153] = true,
+  -- Wave 5: Gold's CONVERSION (`_conversion`), which reads the user's own
+  -- move list and the ruleset's type names, and draws its pick loop.
+  [24] = true,
+}
+
+-- The 0-power Gold scripts with a `checkhit` whose command Turn runs itself
+-- after it (`_statusMove`): CONVERSION2 (the type chart and its byte loop),
+-- ENCORE (the target's choice this turn) and PAIN SPLIT (both HP bars) -- and
+-- from wave 5 ROAR / WHIRLWIND's ForceSwitch (the escape, or the trainer
+-- side's random send-out: `_forceSwitch`).
+M.TURN_COMMANDS = { [28] = true, [136] = true, [139] = true, [144] = true }
+
+-- The commands that read wAttackMissed themselves, after the script's
+-- `checkhit`, and say their own failure line (`applyPrimary`'s `ctx.missed`,
+-- Turn `_statusMove`): SleepTarget, Confuse, Poison (POISON and TOXIC),
+-- Paralyze, Mimic, LeechSeed, Disable, LockOn, Attract, Conversion2, Encore,
+-- Foresight, PainSplit, Spite, and SWAGGER's RaiseStat / failuretext -- and
+-- from wave 5 ForceSwitch ("But it failed!").  A miss of any other `checkhit`
+-- script ends on Turn's own miss line.
+M.READS_MISS = {
+  [28] = true, [32] = true, [49] = true, [66] = true, [67] = true, [82] = true, [84] = true,
+  [86] = true, [103] = true, [105] = true, [133] = true, [136] = true,
+  [139] = true, [140] = true, [144] = true, [150] = true, [152] = true,
+}
+
+-- The referee-numbered move scripts with no `checkhit` (data/moves/
+-- effects.asm): MIRROR MOVE, the stat-raising moves, CONVERSION, HAZE,
+-- BIDE's first use (`unleashenergy` ends it before its `checkhit`), MIST,
+-- FOCUS ENERGY, the heals, TRANSFORM, the screens, SUBSTITUTE, METRONOME,
+-- SPLASH, SLEEP TALK and SAFEGUARD -- and from wave 3 DEFENSE CURL,
+-- FUTURE SIGHT's use (its `checkhit` stands after `futuresight`, which ends
+-- the move on the turn it is used), PROTECT / DETECT, ENDURE, COUNTER and
+-- MIRROR COAT (their own commands set wAttackMissed), the weather moves and
+-- the time-of-day heals.  No CheckHit of the cart's runs for them, so Turn
+-- runs none either (`_useMove`): no accuracy byte, no `.Protect`, and none of
+-- them spends the target's LOCK-ON -- RAIN DANCE's and SUNNY DAY's 90% never
+-- misses.  Wave 4 adds BATON PASS, BELLY DRUM, CURSE, DESTINY BOND, HEAL
+-- BELL, MEAN LOOK, NIGHTMARE, PERISH SONG, PSYCH UP, SKETCH, SPIKES, the SP.
+-- DEF raises and TELEPORT (data/moves/effects.asm: none runs `checkhit`).
+M.NO_CHECKHIT = {
+  [9] = true, [10] = true, [11] = true, [12] = true, [13] = true, [14] = true,
+  [15] = true, [24] = true, [25] = true, [26] = true, [46] = true, [47] = true,
+  [50] = true, [51] = true, [52] = true, [53] = true, [54] = true, [55] = true,
+  [56] = true, [57] = true, [64] = true, [65] = true, [79] = true, [83] = true,
+  [85] = true, [102] = true, [104] = true,
+  [115] = true, [119] = true, [120] = true, [121] = true, [122] = true,
+  [123] = true, [124] = true, [125] = true, [126] = true, [128] = true,
+  [129] = true, [130] = true,
+  [134] = true, [135] = true, [137] = true, [138] = true, [141] = true,
+  [142] = true, [143] = true, [145] = true, [146] = true, [148] = true,
+  [149] = true, [151] = true, [153] = true, [154] = true,
+}
+
+-- CheckHit's `.LockOn`: a locked-on target in the sky is still missed by
+-- these three (`cp EARTHQUAKE / FISSURE / MAGNITUDE / ret z` into
+-- `.FlyDigMoves`).
+M.LOCK_ON_SKY_MISS = { EARTHQUAKE = true, FISSURE = true, MAGNITUDE = true }
+
+-- SLEEP TALK's `.check_two_turn_move` (move_effects/sleep_talk.asm): the
+-- effects it never calls -- RAZOR WIND (39), FLY / DIG (43), SKY ATTACK,
+-- BIDE, SOLARBEAM (127 from wave 3) and SKULL BASH (157 from wave 4).
+M.SLEEP_TALK_EXCLUDED = {
+  [26] = true, [39] = true, [43] = true, [101] = true, [127] = true,
+  [157] = true,
+}
+
+-- The scripts with `checksafeguard` after their `checkhit` (DoSleep, DoConfuse,
+-- DoPoison -- TOXIC's too -- and DoParalyze).
+M.CHECKS_SAFEGUARD = { [32] = true, [49] = true, [66] = true, [67] = true, [105] = true }
 
 function M.isPhase1Primary(effectId)
   effectId = int(effectId, nil)
@@ -404,7 +1055,7 @@ function M.isPhase1Primary(effectId)
 end
 
 local PHASE5_VOLATILE = {
-  [24] = true, [46] = true, [47] = true, [57] = true,
+  [46] = true, [47] = true, [57] = true,
   [64] = true, [65] = true, [79] = true,
 }
 
@@ -440,6 +1091,81 @@ local function fighterFields(fighter)
   return { slot = fighter.slot, side = fighter.side }
 end
 
+-- Whether a monster has the type a chart index names (nil names none).
+local function hasType(mon, typeIndex)
+  if typeIndex == nil or type(mon.types) ~= "table" then return false end
+  for i = 1, #mon.types do
+    if mon.types[i] == typeIndex then return true end
+  end
+  return false
+end
+
+-- PrintDidntAffect / PrintDidntAffect2's line (DidntAffect1Text), a status
+-- command's own failure: "It didn't affect <TARGET>!" -- not the matchup's
+-- "It doesn't affect" (DoesntAffectText).
+function M.didntAffectLine(mon)
+  return "It didn't affect\n" .. nameOf(mon) .. "!"
+end
+
+-- DoesntAffectText, the matchup's own "It doesn't affect\n<TARGET>!" -- the
+-- type immunity's line wherever a script prints it (failuretext, OHKO,
+-- Poison, Paralyze, LeechSeed's Grass check, COUNTER, BIDE).
+function M.doesntAffectLine(mon)
+  return "It doesn't affect\n" .. nameOf(mon) .. "!"
+end
+
+-- BattleCommand_Safeguard's `ld a, 5`: five between-turn ticks
+-- (HandleSafeguard), like a screen's.
+M.SAFEGUARD_TURNS = 5
+
+-- BattleCommand_Transform's `.pp_loop`: every copied move gets 5 PP (SKETCH 1).
+M.TRANSFORM_PP = 5
+
+-- BattleCommand_Mimic's `ld [hl], 5`: the mimicked move's PP in the slot.
+M.MIMIC_PP = 5
+
+-- BattleCommand_Heal's REST: `ld [hl], REST_SLEEP_TURNS + 1` (constants/
+-- battle_constants.asm: REST_SLEEP_TURNS 2), the counter CheckTurn runs down.
+M.REST_SLEEP_COUNT = 3
+
+-- BattleCommand_BellyDrum's `ld a, MAX_STAT_LEVEL - BASE_STAT_LEVEL - 1`:
+-- the AttackUp2s after the first.
+M.BELLY_DRUM_CLIMB = 5
+
+-- One move row copied whole (K8's `priority` and `ppUps` with it), the shape
+-- MIMIC puts aside (`preMimic`) and Red's twin keeps.
+local function copyMoveRow(m)
+  return {
+    id = m.id or "move", name = m.name,
+    pp = max(0, int(m.pp, 0)), maxPp = m.maxPp,
+    power = max(0, int(m.power, 0)), accuracy = max(0, int(m.accuracy, 255)),
+    type = max(0, int(m.type, 0)), effect = max(0, int(m.effect, 0)),
+    chance = max(0, int(m.chance, 0)), highCrit = m.highCrit == true,
+    priority = m.priority, ppUps = m.ppUps, basePp = m.basePp,
+  }
+end
+M.copyMoveRow = copyMoveRow
+
+-- A move's base PP (its data/moves/moves.asm row), as SKETCH copies it
+-- (`ld hl, Moves + MOVE_PP`): the sheet carries the max PP its PP Ups raised
+-- (K8 `ppUps`), each worth floor(base / 5) held at 7 (ComputeMaxPP's `cp $8`),
+-- so the base is the smallest that reaches that max; a row with no PP Ups is
+-- its own max.  A MIMIC or TRANSFORM copy (5 PP, or SKETCH's 1) states the
+-- base it was copied from (`basePp`, wave 5): the cart reads the move's row by
+-- its id, whatever PP the copy holds, and a METRONOME call's pool row is
+-- already its row (the client stamps the base as its max).
+function M.basePp(move)
+  local stated = int(move.basePp, nil)
+  if stated ~= nil and stated >= 0 then return stated end
+  local top = max(0, int(move.maxPp, int(move.pp, 0)))
+  local ups = int(move.ppUps, 0)
+  if ups <= 0 then return top end
+  for base = 1, top do
+    if base + ups * min(7, floor(base / 5)) == top then return base end
+  end
+  return top
+end
+
 -- Confusion is a volatile, not a major status: it does not occupy `mon.status`
 -- and does not persist on the party sheet. The chip is a `confused` flag on
 -- the status event (1 inflicted, 0 snapped out), independent of PSN/SLP/…
@@ -450,7 +1176,10 @@ local function confuse(out, fighter, mon, rng, failIfAlready)
   end
   local turns = (rng and rng:byte() or 0) % 4 + 2
   mon.confusion = turns
-  local text = mon.species .. " became confused"
+  -- BattleCommand_FinishConfusingTarget: ANIM_CONFUSED on the target
+  -- (PlayOpponentBattleAnim), then BecameConfusedText (K20).
+  statusAnim(out, fighter, "CONF_ANIM")
+  local text = nameOf(mon) .. "\nbecame confused!"
   out.messages[#out.messages + 1] = text
   local fields = fighterFields(fighter)
   fields.confused = 1
@@ -458,34 +1187,101 @@ local function confuse(out, fighter, mon, rng, failIfAlready)
   out.events[#out.events + 1] = { kind = "status", fields = fields }
 end
 
-local function applyStatChange(out, fighter, mon, stat, delta)
-  if delta < 0 and mon.mist then
-    out.messages[#out.messages + 1] = "But it failed"
-    return
-  end
-  local label = STAT_LABELS[stat] or stat
-  local before = M.clampStage(mon.stages[stat])
-  local after = M.clampStage(before + delta)
-  if after == before then
-    if delta > 0 then
-      out.messages[#out.messages + 1] =
-        mon.species .. "'s " .. label .. " won't go any higher"
-    else
-      out.messages[#out.messages + 1] =
-        mon.species .. "'s " .. label .. " won't go any lower"
-    end
-    return
-  end
-  mon.stages[stat] = after
-  local verb = delta > 0 and "rose" or "fell"
-  local text = mon.species .. "'s " .. label .. " " .. verb
-  out.messages[#out.messages + 1] = text
+-- The stored battle stats as they stand now (`storedStat` for each).
+function M.currentStats(mon, badges)
+  local out = {}
+  for _, key in ipairs(M.STAT_KEYS) do out[key] = M.storedStat(mon, key, badges) end
+  return out
+end
+
+-- A status written the way the cart writes one outside a stat rebuild: the
+-- status byte changes and wBattleMonStats is left as it stands -- but for the
+-- penalty a landing burn or paralysis puts on it (BattleCommand_BurnTarget /
+-- _ParalyzeTarget / _Paralyze call ApplyBrnEffectOnAttack /
+-- ApplyPrzEffectOnSpeed on the stat they find).  Every status change but a
+-- cure item's (UseHeldStatusHealingItem farcalls CalcPlayerStats) is this
+-- one: an infliction, a wake-up or a thaw in CheckTurn, HandleDefrost,
+-- Defrost, the obedience nap.  `badges` is the monster's seat's.
+function M.setStatus(mon, badges, status)
+  local values = M.currentStats(mon, badges)
+  mon.status = status
+  if status == "burn" then values.atk = Status.burnAttack(values.atk) end
+  if status == "paralysis" then values.spe = Status.paralysisSpeed(values.spe) end
+  M.snapStats(mon, badges, values)
+end
+
+-- `setStatus` on a monster whose seat is `fighter` (its badges).
+local function setStatusOn(mon, fighter, status)
+  M.setStatus(mon, fighter and fighter.badges or nil, status)
+end
+M.setStatusOn = setStatusOn
+
+-- A stage written the way RaiseStat's `.stats_already_max` writes it: the
+-- level moves and no CalcPlayerStats follows, so the battle stats stay.
+local function setStageKeep(mon, badges, stat, stage)
+  local values = M.currentStats(mon, badges)
+  mon.stages[stat] = stage
+  M.snapStats(mon, badges, values)
+end
+
+-- What a sentence calls a held item (Items.label's rule; Items is not
+-- required here for one line).
+local function itemLabel(mon)
+  return mon.itemName or mon.heldItem or "ITEM"
+end
+
+-- The `stat` event for a stage that moved: `amount` as it always rode (the
+-- wire's unsigned field drops a negative one) and the signed `stage` beside
+-- it (contract K10).
+-- StatUpMessage / StatDownMessage (effect_commands.asm) in Gen 2's words
+-- (data/text/common_2.asm, wave 5): "<MON>'s STAT went up!" -- "went way
+-- up!" for a +2 command (the $10 bit RaiseStat keeps in wLoweredStat, so a
+-- +2 that only had room for +1 still says it) -- and "<MON>'s STAT fell!" /
+-- "sharply fell!"; the stat names are GetStatName's (SPCL.ATK, SPCL.DEF).
+--
+-- K18's breaks are Text_BattleEffectActivate's (data/text/common_2.asm):
+-- "<USER>'s" / `line` the stat, then " went up!" on that row or `<SCROLL>`
+-- "went way up!" on the next -- and the same for the falls.
+function M.statUpLine(mon, stat, delta)
+  return nameOf(mon) .. "'s\n" .. (STAT_LABELS[stat] or stat)
+    .. ((int(delta, 1) >= 2) and "\nwent way up!" or " went up!")
+end
+function M.statDownLine(mon, stat, delta)
+  return nameOf(mon) .. "'s\n" .. (STAT_LABELS[stat] or stat)
+    .. ((int(delta, -1) <= -2) and "\nsharply fell!" or " fell!")
+end
+
+local function statEvent(out, fighter, stage, text)
   local fields = fighterFields(fighter)
-  fields.amount = after
+  fields.amount = stage
+  fields.stage = stage
   fields.text = text
   out.events[#out.events + 1] = { kind = "stat", fields = fields }
 end
+M.statEvent = statEvent
 
+-- One stage written and announced: the battle stats are rebuilt (the
+-- snapshot drops -- CalcPlayerStats follows every StatUp / TryLowerStat that
+-- moved a level) and the line is the cart's StatUpMessage / StatDownMessage.
+local function applyStatChange(out, fighter, mon, stat, delta)
+  local before = M.clampStage(mon.stages[stat])
+  local after = M.clampStage(before + delta)
+  mon.stages[stat] = after
+  M.dropSnap(mon)
+  local text = (delta > 0) and M.statUpLine(mon, stat, delta) or M.statDownLine(mon, stat, delta)
+  out.messages[#out.messages + 1] = text
+  statEvent(out, fighter, after, text)
+  return true
+end
+
+-- Every stage back to 0.  Haze, and the levels a monster leaves behind:
+-- pokecrystal keeps one set of stat levels per side (wPlayerStatLevels) and
+-- refills it on every send-out (ResetPlayerStatLevels, engine/battle/
+-- core.asm:3944), so a monster that switches in or faints brings no stage
+-- with it -- the referee keeps them per monster and clears them at those two
+-- points instead (Turn `_resolveSwitches` / `_faint`).  Haze rebuilds the
+-- battle stats (BattleCommand_ResetStats calls CalcPlayerStats and
+-- CalcEnemyStats), so the snapshot goes with them.
 local function resetStages(mon)
   mon.stages.atk = 0
   mon.stages.def = 0
@@ -494,28 +1290,327 @@ local function resetStages(mon)
   mon.stages.spd = 0
   mon.stages.acc = 0
   mon.stages.eva = 0
+  M.dropSnap(mon)
+end
+M.resetStages = resetStages
+
+-- BattleCommand_StatDown's `.ComputerMiss` byte (pokecrystal engine/battle/
+-- effect_commands.asm:4320-4440; pokegold the same but for Crystal's Battle
+-- Tower exemption, which no fight here is): `cp 25 percent + 1`, and RGBDS
+-- `percent` is `* $ff / 100` in integer arithmetic, so 63 + 1 -- the computer
+-- misses on a byte under 64.
+M.COMPUTER_DROP_MISS = 64
+
+-- The stat a primary stat-down move lowers (ATTACK_DOWN ... EVASION_DOWN and
+-- the _2 rows), or nil.  The *DownHit side effects are SIDE_STAT_DOWN below.
+function M.primaryStatDown(effectId)
+  local statFx = STAT_EFFECTS[int(effectId, -1)]
+  if statFx and statFx.delta < 0 and not statFx.selfTarget then return statFx.stat end
+  return nil
 end
 
--- Cartridge Substitute blocks foe-targeting primaries (Sleep Powder, Growl,
--- Disable, Transform, Mimic). Self-targeting (Recover, Swords Dance,
--- Substitute) and field-wide Haze still run; Conversion copies onto the user.
-local function blockedBySubstitute(effectId)
-  local statFx = STAT_EFFECTS[effectId]
-  if statFx then return not statFx.selfTarget end
-  if effectId == 24 or effectId == 25 or effectId == 46 or effectId == 47
-      or effectId == 56 or effectId == 64 or effectId == 65
-      or effectId == 79 or effectId == 85 then
-    return false
+-- BattleCommand_StatDown up to `.DidntMiss`, the one routine a primary
+-- stat-down move (`attackdown` after `checkhit`) and a *DownHit side effect
+-- (`attackdown` after `buildopponentrage`) both run, in its order:
+--
+--   1. CheckMist: the target's SUBSTATUS_MIST -> `.Mist`;
+--   2. the stage already at -6 (`dec b / jp z, .CantLower`) -> `.CantLower`
+--      -- a -2 drop from -5 goes on, its `dec b / jr nz` / `inc b` stopping
+--      it at -6;
+--   3. `.ComputerMiss`: on the enemy's turn outside a link battle
+--      (`computerMover`, Turn's isComputerSeat) a BattleRandom under
+--      M.COMPUTER_DROP_MISS -> `.Failed` -- skipped while the target is still
+--      locked on (`lockedOn`: "Lock-On still always works", the player's
+--      SUBSTATUS_LOCK_ON) and for the attacking moves that lower accuracy
+--      (`cp EFFECT_ACCURACY_DOWN_HIT / jr z, .DidntMiss`: MUD-SLAP and
+--      OCTAZOOKA, `effectId` M.ACCURACY_DOWN_HIT here).  CheckHit's `.LockOn`
+--      clears that bit whenever it is reached, so the exemption only holds
+--      for a move whose check stopped before it (Turn `_checkHit`).
+--
+-- Nothing before the byte asks whether the move hit, whether a substitute
+-- stands or whether the side effect's chance landed: `checkhit` only set
+-- wAttackMissed, a substitute is CheckSubstituteOpp at `.DidntMiss`, and
+-- wEffectFailed is read after that -- so the computer draws it for a missed
+-- GROWL, for a hit into a substitute and for an AURORA BEAM whose chance
+-- byte failed alike.  Returns "mist", "floor" or "missed" for the step that
+-- stopped the drop, or nil when it goes on to `.DidntMiss`.
+function M.statDownGate(rng, targetMon, stat, computerMover, effectId, lockedOn)
+  if targetMon.mist then return "mist" end
+  if M.clampStage(targetMon.stages[stat]) <= M.STAGE_MIN then return "floor" end
+  if computerMover and not lockedOn and int(effectId, 0) ~= M.ACCURACY_DOWN_HIT
+     and rng and rng:byte() < M.COMPUTER_DROP_MISS then
+    return "missed"
   end
-  return true
+  return nil
+end
+
+-- TryLowerStat's floor (effect_commands.asm:4520-4545): the battle stat is
+-- already 1 -- "The lowest possible stat is 1" -- so the level goes back and
+-- the drop fails as `.CouldntLower` (wFailedMessage 3).  Accuracy and evasion
+-- have no stat to ask.
+local function statAtFloor(mon, stat, badges)
+  if stat == "acc" or stat == "eva" then return false end
+  return M.storedStat(mon, stat, badges) <= 1
+end
+
+-- StatDownFailText / StatUpFailText's lines (effect_commands.asm:4569-4600,
+-- data/text/battle.asm): ProtectedByMistText, WontDropAnymoreText,
+-- WontRiseAnymoreText.  wFailedMessage 1 is TryPrintButItFailed, the "But it
+-- failed" every other site in this referee says.
+function M.mistLine(mon)
+  return nameOf(mon) .. "'s\nprotected by MIST."
+end
+function M.wontDropLine(mon, stat)
+  return nameOf(mon) .. "'s\n" .. (STAT_LABELS[stat] or stat) .. " won't\ndrop anymore!"
+end
+function M.wontRiseLine(mon, stat)
+  return nameOf(mon) .. "'s\n" .. (STAT_LABELS[stat] or stat) .. " won't\nrise anymore!"
+end
+
+-- The line a primary stat-down move ends on when its `checkhit` missed
+-- (wAttackMissed): BattleCommand_StatDown still runs -- the scripts have no
+-- `failuretext` -- and StatDownFailText says what stopped it: the target's
+-- Mist, the stage at -6, and otherwise `.Failed` ("But it failed!").  The
+-- computer's `.ComputerMiss` byte, between the -6 test and `.DidntMiss`, is
+-- Turn `_statDownAfterMiss`'s; its verdict is "But it failed!" either way.
+function M.statDownMissLine(targetMon, stat)
+  if targetMon.mist then return M.mistLine(targetMon) end
+  if M.clampStage(targetMon.stages[stat]) <= M.STAGE_MIN then
+    return M.wontDropLine(targetMon, stat)
+  end
+  return "But it failed!"
+end
+
+-- No generic substitute gate (wave 4): every Gold status command asks the
+-- substitute itself, where its own code puts the check -- SleepTarget,
+-- Poison, Paralyze, Confuse, LeechSeed, LockOn, Nightmare, PainSplit, Curse's
+-- GHOST arm, Sketch -- and DISABLE, MIMIC, ATTRACT, ENCORE, FORESIGHT,
+-- SPITE, PSYCH UP, MEAN LOOK and TRANSFORM never ask it at all
+-- (move_effects/*.asm).  A stat-down move meets it inside
+-- BattleCommand_StatDown (`lowerPrimary`).
+
+-- The cart's failure lines a status command ends on: FailMove /
+-- PrintButItFailed ("But it failed!" -- this referee's "But it failed!", the
+-- line every other site says), PrintDidntAffect / PrintDidntAffect2
+-- (DidntAffect1Text / DidntAffect2Text, both "It didn't affect <TARGET>!").
+-- Every command failure below is the cart's AnimateFailedMove (a MoveDelay)
+-- or a `statupanim` / `statdownanim` wAttackMissed skips: the move's clip is
+-- not played (`out.failed`, contract K22 -- Turn takes the clip back).  The
+-- RaiseStat / StatDown failures also SET wAttackMissed (`out.missed`), which
+-- AI_SwitchOrTryItem's X items read next turn.
+local function failed(out)
+  out.failed = true
+  return out
+end
+local function butItFailed(out)
+  out.messages[#out.messages + 1] = "But it failed!"
+  return failed(out)
+end
+local function didntAffect(out, targetMon)
+  out.messages[#out.messages + 1] = M.didntAffectLine(targetMon)
+  return failed(out)
+end
+-- FailMove / FailMimic (effect_commands.asm:6209-6216): "But it failed!" --
+-- or, while the target's SUBSTATUS_PROTECT stands (FailText_CheckOpponentProtect),
+-- ItFailedText's "It failed!".
+-- AttackMissedText (GetFailureResultText, effect_commands.asm): a move's
+-- miss, the Fly / Dig dodge and a PROTECT's included (AttackMissed2Text
+-- reads the same) -- "<USER>'s attack missed!" (wave 5; "<MON> missed" was
+-- the referee's own line).
+function M.missLine(userMon)
+  return nameOf(userMon) .. "'s\nattack missed!"
+end
+
+function M.failMoveLine(targetMon)
+  if targetMon and targetMon.protect then return "It failed!" end
+  return "But it failed!"
+end
+local function failMove(out, targetMon)
+  out.messages[#out.messages + 1] = M.failMoveLine(targetMon)
+  return failed(out)
+end
+
+-- `.CheckAIRandomFail` (BattleCommand_SleepTarget, effect_commands.asm:3640-
+-- 3666) and the same lines inlined in BattleCommand_Poison (:3735-3758) and
+-- BattleCommand_Paralyze (:5860-5880): on the enemy's turn outside a link
+-- battle (`ctx.computerMover`, Turn's isComputerSeat) and while the player is
+-- not locked on (wPlayerSubStatus5's SUBSTATUS_LOCK_ON -- the target's, which
+-- CheckHit's `.LockOn` clears whenever it is reached, so it still stands
+-- only where the check stopped first), one BattleRandom: `cp 25 percent + 1`,
+-- under 64 the computer's move fails ("It didn't affect").  Draws nothing on
+-- any other seat.
+local function aiRandomFail(ctx, targetMon)
+  if not ctx.computerMover or targetMon.lockOn then return false end
+  local rng = ctx.rng
+  return rng ~= nil and rng:byte() < M.COMPUTER_DROP_MISS
+end
+
+-- RaiseStat (effect_commands.asm:4142-4236) with none of its messages, the
+-- routine BattleCommand_StatUp and every script built on it (BELLY DRUM's
+-- AttackUp2s, CURSE's AttackUp / DefenseUp, SWAGGER's attackup2 on its
+-- target, SKULL BASH's defenseup) run: a level already at +6 is
+-- `.cant_raise_stat`; otherwise the level goes up (capped at +6) and, for a
+-- stat that is not accuracy or evasion, a battle stat already at
+-- MAX_STAT_VALUE is `.stats_already_max` -- the level comes back down ONE
+-- (`dec [hl]`, so a _2 raise keeps one stage of its two) with no rebuild;
+-- else CalcPlayerStats rebuilds (`dropSnap`).  The battle stat is the stored
+-- one (`storedStat`, with the seat's badges).  Returns whether the level rose
+-- with a rebuild, and the stage it stands at.
+local function raiseStat(mon, badges, stat, delta)
+  local before = M.clampStage(mon.stages[stat])
+  if before >= M.STAGE_MAX then return false, before end
+  local after = min(M.STAGE_MAX, before + delta)
+  if stat ~= "acc" and stat ~= "eva"
+     and M.storedStat(mon, stat, badges) >= M.MAX_STAT_VALUE then
+    after = after - 1
+    if after ~= before then setStageKeep(mon, badges, stat, after) end
+    return false, after
+  end
+  mon.stages[stat] = after
+  M.dropSnap(mon)
+  return true, after
+end
+M.raiseStat = raiseStat
+
+-- GetGender (engine/pokemon/mon_stats.asm:124-232), for CheckOppositeGender
+-- (move_effects/attract.asm): the Attack DV and the Speed DV (each DV byte's
+-- high nybble, `and $f0` / `swap`) as one byte, against the species'
+-- BASE_GENDER -- 255 (GENDER_UNKNOWN) genderless, 0 (GENDER_F0) male, 254
+-- (GENDER_F100) female, otherwise male when the ratio is below that byte.
+-- CheckOppositeGender reads each monster's own species and DVs -- the
+-- player's PARTY struct (BattlePartyAttr), the enemy's wEnemyBackupDVs under
+-- Transform -- so a transformed monster keeps its own gender: `base` (which
+-- Transform never rewrites; it sets `transformBase`) and `preTransform.dvs`.
+-- The ratio is the sheet's `base.gender` (contract K15, proposed: the K7
+-- base block's BASE_GENDER byte); a sheet that states none, or no DVs,
+-- cannot be placed, and reads as genderless -- `.genderless_samegender`, so
+-- ATTRACT fails rather than invent a gender.  Returns "M", "F" or nil.
+--
+-- `battleDvs`: read the battle struct's DVs instead -- GetGender with
+-- wMonType WILDMON reads wEnemyMonDVs (engine/pokemon/mon_stats.asm,
+-- `.DVs` after `ld hl, wEnemyMonDVs`), which a TRANSFORM overwrote with the
+-- target's (`mon.dvs`, the copy) while wEnemyBackupDVs kept its own: what the
+-- LOVE BALL reads off a transformed wild monster (`ballRate`).  The species
+-- -- the BASE_GENDER row -- is still its own (wTempEnemyMonSpecies).
+function M.gender(mon, battleDvs)
+  if type(mon) ~= "table" or type(mon.base) ~= "table" then return nil end
+  local ratio = int(mon.base.gender, nil)
+  if ratio == nil then return nil end
+  local dvs = mon.dvs
+  if mon.preTransform and not battleDvs then dvs = mon.preTransform.dvs end
+  if type(dvs) ~= "table" then return nil end
+  if ratio == M.GENDER_UNKNOWN then return nil end
+  if ratio == M.GENDER_F0 then return "M" end
+  if ratio == M.GENDER_F100 then return "F" end
+  local byte = (int(dvs.atk, 0) % 16) * 16 + int(dvs.spe, 0) % 16
+  if ratio < byte then return "M" end
+  return "F"
+end
+M.GENDER_F0 = 0
+M.GENDER_F100 = 254
+M.GENDER_UNKNOWN = 255
+
+-- The HELD_PREVENT_* item's line, when the primary status command checks it
+-- (SleepTarget, Poison, Paralyze, Confuse: "<TARGET>'s protected by <ITEM>!",
+-- ProtectedByText).  No item on either cart carries one of these effects
+-- (data/items/attributes.asm), but the rule is keyed on the effect token, so
+-- a sheet whose item states one is protected.
+local function protectedBy(out, targetMon)
+  out.messages[#out.messages + 1] =
+    nameOf(targetMon) .. "'s\nprotected by\n" .. itemLabel(targetMon) .. "!"
+  return failed(out)
+end
+
+-- RaiseStat (effect_commands.asm:4142-4236) for a primary stat-up move, then
+-- its script's `statupmessage` / `statupfailtext`: a stage already at +6 is
+-- `.cant_raise_stat` ("won't rise anymore!"); otherwise the level goes up
+-- (two for a _2 move, capped at +6) and, for a stat that is not accuracy or
+-- evasion, a battle stat already at MAX_STAT_VALUE is `.stats_already_max`:
+-- the level comes back down ONE (`dec [hl]` -- so a _2 move keeps one stage
+-- of its two, the cart's own arithmetic) with no rebuild after it, and the
+-- move says "won't rise anymore!".  The battle stat is the stored one
+-- (`storedStat`, with the seat's badges).  Returns whether the move raised
+-- the stat (MinimizeDropSub's wFailedMessage 0).
+local function raisePrimary(out, fighter, mon, stat, delta)
+  local before = M.clampStage(mon.stages[stat])
+  local raised, after = raiseStat(mon, fighter and fighter.badges or nil, stat, delta)
+  if raised then
+    local text = M.statUpLine(mon, stat, delta)
+    out.messages[#out.messages + 1] = text
+    statEvent(out, fighter, after, text)
+    return true
+  end
+  local text = M.wontRiseLine(mon, stat)
+  if after ~= before then statEvent(out, fighter, after, text) end
+  out.messages[#out.messages + 1] = text
+  failed(out)
+  out.missed = true
+  return false
+end
+
+-- BattleCommand_StatDown and `statdownmessage` / `statdownfailtext` for a
+-- primary stat-down move that hit (a miss is `statDownMissLine`): Mist
+-- ("protected by MIST."), the stage at -6 ("won't drop anymore!"), the
+-- computer's byte ("But it failed!"), then `.DidntMiss` -- a substitute ("But
+-- it failed"; CheckHiddenOpponent's vanished target never gets here, Turn
+-- missed it first) -- then the level, and TryLowerStat's floor at a battle
+-- stat of 1, which puts the level back ("won't drop anymore!").
+local function lowerPrimary(out, ctx, fighter, mon, stat, delta)
+  local stop = M.statDownGate(ctx.rng, mon, stat, ctx.computerMover == true,
+    ctx.effectId, mon.lockOn == true)
+  if stop == "mist" then
+    out.messages[#out.messages + 1] = M.mistLine(mon)
+    out.missed = true
+    return failed(out)
+  end
+  if stop == "floor" then
+    out.messages[#out.messages + 1] = M.wontDropLine(mon, stat)
+    out.missed = true
+    return failed(out)
+  end
+  if stop == "missed" or int(mon.substitute, 0) > 0 then
+    out.messages[#out.messages + 1] = "But it failed!"
+    out.missed = true
+    return failed(out)
+  end
+  if statAtFloor(mon, stat, fighter and fighter.badges or nil) then
+    out.messages[#out.messages + 1] = M.wontDropLine(mon, stat)
+    out.missed = true
+    return failed(out)
+  end
+  -- `statdownanim` (BattleCommand_StatDownAnim, K20): on a drop that landed
+  -- -- every failure above set wAttackMissed, which skips it -- the move's
+  -- clip plays with its after-animation, ANIM_ENEMY_STAT_DOWN on the
+  -- player's turn and ANIM_WOBBLE on the enemy's, over the monster whose stat
+  -- fell (Turn `_statusAnim` gives a player's seat the WOBBLE variant).
+  statusAnim(out, fighter, "ENEMY_STAT_DOWN_ANIM")
+  applyStatChange(out, fighter, mon, stat, delta)
+  return out
 end
 
 -- ctx: effectId, rng, userMon, targetMon, userFighter, targetFighter,
---      moveIndex (1-based), statusToWire
--- Returns { nothing, messages, events, heals } where heals = { amount } for user.
+--      moveIndex (1-based), statusToWire, userScreens (the user's side's
+--      screen counts and Safeguard; see LIGHT_SCREEN_EFFECT below),
+--      computerMover (the move is the computer's: BattleCommand_StatDown's
+--      extra miss), moveKey (the move's id, upper-cased: MinimizeDropSub's
+--      `cp MINIMIZE`), moveImmune (the move's matchup against the target is
+--      0: `stab`'s wTypeModifier, which Poison and Paralyze read),
+--      poisonType / grassType (POISON's and GRASS's chart indices off the
+--      ruleset's typeIds, nil when it names none), fieldMons (every monster
+--      on the field, for Haze); from wave 4: missed (the script's `checkhit`
+--      set wAttackMissed -- Turn passes it to the READS_MISS commands),
+--      ghostType (GHOST's chart index, CURSE's `cp GHOST`), targetSafeguard
+--      (the target's side has SAFEGUARD up: SWAGGER's SafeCheckSafeguard).
+-- Returns { nothing, messages, events, heals, costs, directDamage } where
+-- heals = { amount } for the user, and from wave 4 `selfDamage` (an amount
+-- straight off the user's HP past its substitute: SubtractHPFromUser),
+-- `trailing` (lines said after the heals and HP costs), `failureText` (the
+-- script's `failuretext` ends the move on a miss: Turn says its miss line)
+-- and `targetMovesChanged` (the target's move list moved: SPITE).
 function M.applyPrimary(ctx)
   ctx = ctx or {}
-  local out = { nothing = false, messages = {}, events = {}, heals = {}, costs = {}, directDamage = {} }
+  local out = { nothing = false, messages = {}, events = {}, heals = {}, costs = {},
+                directDamage = {}, trailing = {} }
   local effectId = int(ctx.effectId, 0)
   local userMon = ctx.userMon
   local targetMon = ctx.targetMon
@@ -523,48 +1618,117 @@ function M.applyPrimary(ctx)
   local targetFighter = ctx.targetFighter
   local wire = ctx.statusToWire or {}
   local rng = ctx.rng
-
-  if targetMon and (targetMon.substitute or 0) > 0 and blockedBySubstitute(effectId) then
-    out.nothing = true
-    return out
-  end
+  local targetBadges = targetFighter and targetFighter.badges or nil
 
   if effectId == 85 then -- SPLASH_EFFECT
     out.nothing = true
     return out
   end
 
+  -- BattleCommand_Heal (effect_commands.asm:6362-6437), RECOVER's,
+  -- SOFTBOILED's, MILK DRINK's and REST's: a user whose HP equals its max
+  -- (CompareBytes) fails -- "<USER>'s HP is full!".  REST (`cp REST`, by the
+  -- move's id) then clears SUBSTATUS_TOXIC and writes REST_SLEEP_TURNS + 1
+  -- over whatever status it had (asleep two turns, moving on the third:
+  -- CheckTurn's `dec`) -- "went to sleep!" from none, "fell asleep and became
+  -- healthy!" from one, nothing else asked (a sleeping user rests again) --
+  -- and CalcPlayerStats rebuilds the battle stats; it restores the whole max
+  -- HP, every other heal GetHalfMaxHP (at least 1), and "<USER> regained
+  -- health!".
   if effectId == 56 then -- HEAL_EFFECT
-    local amount = floor(max(1, int(userMon.maxHp, 1)) / 2)
+    local maxHp = max(1, int(userMon.maxHp, 1))
+    if userMon.hp >= maxHp then
+      out.messages[#out.messages + 1] = nameOf(userMon) .. "'s\nHP is full!"
+      return failed(out)
+    end
+    local amount = max(1, floor(maxHp / 2))
+    if ctx.moveKey == "REST" then
+      local had = userMon.status ~= nil
+      userMon.status = "sleep"
+      userMon.statusTurns = M.REST_SLEEP_COUNT
+      -- `res SUBSTATUS_TOXIC`: the bit with no PSN too (Turn, wave 5).
+      userMon.toxicLatent = nil
+      M.dropSnap(userMon)
+      -- RestedText ("<USER>\nfell asleep and\nbecame healthy!") /
+      -- WentToSleepText ("<USER>\nwent to sleep!").
+      local text = nameOf(userMon)
+        .. (had and "\nfell asleep and\nbecame healthy!" or "\nwent to sleep!")
+      out.messages[#out.messages + 1] = text
+      local fields = fighterFields(userFighter)
+      fields.status = wire.sleep or "SLP"
+      fields.text = text
+      out.events[#out.events + 1] = { kind = "status", fields = fields }
+      amount = maxHp
+    end
     out.heals[#out.heals + 1] = { amount = amount }
+    out.trailing[#out.trailing + 1] = nameOf(userMon) .. "\nregained health!"
     return out
   end
 
+  -- BattleCommand_ResetStats (effect_commands.asm:6002-6031): both sides'
+  -- stat levels back to the base, and both sides' battle stats rebuilt -- in a
+  -- 2v2 every monster on the field, all four (`ctx.fieldMons`), not only the
+  -- user and its target.  Nothing else is touched on Gold.
   if effectId == 25 then -- HAZE_EFFECT
-    resetStages(userMon)
-    resetStages(targetMon)
-    out.messages[#out.messages + 1] = "All stat changes were eliminated"
+    local field = type(ctx.fieldMons) == "table" and ctx.fieldMons or { userMon, targetMon }
+    for _, mon in ipairs(field) do resetStages(mon) end
+    out.messages[#out.messages + 1] = "All stat changes\nwere eliminated!"
+    return out
+  end
+
+  -- DefenseCurl's script (data/moves/effects.asm): `defenseup` -- RaiseStat
+  -- and its message as DEFENSE UP's -- then BattleCommand_Curl, which sets
+  -- SUBSTATUS_CURLED whatever the raise did (ROLLOUT's extra doubling reads
+  -- it; a send-out clears it, Turn `_clearSubstatus`).
+  if effectId == M.DEFENSE_CURL then
+    raisePrimary(out, userFighter, userMon, "def", 1)
+    userMon.curled = true
     return out
   end
 
   local statFx = STAT_EFFECTS[effectId]
   if statFx then
-    local mon = statFx.selfTarget and userMon or targetMon
-    local fighter = statFx.selfTarget and userFighter or targetFighter
-    applyStatChange(out, fighter, mon, statFx.stat, statFx.delta)
-    return out
-  end
-
-  if effectId == 32 then -- SLEEP_EFFECT
-    if M.hasMajorStatus(targetMon) then
-      out.nothing = true
+    if statFx.selfTarget then
+      local raised = raisePrimary(out, userFighter, userMon, statFx.stat, statFx.delta)
+      -- MinimizeDropSub, the tail of a BattleCommand_StatUp that moved a stage:
+      -- the move is MINIMIZE (`BATTLE_VARS_MOVE_ANIM`), so wPlayerMinimized /
+      -- wEnemyMinimized goes up -- what STOMP's doubleminimizedamage reads.  A
+      -- send-out clears it (Turn `_resolveSwitches` / `_faint`).
+      if raised and ctx.moveKey == "MINIMIZE" then userMon.minimized = true end
       return out
     end
-    local turns = (rng and rng:byte() or 0) % 7 + 1
-    targetMon.status = "sleep"
+    return lowerPrimary(out, ctx, targetFighter, targetMon, statFx.stat, statFx.delta)
+  end
+
+  -- BattleCommand_SleepTarget (effect_commands.asm:3571-3667), in its order:
+  -- the target's HELD_PREVENT_SLEEP ("protected by"), a target already
+  -- asleep ("<TARGET>'s already asleep!"), wAttackMissed (PrintDidntAffect2),
+  -- the computer's `.CheckAIRandomFail` byte (`aiRandomFail`), any other
+  -- status and a substitute -- each "It didn't affect <TARGET>!".  (A
+  -- Safeguard is the script's `checksafeguard`, Turn's.)
+  if effectId == 32 then -- SLEEP_EFFECT
+    if Items.prevents(targetMon, "sleep") then return protectedBy(out, targetMon) end
+    if targetMon.status == "sleep" then
+      out.messages[#out.messages + 1] = nameOf(targetMon) .. "'s\nalready asleep!"
+      return failed(out)
+    end
+    if ctx.missed or aiRandomFail(ctx, targetMon) or M.hasMajorStatus(targetMon)
+       or int(targetMon.substitute, 0) > 0 then
+      return didntAffect(out, targetMon)
+    end
+    -- `.random_loop`: BattleRandom & SLP_MASK, drawn again on 0 and on 7, plus
+    -- 1 -- a counter of 2..7, which CheckTurn's `dec` runs down to the turn it
+    -- wakes and moves on: 1..6 turns asleep (statusTurns is that counter).
+    local turns = 0
+    for _ = 1, M.REDRAW_LIMIT do
+      local r = (rng and rng:byte() or 0) % 8
+      if r ~= 0 and r ~= 7 then turns = r + 1; break end
+    end
+    if turns == 0 then turns = 2 end
+    M.setStatus(targetMon, targetBadges, "sleep")
     targetMon.statusTurns = turns
     local token = wire.sleep or "SLP"
-    local text = targetMon.species .. " fell asleep"
+    local text = nameOf(targetMon) .. "\nfell asleep!"
     out.messages[#out.messages + 1] = text
     local fields = fighterFields(targetFighter)
     fields.status = token
@@ -573,30 +1737,75 @@ function M.applyPrimary(ctx)
     return out
   end
 
-  if effectId == 66 then -- POISON_EFFECT
-    if M.hasMajorStatus(targetMon) then
-      out.nothing = true
-      return out
+  -- BattleCommand_Poison (effect_commands.asm:3701-3804), POISONPOWDER's and
+  -- TOXIC's one command: a matchup of 0 (`stab` ran first in DoPoison: a
+  -- Poison move against a Steel type) and a Poison-type target "doesn't
+  -- affect" it; a poisoned target is "<TARGET>'s already poisoned!"; the
+  -- target's HELD_PREVENT_POISON "protected by"; then any other status, the
+  -- computer's `.dont_sample_failure` byte (`aiRandomFail`), a substitute and
+  -- wAttackMissed, in that order, "It didn't affect <TARGET>!" -- so the
+  -- computer draws its byte on a miss too; then `.check_toxic`: EFFECT_TOXIC
+  -- sets SUBSTATUS_TOXIC and zeroes the toxic count -- badly poisoned, its
+  -- residual 1/16 x the count (Turn `_residualFor`) -- and every other
+  -- poison move is plain poison.
+  if effectId == 66 or effectId == M.TOXIC then -- POISON_EFFECT / EFFECT_TOXIC
+    if ctx.moveImmune or hasType(targetMon, ctx.poisonType) then
+      out.messages[#out.messages + 1] = M.doesntAffectLine(targetMon)
+      return failed(out)
     end
-    targetMon.status = "poison"
-    local token = wire.poison or "PSN"
-    local text = targetMon.species .. " was poisoned"
+    if targetMon.status == "poison" or targetMon.status == "toxic" then
+      out.messages[#out.messages + 1] = nameOf(targetMon) .. "'s\nalready poisoned!"
+      return failed(out)
+    end
+    if Items.prevents(targetMon, "poison") then return protectedBy(out, targetMon) end
+    if M.hasMajorStatus(targetMon) or aiRandomFail(ctx, targetMon)
+       or int(targetMon.substitute, 0) > 0 or ctx.missed then
+      return didntAffect(out, targetMon)
+    end
+    local toxic = effectId == M.TOXIC
+    M.setStatus(targetMon, targetBadges, toxic and "toxic" or "poison")
+    local text
+    if toxic then
+      targetMon.toxicCounter = 1
+      -- The bit a HEAL BELL / BATON PASS left is the status's now (Turn).
+      targetMon.toxicLatent = nil
+      text = nameOf(targetMon) .. "'s\nbadly poisoned!"
+    else
+      text = nameOf(targetMon) .. "\nwas poisoned!"
+    end
     out.messages[#out.messages + 1] = text
     local fields = fighterFields(targetFighter)
-    fields.status = token
+    fields.status = toxic and (wire.toxic or "TOX") or (wire.poison or "PSN")
     fields.text = text
     out.events[#out.events + 1] = { kind = "status", fields = fields }
     return out
   end
 
+  -- BattleCommand_Paralyze (effect_commands.asm:5831-5905): a paralysed
+  -- target ("<TARGET>'s already paralyzed!"), then a matchup of 0 ("doesn't
+  -- affect" -- THUNDER WAVE against a Ground type), then
+  -- HELD_PREVENT_PARALYZE ("protected by"), then the computer's
+  -- `.dont_sample_failure` byte (`aiRandomFail`), any other status,
+  -- wAttackMissed and a substitute, in that order -- PrintDidntAffect2.  The
+  -- penalty lands on the stat as it stands (ApplyPrzEffectOnSpeed,
+  -- `setStatus`).
   if effectId == 67 then -- PARALYZE_EFFECT
-    if M.hasMajorStatus(targetMon) then
-      out.nothing = true
-      return out
+    if targetMon.status == "paralysis" then
+      out.messages[#out.messages + 1] = nameOf(targetMon) .. "'s\nalready paralyzed!"
+      return failed(out)
     end
-    targetMon.status = "paralysis"
+    if ctx.moveImmune then
+      out.messages[#out.messages + 1] = M.doesntAffectLine(targetMon)
+      return failed(out)
+    end
+    if Items.prevents(targetMon, "paralysis") then return protectedBy(out, targetMon) end
+    if aiRandomFail(ctx, targetMon) or M.hasMajorStatus(targetMon) or ctx.missed
+       or int(targetMon.substitute, 0) > 0 then
+      return didntAffect(out, targetMon)
+    end
+    M.setStatus(targetMon, targetBadges, "paralysis")
     local token = wire.paralysis or "PAR"
-    local text = targetMon.species .. " is paralyzed"
+    local text = nameOf(targetMon) .. "'s\nparalyzed! Maybe\nit can't attack!"
     out.messages[#out.messages + 1] = text
     local fields = fighterFields(targetFighter)
     fields.status = token
@@ -605,18 +1814,45 @@ function M.applyPrimary(ctx)
     return out
   end
 
+  -- BattleCommand_Confuse (effect_commands.asm:5750-5776): HELD_PREVENT_CONFUSE
+  -- first ("protected by"), then a target already confused ("<TARGET>'s
+  -- already confused!"), then a substitute or wAttackMissed (PrintDidntAffect2
+  -- by way of `_CheckSnore_Swagger_ConfuseHit`), then FinishConfusingTarget's
+  -- 2-5 turns.  No computer byte: Confuse has none.
   if effectId == 49 then -- CONFUSION_EFFECT
+    if Items.prevents(targetMon, "confusion") then return protectedBy(out, targetMon) end
+    if (targetMon.confusion or 0) > 0 then
+      out.messages[#out.messages + 1] = nameOf(targetMon) .. "'s\nalready confused!"
+      return failed(out)
+    end
+    if int(targetMon.substitute, 0) > 0 or ctx.missed then
+      return didntAffect(out, targetMon)
+    end
     confuse(out, targetFighter, targetMon, rng, true)
     return out
   end
 
+  -- BattleCommand_LeechSeed (move_effects/leech_seed.asm): wAttackMissed and
+  -- a substitute ("<TARGET> evaded the attack!", EvadedText -- the one
+  -- caller of that line), then a Grass-type target ("It doesn't affect",
+  -- PrintDoesntAffect -- GRASS against either of its types), then one already
+  -- seeded (EvadedText again).
   if effectId == 84 then -- LEECH_SEED_EFFECT
+    local evaded = nameOf(targetMon) .. "\nevaded the attack!"
+    if ctx.missed or int(targetMon.substitute, 0) > 0 then
+      out.messages[#out.messages + 1] = evaded
+      return failed(out)
+    end
+    if hasType(targetMon, ctx.grassType) then
+      out.messages[#out.messages + 1] = M.doesntAffectLine(targetMon)
+      return failed(out)
+    end
     if targetMon.leechSeed then
-      out.nothing = true
-      return out
+      out.messages[#out.messages + 1] = evaded
+      return failed(out)
     end
     targetMon.leechSeed = { fromSlot = userFighter.slot }
-    local text = targetMon.species .. " was seeded"
+    local text = nameOf(targetMon) .. "\nwas seeded!"
     out.messages[#out.messages + 1] = text
     local fields = fighterFields(targetFighter)
     fields.text = text
@@ -624,114 +1860,222 @@ function M.applyPrimary(ctx)
     return out
   end
 
+  -- BattleCommand_Disable (move_effects/disable.asm, pokegold the same),
+  -- after `checkhit`: wAttackMissed, a Disable count already running, no
+  -- LAST_COUNTER_MOVE of the target's or STRUGGLE, and that move's slot (the
+  -- first holding it) with a PP byte of 0 -- `ld a, [hl] / and a`, the raw
+  -- byte, so a slot with PP Ups (K8 `ppUps`) is never empty here -- each
+  -- FailMove's "But it failed!".  No substitute is asked.  The count is
+  -- `.loop2`'s BattleRandom & 7, redrawn on 0, plus 1: 2..8, run down in
+  -- CheckTurn (Turn `_runGates`) -- "<TARGET>'s <MOVE> was DISABLED!".
   if effectId == 86 then -- DISABLE_EFFECT
-    local lastIdx = int(targetMon.lastMoveIndex, 0)
-    if lastIdx < 1 or not targetMon.moves[lastIdx] then
-      out.nothing = true
-      return out
+    local last = targetMon.lastCounterMove
+    local running = targetMon.disable and int(targetMon.disable.turns, 0) > 0
+    if ctx.missed or running or not last or M.moveKey(last) == "STRUGGLE" then
+      return failMove(out, targetMon)
     end
-    if targetMon.disable and targetMon.disable.turns and targetMon.disable.turns > 0 then
-      out.nothing = true
-      return out
+    local index = nil
+    for i = 1, #targetMon.moves do
+      if M.moveKey(targetMon.moves[i]) == M.moveKey(last) then index = i; break end
     end
-    local turns = (rng and rng:byte() or 0) % 4 + 2
-    targetMon.disable = { moveIndex = lastIdx, turns = turns }
+    local slotMove = index and targetMon.moves[index]
+    if not slotMove or (int(slotMove.pp, 0) <= 0 and int(slotMove.ppUps, 0) <= 0) then
+      return failMove(out, targetMon)
+    end
+    local count = 0
+    for _ = 1, M.REDRAW_LIMIT do
+      local r = (rng and rng:byte() or 0) % 8
+      if r ~= 0 then count = r + 1; break end
+    end
+    if count == 0 then count = 2 end
+    targetMon.disable = { moveIndex = index, turns = count }
     out.messages[#out.messages + 1] =
-      moveLabel(targetMon.moves[lastIdx]) .. " was disabled"
+      nameOf(targetMon) .. "'s\n" .. moveLabel(slotMove) .. " was\nDISABLED!"
     return out
   end
 
+  -- BattleCommand_Substitute (move_effects/substitute.asm, wave 5's lines):
+  -- one up already -- "<USER> has a SUBSTITUTE!"; the HP not above a
+  -- quarter of the max -- "Too weak to make a SUBSTITUTE!"; otherwise the
+  -- quarter off the HP into the doll, the user's wrap count and trapping
+  -- move zeroed (it is free of a wrap that held it), "<USER> made a
+  -- SUBSTITUTE!".
   if effectId == 79 then -- SUBSTITUTE_EFFECT
     local cost = floor(max(1, int(userMon.maxHp, 1)) / 4)
     if userMon.substitute and userMon.substitute > 0 then
-      out.nothing = true
-      return out
+      out.messages[#out.messages + 1] = nameOf(userMon) .. "\nhas a SUBSTITUTE!"
+      return failed(out)
     end
     if userMon.hp <= cost then
-      out.nothing = true
-      return out
+      out.messages[#out.messages + 1] = "Too weak to make\na SUBSTITUTE!"
+      return failed(out)
     end
     userMon.hp = userMon.hp - cost
     userMon.substitute = cost
+    userMon.trapped = nil
     out.directDamage = { { amount = cost } }
     out.messages[#out.messages + 1] =
-      userMon.species .. " created a substitute"
+      nameOf(userMon) .. "\nmade a SUBSTITUTE!"
     return out
   end
 
-  if effectId == 64 then -- LIGHT_SCREEN_EFFECT
-    userMon.lightScreen = true
-    out.messages[#out.messages + 1] =
-      userMon.species .. " created a light screen"
+  -- BattleCommand_Screen (pokecrystal engine/battle/effect_commands.asm:
+  -- 6147-6188): a screen belongs to the user's SIDE (wPlayerScreens), lasts
+  -- SCREEN_TURNS, and a second cast while it is up fails ("But it failed!")
+  -- rather than refreshing the count.  `ctx.userScreens` is the side's
+  -- { lightScreen, reflect, safeguard } turn counts (Turn's
+  -- `self.screens[side]`), which the between-turn tick counts down; nothing
+  -- else ever clears them.
+  if effectId == 64 or effectId == 65 then -- LIGHT_SCREEN_EFFECT / REFLECT_EFFECT
+    local key = effectId == 64 and "lightScreen" or "reflect"
+    local screens = ctx.userScreens
+    if type(screens) ~= "table" or int(screens[key], 0) > 0 then
+      out.messages[#out.messages + 1] = "But it failed!"
+      return failed(out)
+    end
+    screens[key] = M.SCREEN_TURNS
+    -- LightScreenEffectText / ReflectEffectText (wave 5).
+    out.messages[#out.messages + 1] = nameOf(userMon)
+      .. (effectId == 64 and "'s\nSPCL.DEF rose!" or "'s\nDEFENSE rose!")
     return out
   end
 
-  if effectId == 65 then -- REFLECT_EFFECT
-    userMon.reflect = true
-    out.messages[#out.messages + 1] =
-      userMon.species .. " created a reflect"
+  -- BattleCommand_Safeguard (move_effects/safeguard.asm): SCREENS_SAFEGUARD on
+  -- the user's SIDE for five between-turn ticks (Turn `_tickSafeguard`,
+  -- HandleSafeguard), "But it failed!" while it is already up.  What it
+  -- blocks is each status command's SafeCheckSafeguard / `checksafeguard`
+  -- (`applySide` below, Turn `_safeguarded`).
+  if effectId == M.SAFEGUARD then
+    local screens = ctx.userScreens
+    if type(screens) ~= "table" or int(screens.safeguard, 0) > 0 then
+      out.messages[#out.messages + 1] = "But it failed!"
+      return failed(out)
+    end
+    screens.safeguard = M.SAFEGUARD_TURNS
+    out.messages[#out.messages + 1] = nameOf(userMon) .. "'s\ncovered by a veil!"
     return out
   end
 
+  -- BattleCommand_LockOn (move_effects/lock_on.asm), LOCK-ON's and MIND
+  -- READER's, after the script's `checkhit`: a substitute, then
+  -- wAttackMissed, fail it ("It didn't affect", PrintDidntAffect); otherwise SUBSTATUS_LOCK_ON goes on the TARGET, which the next
+  -- CheckHit against it reads and clears (Turn `_checkHit`), and the user
+  -- "took aim!".
+  if effectId == M.LOCK_ON then
+    if int(targetMon.substitute, 0) > 0 or ctx.missed then
+      return didntAffect(out, targetMon)
+    end
+    targetMon.lockOn = true
+    out.messages[#out.messages + 1] = nameOf(userMon) .. "\ntook aim!"
+    return out
+  end
+
+  -- BattleCommand_Mist / BattleCommand_FocusEnergy (move_effects/mist.asm,
+  -- focus_energy.asm; wave 5): the bit already set fails (AnimateFailedMove,
+  -- PrintButItFailed); else "<USER>'s shrouded in MIST!" / "<USER>'s getting
+  -- pumped!".
   if effectId == 46 then -- MIST_EFFECT
+    if userMon.mist then return butItFailed(out) end
     userMon.mist = true
-    out.messages[#out.messages + 1] =
-      userMon.species .. " is shrouded in mist"
+    out.messages[#out.messages + 1] = nameOf(userMon) .. "'s\nshrouded in MIST!"
     return out
   end
 
   if effectId == 47 then -- FOCUS_ENERGY_EFFECT
+    if userMon.focusEnergy then return butItFailed(out) end
     userMon.focusEnergy = true
-    out.messages[#out.messages + 1] =
-      userMon.species .. " is getting pumped"
+    out.messages[#out.messages + 1] = nameOf(userMon) .. "'s\ngetting pumped!"
     return out
   end
 
-  if effectId == 24 then -- CONVERSION_EFFECT
-    local foeType = targetMon.types[1] or 0
-    userMon.types = { foeType }
-    out.messages[#out.messages + 1] =
-      userMon.species .. " converted type"
-    return out
-  end
-
+  -- BattleCommand_Mimic (move_effects/mimic.asm, pokegold the same):
+  -- ClearLastMove first (`out.clearLastMove`), then wAttackMissed, a target in
+  -- the sky / underground (CheckHiddenOpponent), no LAST_COUNTER_MOVE of the
+  -- target's or STRUGGLE, and a move the user already knows -- each
+  -- FailMimic's "But it failed!".  No substitute is asked.  The move goes into
+  -- the slot that holds MIMIC (`.find_mimic`, scanning back from the last
+  -- slot -- not the chosen one: SLEEP TALK calls it from its own) with 5 PP (`ld [hl], 5`).  The party keeps MIMIC: an untransformed
+  -- user puts the slot's row aside (`preMimic`, keyed by the 1-based slot,
+  -- the first Mimic only -- Red's shape), which keeps its own PP -- the
+  -- party's MIMIC PP is frozen meanwhile (DoTurn's CheckMimicUsed) -- and
+  -- comes back at a switch-out or a faint (Turn `_clearSubstatus`);
+  -- HandleMysteryberry scans it (`_heldMysteryberry`).
   if effectId == 82 then -- MIMIC_EFFECT
-    local moveIndex = int(ctx.moveIndex, 0)
-    local lastIdx = int(targetMon.lastMoveIndex, 0)
-    if lastIdx < 1 or lastIdx > #targetMon.moves then
-      out.nothing = true
-      return out
+    userMon.lastCounterMove = nil
+    userMon.lastMove = nil
+    out.clearLastMove = true
+    local last = targetMon.lastCounterMove
+    if ctx.missed or targetMon.invulnerable or not last
+       or M.moveKey(last) == "STRUGGLE" then
+      return failMove(out, targetMon)
     end
-    local source = targetMon.moves[lastIdx]
-    if not source then
-      out.nothing = true
-      return out
+    local key = M.moveKey(last)
+    local slot = nil
+    for i = 1, #userMon.moves do
+      if M.moveKey(userMon.moves[i]) == key then return failMove(out, targetMon) end
     end
-    userMon.moves[moveIndex] = {
-      id = source.id or "move",
-      -- The copy is narrated under the same name the original was, so a
-      -- mimicked move does not revert to its slug on the learner's screen.
-      name = source.name,
-      pp = max(0, int(source.pp, 0)),
-      power = max(0, int(source.power, 0)),
-      accuracy = max(0, int(source.accuracy, 255)),
-      type = max(0, int(source.type, 0)),
-      effect = max(0, int(source.effect, 0)),
-      chance = max(0, int(source.chance, 0)),
-      highCrit = source.highCrit == true,
-    }
+    -- `cp MIMIC` by id; a modded move with Mimic's own command answers too
+    -- (the cart's scan would run off the list looking for it).
+    for i = #userMon.moves, 1, -1 do
+      local m = userMon.moves[i]
+      if M.moveKey(m) == "MIMIC" or int(m.effect, 0) == 82 then slot = i; break end
+    end
+    if not slot then return failMove(out, targetMon) end
+    if not userMon.transformed then
+      userMon.preMimic = userMon.preMimic or {}
+      if not userMon.preMimic[slot] then
+        userMon.preMimic[slot] = copyMoveRow(userMon.moves[slot])
+      end
+    end
+    local copy = copyMoveRow(last)
+    copy.basePp = M.basePp(last)
+    copy.pp, copy.maxPp, copy.ppUps = M.MIMIC_PP, M.MIMIC_PP, nil
+    userMon.moves[slot] = copy
     out.messages[#out.messages + 1] =
-      userMon.species .. " learned " .. moveLabel(source)
+      nameOf(userMon) .. "\nlearned\n" .. moveLabel(last) .. "!"
     out.movesChanged = true
     return out
   end
 
+  -- BattleCommand_Transform (move_effects/transform.asm, pokegold the same):
+  -- ClearLastMove first (`out.clearLastMove`: the user's last move and last
+  -- counter move are forgotten, so a foe's MIRROR MOVE copies nothing of
+  -- it), then "But it failed!" against a target already transformed or one in
+  -- the sky / underground (CheckHiddenOpponent) -- no substitute is asked.
+  -- Then SUBSTATUS_TRANSFORMED and ResetActorDisable, and the copy: the
+  -- species (wBattleMonSpecies, `transformSpecies` -- what Lucky Punch /
+  -- Stick read), the four moves with 5 PP each (1 for SKETCH: the
+  -- `.pp_loop`), the DVs, the unmodified stats (wPlayerStats <- wEnemyStats),
+  -- the battle stats as the target holds them (wBattleMonStats <-
+  -- wEnemyMonStats: its badge and status in them, `snapStats`), the types
+  -- and the stat levels.  The party is never touched: what the monster was
+  -- is kept in `preTransform` (stats, types, moves with their PP, DVs) for
+  -- Turn's `_undoTransform` -- a switch-out or a faint gives it back -- and
+  -- for HandleMysteryberry, which scans the party's moves.
   if effectId == 57 then -- TRANSFORM_EFFECT
-    userMon.stats.atk = max(1, int(targetMon.stats.atk, 1))
-    userMon.stats.def = max(1, int(targetMon.stats.def, 1))
-    userMon.stats.spe = max(1, int(targetMon.stats.spe, 1))
-    userMon.stats.spa = max(1, int(targetMon.stats.spa, 1))
-    userMon.stats.spd = max(1, int(targetMon.stats.spd, 1))
+    userMon.lastCounterMove = nil
+    userMon.lastMove = nil
+    out.clearLastMove = true
+    if targetMon.transformed or targetMon.invulnerable then
+      out.messages[#out.messages + 1] = "But it failed!"
+      return failed(out)
+    end
+    if not userMon.preTransform then
+      local partyMoves = {}
+      for i = 1, #userMon.moves do partyMoves[i] = userMon.moves[i] end
+      userMon.preTransform = {
+        stats = userMon.stats, types = userMon.types,
+        moves = partyMoves, dvs = userMon.dvs,
+      }
+    end
+    local battleStats = M.currentStats(targetMon, targetBadges)
+    userMon.stats = {
+      atk = max(1, int(targetMon.stats.atk, 1)),
+      def = max(1, int(targetMon.stats.def, 1)),
+      spe = max(1, int(targetMon.stats.spe, 1)),
+      spa = max(1, int(targetMon.stats.spa, 1)),
+      spd = max(1, int(targetMon.stats.spd, 1)),
+    }
     userMon.types = {}
     for i = 1, #targetMon.types do userMon.types[i] = targetMon.types[i] end
     if #userMon.types == 0 then userMon.types[1] = 0 end
@@ -742,26 +2086,301 @@ function M.applyPrimary(ctx)
     userMon.stages.spd = M.clampStage(targetMon.stages.spd)
     userMon.stages.acc = M.clampStage(targetMon.stages.acc)
     userMon.stages.eva = M.clampStage(targetMon.stages.eva)
+    if type(targetMon.dvs) == "table" then
+      local dvs = {}
+      for key, value in pairs(targetMon.dvs) do dvs[key] = value end
+      userMon.dvs = dvs
+    else
+      userMon.dvs = nil
+    end
     local copied = {}
     for i = 1, #targetMon.moves do
       local m = targetMon.moves[i]
+      local pp = (M.moveKey(m) == "SKETCH") and 1 or M.TRANSFORM_PP
       copied[#copied + 1] = {
         id = m.id or "move",
         name = m.name,
-        pp = max(0, int(m.pp, 0)),
+        pp = pp,
+        maxPp = pp,
         power = max(0, int(m.power, 0)),
         accuracy = max(0, int(m.accuracy, 255)),
         type = max(0, int(m.type, 0)),
         effect = max(0, int(m.effect, 0)),
         chance = max(0, int(m.chance, 0)),
         highCrit = m.highCrit == true,
+        priority = m.priority,
+        -- SKETCH's base PP for the copy (`basePp`, wave 5).
+        basePp = M.basePp(m),
       }
     end
     userMon.moves = copied
     userMon.transformed = true
+    userMon.disable = nil
+    -- BattleCommand_Transform copies the target's species into the battle
+    -- struct (wBattleMonSpecies), which BattleCommand_Critical's Lucky Punch /
+    -- Stick check reads; the party species -- `speciesId`, untouched -- is what
+    -- Light Ball, Thick Club and Metal Powder read (Items.lua).
+    userMon.transformSpecies = targetMon.speciesId
+    -- ...and the copied species' base stats (K7), which BEAT UP reads off
+    -- wEnemyMonSpecies' base data for a transformed target's Defense.
+    userMon.transformBase = targetMon.transformBase or targetMon.base
+    -- ...and its Pokedex weight (K21), which the HEAVY BALL reads off
+    -- wEnemyMonSpecies (`ballRate`).
+    userMon.transformWeight = targetMon.weight
+    M.snapStats(userMon, userFighter and userFighter.badges or nil, battleStats)
+    -- TransformedText: "<USER>\nTRANSFORMED into\n" and wStringBuffer1, the
+    -- species GetPokemonName wrote there -- printed bare, no prefix (K17).
     out.messages[#out.messages + 1] =
-      userMon.species .. " transformed into " .. targetMon.species
+      nameOf(userMon) .. "\nTRANSFORMED into\n" .. targetMon.species .. "!"
     out.movesChanged = true
+    return out
+  end
+
+  -- BattleCommand_Attract (move_effects/attract.asm), after `checkhit`:
+  -- wAttackMissed, CheckOppositeGender (`M.gender` for both: a genderless or
+  -- unknown one and the same gender fail), CheckHiddenOpponent and a target
+  -- already in love -- each FailMove's "But it failed!".  No substitute is
+  -- asked.  Otherwise SUBSTATUS_IN_LOVE on the target, whose love is the
+  -- user's seat (`inLove.fromSlot`: Turn's CheckTurn gate and
+  -- BreakAttraction read it) -- "<TARGET> fell in love!".
+  if effectId == M.ATTRACT then
+    local mine, theirs = M.gender(userMon), M.gender(targetMon)
+    if ctx.missed or not mine or not theirs or mine == theirs
+       or targetMon.invulnerable or targetMon.inLove then
+      return failMove(out, targetMon)
+    end
+    targetMon.inLove = { fromSlot = userFighter and userFighter.slot }
+    out.messages[#out.messages + 1] = nameOf(targetMon) .. "\nfell in love!"
+    return out
+  end
+
+  -- BattleCommand_BellyDrum (move_effects/belly_drum.asm), the cart's bug
+  -- kept (docs/bugs_and_glitches.md, "Belly Drum sharply boosts Attack even
+  -- with under 50% HP"): AttackUp2 FIRST -- `raiseStat`, so a level at +6 or
+  -- an Attack of 999 fails the move ("But it failed!", its wAttackMissed) --
+  -- then CheckUserHasEnoughHP against GetHalfMaxHP (at least 1): a user with
+  -- no more than that fails too, KEEPING the two stages; otherwise the half
+  -- comes off its HP (SubtractHPFromUser, past its own substitute), AttackUp2
+  -- runs five times more (MAX_STAT_LEVEL - BASE_STAT_LEVEL - 1), each a
+  -- RaiseStat with its own 999 test, the first that fails ending the climb,
+  -- and "<USER> cut its HP and maximized ATTACK!".  The script has no
+  -- `statupmessage`: the `stat` event carries the stage the climb reached.
+  if effectId == M.BELLY_DRUM then
+    local badges = userFighter and userFighter.badges or nil
+    local before = M.clampStage(userMon.stages.atk)
+    local raised, after = raiseStat(userMon, badges, "atk", 2)
+    local half = max(1, floor(max(1, int(userMon.maxHp, 1)) / 2))
+    if not raised or userMon.hp <= half then
+      if after ~= before then statEvent(out, userFighter, after, nil) end
+      if not raised then out.missed = true end
+      return butItFailed(out)
+    end
+    out.selfDamage = half
+    for _ = 1, M.BELLY_DRUM_CLIMB do
+      local ok, now = raiseStat(userMon, badges, "atk", 2)
+      after = now
+      if not ok then break end
+    end
+    local text = nameOf(userMon) .. "\ncut its HP and\nmaximized ATTACK!"
+    statEvent(out, userFighter, after, text)
+    out.trailing[#out.trailing + 1] = text
+    return out
+  end
+
+  -- BattleCommand_Curse (move_effects/curse.asm).  A user with a GHOST battle
+  -- type (`cp GHOST` on wBattleMonType1 / 2 -- TRANSFORM's and CONVERSION's
+  -- types count): a target in the sky / underground (CheckHiddenOpponent),
+  -- behind a substitute or already cursed fails ("But it failed!"); else
+  -- SUBSTATUS_CURSE on the target (a quarter of its max HP each turn, Turn
+  -- `_residualFor`), GetHalfMaxHP (at least 1) off the user's own HP
+  -- (SubtractHPFromUser -- it can faint), "<USER> cut its own HP and put a
+  -- CURSE on <TARGET>!".  Any other user: Attack and Defense both at +6 is
+  -- `.cantraise` -- "<USER>'s ABILITY won't rise anymore!" (GetStatName's
+  -- ABILITY row, `ld b, ABILITY + 1`) -- else LowerStat SPEED on itself (no
+  -- Mist: its own; a level at -6 or a battle Speed of 1 leaves it silently),
+  -- whose TryLowerStat rebuilds the OPPONENT's battle stats (it was written
+  -- for StatDown: SwitchTurn / CalcEnemyStats -- the cart's own quirk), then
+  -- AttackUp and DefenseUp (`raiseStat`, each silent when it fails: the
+  -- script has no statupfailtext), each line as it lands.
+  if effectId == M.CURSE then
+    if hasType(userMon, ctx.ghostType) then
+      if targetMon.invulnerable or int(targetMon.substitute, 0) > 0 or targetMon.cursed then
+        return butItFailed(out)
+      end
+      targetMon.cursed = true
+      out.selfDamage = max(1, floor(max(1, int(userMon.maxHp, 1)) / 2))
+      -- PutACurseText's `para` (K18): two boxes, two lines.
+      out.trailing[#out.trailing + 1] = nameOf(userMon) .. "\ncut its own HP and"
+      out.trailing[#out.trailing + 1] = "put a CURSE on\n" .. nameOf(targetMon) .. "!"
+      return out
+    end
+    if M.clampStage(userMon.stages.atk) >= M.STAGE_MAX
+       and M.clampStage(userMon.stages.def) >= M.STAGE_MAX then
+      out.messages[#out.messages + 1] = nameOf(userMon) .. "'s\nABILITY won't\nrise anymore!"
+      return failed(out)
+    end
+    local badges = userFighter and userFighter.badges or nil
+    local speed = M.clampStage(userMon.stages.spe)
+    if speed > M.STAGE_MIN and M.storedStat(userMon, "spe", badges) > 1 then
+      userMon.stages.spe = speed - 1
+      M.dropSnap(targetMon)
+      M.dropSnap(userMon)
+      local text = M.statDownLine(userMon, "spe", -1)
+      out.messages[#out.messages + 1] = text
+      statEvent(out, userFighter, speed - 1, text)
+    end
+    for _, stat in ipairs({ "atk", "def" }) do
+      local ok, now = raiseStat(userMon, badges, stat, 1)
+      if ok then
+        local text = M.statUpLine(userMon, stat, 1)
+        out.messages[#out.messages + 1] = text
+        statEvent(out, userFighter, now, text)
+      end
+    end
+    return out
+  end
+
+  -- BattleCommand_DestinyBond (move_effects/destiny_bond.asm): no check at
+  -- all -- SUBSTATUS_DESTINY_BOND on the user, "<USER>'s trying to take its
+  -- opponent with it!".  `checkfaint` reads it on the hit that knocks the
+  -- user out (Turn `_destinyBond`); the user's own next turn and every foe's
+  -- action end it (Turn `_resolveFights`).
+  if effectId == M.DESTINY_BOND then
+    userMon.destinyBond = true
+    out.messages[#out.messages + 1] =
+      nameOf(userMon) .. "'s\ntrying to take its\nopponent with it!"
+    return out
+  end
+
+  -- BattleCommand_Foresight (move_effects/foresight.asm), after `checkhit`:
+  -- wAttackMissed, a target in the sky / underground and a target already
+  -- identified fail (FailMove: "But it failed!"); else SUBSTATUS_IDENTIFIED on
+  -- the target -- CheckHit's `.StatModifiers` (Accuracy `identified`) and the
+  -- type chart's Foresight rows (Turn `_typePercents`) read it -- "<USER>
+  -- identified <TARGET>!".
+  if effectId == M.FORESIGHT then
+    if ctx.missed or targetMon.invulnerable or targetMon.identified then
+      return failMove(out, targetMon)
+    end
+    targetMon.identified = true
+    out.messages[#out.messages + 1] =
+      nameOf(userMon) .. "\nidentified\n" .. nameOf(targetMon) .. "!"
+    return out
+  end
+
+  -- BattleCommand_ArenaTrap (effect_commands.asm:6285-6306), MEAN LOOK's and
+  -- SPIDER WEB's: no `checkhit`; a target in the sky / underground, and a
+  -- user already holding its foe -- SUBSTATUS_CANT_RUN is the USER's bit
+  -- ("the opponent can't run"), so a second one fails whoever it aims at --
+  -- "But it failed!".  Otherwise the user holds the seat it aimed at
+  -- (`meanLook.slot`, Turn `_heldBy`: no switch, no run, no TELEPORT for that
+  -- seat) -- "<TARGET> can't escape now!".
+  if effectId == M.MEAN_LOOK then
+    if targetMon.invulnerable or userMon.meanLook then return butItFailed(out) end
+    userMon.meanLook = { slot = targetFighter and targetFighter.slot }
+    out.messages[#out.messages + 1] = nameOf(targetMon) .. "\ncan't escape now!"
+    return out
+  end
+
+  -- BattleCommand_Nightmare (move_effects/nightmare.asm): no `checkhit`; a
+  -- target in the sky / underground, behind a substitute, not asleep or
+  -- already having one fails ("But it failed!"); else SUBSTATUS_NIGHTMARE --
+  -- a quarter of its max HP each turn while it lasts (Turn `_residualFor`),
+  -- gone when it wakes or a cure lands -- "<TARGET> started to have a
+  -- NIGHTMARE!".
+  if effectId == M.NIGHTMARE then
+    if targetMon.invulnerable or int(targetMon.substitute, 0) > 0
+       or targetMon.status ~= "sleep" or targetMon.nightmare then
+      return butItFailed(out)
+    end
+    targetMon.nightmare = true
+    out.messages[#out.messages + 1] = nameOf(targetMon) .. "\nstarted to have a\nNIGHTMARE!"
+    return out
+  end
+
+  -- BattleCommand_PsychUp (move_effects/psych_up.asm): no `checkhit`, no
+  -- substitute; a target whose every stat level is the base (0) fails ("But
+  -- it failed!"); else all seven levels copied onto the user and its battle
+  -- stats rebuilt (CalcPlayerStats) -- "<USER> copied the stat changes of
+  -- <TARGET>!".
+  if effectId == M.PSYCH_UP then
+    local any = false
+    for _, key in ipairs(STAGE_KEYS) do
+      if M.clampStage(targetMon.stages[key]) ~= 0 then any = true end
+    end
+    if not any then return butItFailed(out) end
+    for _, key in ipairs(STAGE_KEYS) do
+      userMon.stages[key] = M.clampStage(targetMon.stages[key])
+    end
+    M.dropSnap(userMon)
+    -- CopiedStatsText's `para` (K18): two boxes, two lines.
+    out.messages[#out.messages + 1] = nameOf(userMon) .. "\ncopied the stat"
+    out.messages[#out.messages + 1] = "changes of\n" .. nameOf(targetMon) .. "!"
+    return out
+  end
+
+  -- BattleCommand_Spite (move_effects/spite.asm), after `checkhit`:
+  -- wAttackMissed, no LAST_COUNTER_MOVE of the target's or STRUGGLE, and that
+  -- move's slot (the first holding it) with no PP fail (PrintDidntAffect2);
+  -- else BattleRandom & 3, plus 2 -- 2..5 PP, at most what is left -- off
+  -- the slot (the battle copy; the party's too unless the target is
+  -- transformed, which this referee's one list already is) -- "<TARGET>'s
+  -- <MOVE> was reduced by <n>!".
+  if effectId == M.SPITE then
+    local last = targetMon.lastCounterMove
+    if ctx.missed or not last or M.moveKey(last) == "STRUGGLE" then
+      return didntAffect(out, targetMon)
+    end
+    local slotMove = nil
+    for i = 1, #targetMon.moves do
+      if M.moveKey(targetMon.moves[i]) == M.moveKey(last) then
+        slotMove = targetMon.moves[i]
+        break
+      end
+    end
+    if not slotMove or int(slotMove.pp, 0) <= 0 then return didntAffect(out, targetMon) end
+    local amount = (rng and rng:byte() or 0) % 4 + 2
+    if slotMove.pp < amount then amount = slotMove.pp end
+    slotMove.pp = slotMove.pp - amount
+    out.targetMovesChanged = true
+    out.messages[#out.messages + 1] = nameOf(targetMon) .. "'s\n" .. moveLabel(slotMove)
+      .. " was\nreduced by " .. amount .. "!"
+    return out
+  end
+
+  -- SWAGGER's script (data/moves/effects.asm): `checkhit`, then `attackup2`
+  -- on the TARGET (`switchturn`: RaiseStat with the target as its user and
+  -- its seat's badges in the 999 test).  RaiseStat on wAttackMissed fails,
+  -- and its own `.cant_raise_stat` / `.stats_already_max` SET wAttackMissed
+  -- (a level at +6; an Attack of 999, the level keeping one of the two
+  -- stages), so the script's `failuretext` then ends the move on its miss
+  -- line (`out.failureText`) -- and the target is not confused.  Otherwise
+  -- "<TARGET>'s ATTACK rose", and `confusetarget`, silent on
+  -- HELD_PREVENT_CONFUSE, on the target's side's SAFEGUARD
+  -- (SafeCheckSafeguard), on a substitute and on a confusion already there;
+  -- else FinishConfusingTarget's 2..5 turns ("became confused", the confusion
+  -- berry -- Turn `_afterInfliction`).
+  if effectId == M.SWAGGER then
+    if ctx.missed then
+      out.failureText = true
+      return failed(out)
+    end
+    local before = M.clampStage(targetMon.stages.atk)
+    local raised, after = raiseStat(targetMon, targetBadges, "atk", 2)
+    if not raised then
+      if after ~= before then statEvent(out, targetFighter, after, nil) end
+      out.failureText = true
+      out.missed = true
+      return failed(out)
+    end
+    local text = M.statUpLine(targetMon, "atk", 2)
+    out.messages[#out.messages + 1] = text
+    statEvent(out, targetFighter, after, text)
+    if Items.prevents(targetMon, "confusion") or ctx.targetSafeguard
+       or int(targetMon.substitute, 0) > 0 or int(targetMon.confusion, 0) > 0 then
+      return out
+    end
+    confuse(out, targetFighter, targetMon, rng, false)
     return out
   end
 
@@ -775,7 +2394,9 @@ end
 
 -- Same 1/256 quirk as Accuracy.lua: byte is 0..255, threshold is
 -- floor(chance * 255 / 100), proc when byte < threshold.  chance 0 never;
--- chance 100 is byte < 255 (always except the 1/256 roll of 255).
+-- chance 100 is byte < 255 (always except the 1/256 roll of 255).  Draws
+-- nothing at chance 0 -- the cart's `effectchance` does (M.effectChance), so
+-- the turn machine draws through that one.
 function M.sideChanceProc(rng, chance)
   chance = max(0, min(100, int(chance, 0)))
   if chance <= 0 then return false end
@@ -784,94 +2405,378 @@ function M.sideChanceProc(rng, chance)
   return rng and rng:byte() < threshold
 end
 
-local SIDE_STAT_DOWN = {
-  [68] = "atk", [69] = "def", [70] = "spe", [71] = "spa",
+-- BattleCommand_EffectChance (pokecrystal engine/battle/effect_commands.asm:
+-- 1851-1874, pokegold the same): wEffectFailed is cleared, a substitute
+-- standing (CheckSubstituteOpp) fails it before any byte, and otherwise
+-- BattleRandom is drawn WHATEVER the chance -- 0 included, which then never
+-- lands -- and lands under the move's chance byte (the wire's percent back as
+-- the cart's byte, floor(pct * 255 / 100); the 1/256 miss of a 100% move is
+-- the cart's bug, kept).  Returns whether wEffectFailed stayed clear.
+function M.effectChance(rng, chance, behindSub)
+  if behindSub then return false end
+  local pct = max(0, min(100, int(chance, 0)))
+  local byte = rng and rng:byte() or 255
+  return byte < floor(pct * 255 / 100)
+end
+
+-- The scripts (data/moves/effects.asm) that run `effectchance` right after
+-- `checkhit` -- so the byte is drawn on a miss too, failuretext ending the
+-- move only after it -- by this table's ids: the status / flinch / stat-down
+-- / confusion hits and TWINEEDLE (whose one `effectchance` stands before its
+-- loop), and the Gold-native rows but TRI ATTACK (its `tristatuschance`
+-- calls EffectChance itself, after `checkfaint`) and GUST (none).
+-- EARTHQUAKE and SKY ATTACK draw one at chance 0 on both carts.  Id 0 is
+-- NormalHit's fold, which draws none -- but THIEF folds there too (no Gen 1
+-- handler is its `thief`), and its script has the command: a damaging id-0
+-- move that states a chance is read as one that runs it (`drawsEffectChance`).
+M.EFFECT_CHANCE_SCRIPTS = {
+  [2] = true, [4] = true, [5] = true, [6] = true, [31] = true,
+  [33] = true, [34] = true, [35] = true, [36] = true, [37] = true,
+  [68] = true, [69] = true, [70] = true, [71] = true, [76] = true, [77] = true,
+  [87] = true, [88] = true, [89] = true, [90] = true, [91] = true,
+  [92] = true, [93] = true, [94] = true, [95] = true, [96] = true, [97] = true,
+  [100] = true, [101] = true,
 }
 
--- ctx: effectId, chance, rng, targetMon, targetFighter, statusToWire
--- Returns { proc, messages, events }.
+function M.drawsEffectChance(effectId, move)
+  local id = int(effectId, 0)
+  if M.EFFECT_CHANCE_SCRIPTS[id] then return true end
+  if id ~= 0 or type(move) ~= "table" then return false end
+  return int(move.power, 0) > 0 and int(move.chance, 0) > 0
+end
+
+local SIDE_STAT_DOWN = {
+  [68] = "atk", [69] = "def", [70] = "spe", [71] = "spa",
+  [87] = "spd", [88] = "acc",
+}
+-- The *UpHit scripts' raises, on the USER (BattleCommand_AttackUp /
+-- DefenseUp, and AllStatsUp's five in its order).
+local SIDE_STAT_UP = {
+  [89] = { "atk" },
+  [90] = { "def" },
+  [91] = { "atk", "def", "spe", "spa", "spd" },
+}
+local SIDE_POISON = { [2] = true, [33] = true, [77] = true }
+local SIDE_BURN = { [4] = true, [34] = true, [92] = true, [93] = true }
+local SIDE_FREEZE = { [5] = true, [35] = true }
+local SIDE_PARALYZE = { [6] = true, [36] = true, [97] = true }
+local SIDE_FLINCH = {
+  [31] = true, [37] = true, [94] = true, [95] = true, [96] = true, [101] = true,
+}
+
+-- The cart's lines (WasPoisonedText, WasBurnedText, WasFrozenText,
+-- ParalyzedText), each after the target's marked name, with their breaks.
+local SIDE_TEXT = {
+  poison = "\nwas poisoned!", burn = "\nwas burned!",
+  freeze = "\nwas frozen solid!", paralysis = "'s\nparalyzed! Maybe\nit can't attack!",
+}
+local SIDE_TOKEN = { poison = "PSN", burn = "BRN", freeze = "FRZ", paralysis = "PAR" }
+-- The clip each command plays on the target ahead of its line (K20):
+-- PoisonTarget's ANIM_PSN, BurnTarget's ANIM_BRN, FreezeTarget's ANIM_FRZ,
+-- ParalyzeTarget's ANIM_PAR, each a PlayOpponentBattleAnim (pokegold
+-- engine/battle/effect_commands.asm :3662, :3924, :3989, :4037).  The
+-- primary status commands play the move's own animation instead.
+local SIDE_ANIM = {
+  poison = "PSN_ANIM", burn = "BRN_ANIM", freeze = "FRZ_ANIM", paralysis = "PAR_ANIM",
+}
+
+-- The status lands the way the cart writes it (`setStatus`: a burn's or a
+-- paralysis's penalty on the battle stat as it stands, no rebuild), on the
+-- target's seat's badges.
+local function inflict(out, fighter, mon, status, wire)
+  setStatusOn(mon, fighter, status)
+  statusAnim(out, fighter, SIDE_ANIM[status])
+  local text = nameOf(mon) .. SIDE_TEXT[status]
+  out.messages[#out.messages + 1] = text
+  local fields = fighterFields(fighter)
+  fields.status = wire[status] or SIDE_TOKEN[status]
+  fields.text = text
+  out.events[#out.events + 1] = { kind = "status", fields = fields }
+end
+
+-- CheckMoveTypeMatchesTarget (effect_commands.asm:5909-5945, pokegold the
+-- same): the move's type against both of the target's, "unless the move is
+-- Normal (Tri Attack)" -- a NORMAL move never matches.  `normalType` is
+-- NORMAL's chart index off the ruleset's typeIds; a fight that names no types
+-- compares the indices alone, which every burn and freeze move on the carts
+-- (none of them Normal) answers the same way.
+local function moveTypeMatchesTarget(targetMon, moveType, normalType)
+  if moveType == nil then return false end
+  if normalType ~= nil and moveType == normalType then return false end
+  return hasType(targetMon, moveType)
+end
+
+-- The status commands, one function each because TRI ATTACK's
+-- `tristatuschance` jumps into whichever its byte names.  `s` is the side
+-- state applySide builds: target, fighter, wire, behindSub, moveType,
+-- normalType, poisonType, safeguard (the target's side has SAFEGUARD up:
+-- SafeCheckSafeguard, the last check before each status lands).  Each
+-- command also asks the target's HELD_PREVENT_* item (Items.prevents) just
+-- ahead of wEffectFailed, as the cart orders it; all of these stop silently.
+
+-- BattleCommand_PoisonTarget (:3668-3700; Twineedle's `poisontarget` after
+-- its loop is the same command): a substitute, any status, a POISON-type
+-- target (CheckIfTargetIsPoisonType -- POISON alone, so a STEEL type a
+-- non-Poison move reaches, Twineedle's BUG, is poisoned), HELD_PREVENT_POISON,
+-- wEffectFailed, then Safeguard.
+local function poisonTarget(out, s, hit)
+  if s.behindSub or M.hasMajorStatus(s.target) then return end
+  if hasType(s.target, s.poisonType) then return end
+  if Items.prevents(s.target, "poison") then return end
+  if not hit or s.safeguard then return end
+  out.proc = true
+  inflict(out, s.fighter, s.target, "poison", s.wire)
+end
+
+-- BattleCommand_BurnTarget (:3930-3968): a substitute returns; a target
+-- with any status jumps to Defrost (:3969-3993) BEFORE wEffectFailed is
+-- read, so a frozen target is thawed by every burn-family hit that reaches
+-- the command, its chance byte landed or not ("<TARGET> was defrosted!"),
+-- and any other status ends it there; then a target sharing the move's type
+-- (CheckMoveTypeMatchesTarget: don't burn a Fire type), HELD_PREVENT_BURN,
+-- wEffectFailed, then Safeguard.  Defrost writes the status byte with no
+-- rebuild (`setStatus`).
+local function burnTarget(out, s, hit)
+  if s.behindSub then return end
+  local targetMon = s.target
+  if M.hasMajorStatus(targetMon) then
+    if targetMon.status == "freeze" then
+      setStatusOn(targetMon, s.fighter, nil)
+      targetMon.statusTurns = 0
+      -- DefrostedOpponentText.
+      local text = nameOf(targetMon) .. "\nwas defrosted!"
+      out.messages[#out.messages + 1] = text
+      -- No token: a `status` event without one is a cure (events.lua).
+      local fields = fighterFields(s.fighter)
+      fields.text = text
+      out.events[#out.events + 1] = { kind = "status", fields = fields }
+      out.proc = true
+    end
+    return
+  end
+  if moveTypeMatchesTarget(targetMon, s.moveType, s.normalType) then return end
+  if Items.prevents(targetMon, "burn") then return end
+  if not hit or s.safeguard then return end
+  out.proc = true
+  inflict(out, s.fighter, targetMon, "burn", s.wire)
+end
+
+-- BattleCommand_FreezeTarget (:3994-4044): a substitute, any status, the
+-- sun (`cp WEATHER_SUN / ret z`: nothing freezes under SUNNY DAY -- `s.sunny`),
+-- a target sharing the move's type (don't freeze an Ice type),
+-- HELD_PREVENT_FREEZE, wEffectFailed, then Safeguard.  What a landed freeze
+-- does after its berry check -- OpponentCantMove, EndRechargeOpp and
+-- wEnemyJustGotFrozen -- is Turn's `_applySide`, which asks the berry.
+local function freezeTarget(out, s, hit)
+  if s.behindSub or M.hasMajorStatus(s.target) then return end
+  if s.sunny then return end
+  if moveTypeMatchesTarget(s.target, s.moveType, s.normalType) then return end
+  if Items.prevents(s.target, "freeze") then return end
+  if not hit or s.safeguard then return end
+  out.proc = true
+  inflict(out, s.fighter, s.target, "freeze", s.wire)
+end
+
+-- BattleCommand_ParalyzeTarget (:4045-4078): a substitute, any status,
+-- HELD_PREVENT_PARALYZE, wEffectFailed, then Safeguard.  No type check at all
+-- -- an ELECTRIC move paralyses an Electric type and a NORMAL one a Normal
+-- type on both carts.
+local function paralyzeTarget(out, s, hit)
+  if s.behindSub or M.hasMajorStatus(s.target) then return end
+  if Items.prevents(s.target, "paralysis") then return end
+  if not hit or s.safeguard then return end
+  out.proc = true
+  inflict(out, s.fighter, s.target, "paralysis", s.wire)
+end
+
+-- Guard on TRI ATTACK's `.loop`, which redraws a byte whose bits 4-5 are 0;
+-- the same count Turn.REDRAW_LIMIT holds the cart's other loops to, and the
+-- same in both runtimes.  Won in a handful of draws; the guard only keeps the
+-- referee from trusting that.
+M.REDRAW_LIMIT = 1024
+
+-- BattleCommand_TriStatusChance (:4730-4746): its own `effectchance` (the
+-- script has none after `checkhit`), then `.loop` -- BattleRandom, `swap a`,
+-- `and %11`, 0 drawn again -- WHATEVER effectchance said, a substitute
+-- standing or not: 1 is ParalyzeTarget, 2 FreezeTarget, 3 BurnTarget, each
+-- with its own checks and wEffectFailed.  So a frozen target is thawed when
+-- the loop lands on BurnTarget, its chance byte failed or not, and a Normal
+-- TRI ATTACK freezes an Ice type (CheckMoveTypeMatchesTarget's exemption).
+local function triStatusChance(out, s, rng, chance)
+  local hit = M.effectChance(rng, chance, s.behindSub)
+  local pick = 0
+  for _ = 1, M.REDRAW_LIMIT do
+    pick = floor((rng and rng:byte() or 0) / 16) % 4
+    if pick ~= 0 then break end
+  end
+  if pick == 0 then pick = 1 end
+  if pick == 1 then
+    paralyzeTarget(out, s, hit)
+  elseif pick == 2 then
+    freezeTarget(out, s, hit)
+  else
+    burnTarget(out, s, hit)
+  end
+end
+
+-- RaiseStat (:4142-4231) for the *UpHit side effects: wEffectFailed (the
+-- script's `effectchance`), a stage already at +6 (`.cant_raise_stat`), and
+-- -- for a stat that is not accuracy or evasion -- the battle stat already at
+-- MAX_STAT_VALUE (`.stats_already_max`, the stage put back) all fail it, and
+-- silently: these scripts carry `statupmessage`, which speaks only when
+-- wFailedMessage is 0, and no fail text.  The battle stat is the one in
+-- wBattleMonStats (`storedStat`, with the seat's badges).  Returns whether the
+-- stage moved.
+local function raiseSideStat(out, fighter, mon, stat, hit, badges)
+  if not hit then return false end
+  local before = M.clampStage(mon.stages[stat])
+  if before >= M.STAGE_MAX then return false end
+  if stat ~= "acc" and stat ~= "eva"
+     and M.storedStat(mon, stat, badges) >= M.MAX_STAT_VALUE then
+    return false
+  end
+  return applyStatChange(out, fighter, mon, stat, 1)
+end
+
+-- The secondary effect of a damaging hit, run where every *Hit script runs it:
+-- after `checkfaint` (the caller never asks for a target the hit knocked out)
+-- and `buildopponentrage`, whether the hit reached the HP or a substitute took
+-- it -- `checkfaint` reads the monster's HP, not the doll's, so a hit into a
+-- substitute goes on to the effect command, and each routine asks about the
+-- substitute itself (CheckSubstituteOpp: the one standing NOW, so a hit that
+-- broke it is past it).
+--
+-- ctx: effectId, hit, rng, targetMon, targetFighter, userMon, userFighter,
+--      userBadges (the user's seat badges, for RaiseStat's 999 test),
+--      statusToWire, moveType (the move's chart index), poisonType /
+--      normalType (POISON's and NORMAL's chart indices off the ruleset's
+--      typeIds, nil when it names none), computerMover (the move is the
+--      computer's: BattleCommand_StatDown's extra miss), chance (the move's
+--      percent: TRI ATTACK's and DEFENSE_DOWN_HIT's own bytes, and the byte
+--      drawn here when `hit` is absent).
+-- Returns { proc, messages, events }.  `hit` is BattleCommand_EffectChance's
+-- verdict, drawn by the caller where the script's `effectchance` stands --
+-- false when a substitute stood at it (CheckSubstituteOpp, before the byte);
+-- absent, the byte is drawn here first.  `rng` is also the computer's
+-- stat-down byte, the confusion side effect's turn count and TRI ATTACK's
+-- loop.  Each routine below runs in pokecrystal's order (engine/battle/
+-- effect_commands.asm, diffed against pokegold), HELD_PREVENT_* (no item on
+-- either cart carries one, data/items/attributes.asm, but the rule is keyed
+-- on the token) and SafeCheckSafeguard (`targetSafeguard`: the target's side
+-- has SAFEGUARD up) included, FreezeTarget's WEATHER_SUN return (`sunny`,
+-- wave 3) and FlinchTarget's CheckOpponentWentFirst (`targetWentFirst`).
 function M.applySide(ctx)
   ctx = ctx or {}
   local out = { proc = false, messages = {}, events = {} }
   local effectId = int(ctx.effectId, 0)
-  local chance = int(ctx.chance, 0)
   local rng = ctx.rng
   local targetMon = ctx.targetMon
   local targetFighter = ctx.targetFighter
-  local wire = ctx.statusToWire or {}
+  if type(targetMon) ~= "table" then return out end
+  local behindSub = int(targetMon.substitute, 0) > 0
+  local s = {
+    target = targetMon, fighter = targetFighter, wire = ctx.statusToWire or {},
+    behindSub = behindSub, moveType = int(ctx.moveType, nil),
+    normalType = ctx.normalType, poisonType = ctx.poisonType,
+    safeguard = ctx.targetSafeguard == true, sunny = ctx.sunny == true,
+  }
 
-  if not M.sideChanceProc(rng, chance) then return out end
-  out.proc = true
-
-  if effectId == 2 or effectId == 33 or effectId == 77 then -- poison / twineedle
-    if M.hasMajorStatus(targetMon) then return out end
-    targetMon.status = "poison"
-    local token = wire.poison or "PSN"
-    local text = targetMon.species .. " was poisoned"
-    out.messages[#out.messages + 1] = text
-    local fields = fighterFields(targetFighter)
-    fields.status = token
-    fields.text = text
-    out.events[#out.events + 1] = { kind = "status", fields = fields }
+  if effectId == M.TRI_ATTACK then
+    triStatusChance(out, s, rng, ctx.chance)
     return out
   end
 
-  if effectId == 4 or effectId == 34 then -- burn
-    if M.hasMajorStatus(targetMon) then return out end
-    targetMon.status = "burn"
-    local token = wire.burn or "BRN"
-    local text = targetMon.species .. " was burned"
-    out.messages[#out.messages + 1] = text
-    local fields = fighterFields(targetFighter)
-    fields.status = token
-    fields.text = text
-    out.events[#out.events + 1] = { kind = "status", fields = fields }
-    return out
-  end
+  local hit = ctx.hit
+  if hit == nil then hit = M.effectChance(rng, ctx.chance, behindSub) end
 
-  if effectId == 5 or effectId == 35 then -- freeze
-    if M.hasMajorStatus(targetMon) then return out end
-    targetMon.status = "freeze"
-    local token = wire.freeze or "FRZ"
-    local text = targetMon.species .. " was frozen solid"
-    out.messages[#out.messages + 1] = text
-    local fields = fighterFields(targetFighter)
-    fields.status = token
-    fields.text = text
-    out.events[#out.events + 1] = { kind = "status", fields = fields }
-    return out
-  end
+  if SIDE_POISON[effectId] then poisonTarget(out, s, hit); return out end
+  if SIDE_BURN[effectId] then burnTarget(out, s, hit); return out end
+  if SIDE_FREEZE[effectId] then freezeTarget(out, s, hit); return out end
+  if SIDE_PARALYZE[effectId] then paralyzeTarget(out, s, hit); return out end
 
-  if effectId == 6 or effectId == 36 then -- paralysis
-    if M.hasMajorStatus(targetMon) then return out end
-    targetMon.status = "paralysis"
-    local token = wire.paralysis or "PAR"
-    local text = targetMon.species .. " is paralyzed"
-    out.messages[#out.messages + 1] = text
-    local fields = fighterFields(targetFighter)
-    fields.status = token
-    fields.text = text
-    out.events[#out.events + 1] = { kind = "status", fields = fields }
-    return out
-  end
-
-  if effectId == 31 or effectId == 37 then -- flinch
+  -- BattleCommand_FlinchTarget (:5357-5374): a substitute, then a sleeping or
+  -- frozen target (`and 1 << FRZ | SLP_MASK / ret nz`), then
+  -- CheckOpponentWentFirst -- a target that already moved this turn
+  -- (`targetWentFirst`, Turn `_wentFirst`) is not flinched -- then
+  -- wEffectFailed, and FlinchTarget: SUBSTATUS_FLINCHED and EndRechargeOpp, so
+  -- a target that owes a recharge loses its turn to "flinched" (CheckTurn's
+  -- flinch, its gates run) instead of "must recharge" (R2b's finding (i)).
+  -- STOMP, TWISTER, SNORE and SKY ATTACK end in this same command.
+  if SIDE_FLINCH[effectId] then
+    if behindSub then return out end
+    if targetMon.status == "sleep" or targetMon.status == "freeze" then return out end
+    if ctx.targetWentFirst then return out end
+    if not hit then return out end
+    out.proc = true
     targetMon.flinch = true
+    targetMon.mustRecharge = false
     return out
   end
 
+  -- BattleCommand_StatDown, the routine the primary moves share
+  -- (statDownGate: Mist, -6, the computer's byte -- not for ACCURACY_DOWN_HIT),
+  -- then `.DidntMiss`: a substitute, wEffectFailed and CheckHiddenOpponent,
+  -- each `.Failed`, and TryLowerStat's floor at a battle stat of 1
+  -- (`.CouldntLower`).  A *Hit script has no `statdownfailtext` and
+  -- `statdownmessage` speaks only when wFailedMessage is 0, so every one of
+  -- those fails silently -- no "But it failed!", no "won't drop anymore".
+  --
+  -- DefenseDownHit runs a SECOND `effectchance` between `buildopponentrage`
+  -- and `defensedown` (pokecrystal docs/bugs_and_glitches.md, "Moves that
+  -- lower Defense can do so after breaking a Substitute"): its byte is drawn
+  -- here, against the substitute standing now -- so a hit that broke the doll
+  -- draws it, and the drop can land -- and it is that verdict StatDown reads.
+  --
+  -- Every one of those failures -- `.Mist`, `.CantLower`, `.Failed` (a missed
+  -- effect chance included), `.CouldntLower` -- sets wAttackMissed
+  -- (`out.missed`): what the computer's X item reads next turn (Turn).
   local stat = SIDE_STAT_DOWN[effectId]
   if stat then
+    if effectId == 69 then hit = M.effectChance(rng, ctx.chance, behindSub) end
+    out.missed = true
+    if M.statDownGate(rng, targetMon, stat, ctx.computerMover == true, effectId,
+                      targetMon.lockOn == true) then
+      return out
+    end
+    if behindSub or not hit or targetMon.invulnerable then return out end
+    if statAtFloor(targetMon, stat, targetFighter and targetFighter.badges or nil) then
+      return out
+    end
+    out.missed = nil
+    out.proc = true
     applyStatChange(out, targetFighter, targetMon, stat, -1)
     return out
   end
 
-  if effectId == 76 then -- confusion side
+  -- The *UpHit scripts' `attackup` / `defenseup` / `allstatsup` on the user
+  -- (raiseSideStat; AllStatsUp's ResetMiss lets each of the five fail alone).
+  -- RaiseStat's `.cant_raise_stat` / `.stats_already_max` set wAttackMissed
+  -- (`out.missed`); a missed effect chance is `.stat_raise_failed`, which
+  -- writes none; AllStatsUp's ResetMiss before each leaves the last one's.
+  local ups = SIDE_STAT_UP[effectId]
+  if ups then
+    local userMon = ctx.userMon
+    if type(userMon) ~= "table" then return out end
+    for _, key in ipairs(ups) do
+      local raised = raiseSideStat(out, ctx.userFighter, userMon, key, hit, ctx.userBadges)
+      if raised then out.proc = true end
+      out.missed = (hit and not raised) or nil
+    end
+    return out
+  end
+
+  -- BattleCommand_ConfuseTarget (:5732-5749): HELD_PREVENT_CONFUSE,
+  -- wEffectFailed, Safeguard, a substitute, then a target already confused,
+  -- all before FinishConfusingTarget draws the 2-5 turn byte.
+  if effectId == 76 then
+    if Items.prevents(targetMon, "confusion") then return out end
+    if not hit or s.safeguard or behindSub then return out end
+    if targetMon.confusion and targetMon.confusion > 0 then return out end
+    out.proc = true
     confuse(out, targetFighter, targetMon, rng, false)
     return out
   end
 
-  out.proc = false
   return out
 end
 
@@ -879,25 +2784,75 @@ end
 -- Phase 3 multi-hit, fixed damage, drain, recoil
 -- ------------------------------------------------------------------
 
-local MULTIHIT = { [29] = true, [44] = true, [77] = true }
-local FIXED_DAMAGE = { [38] = true, [40] = true, [41] = true }
+-- The looping scripts that hit through `startloop` / `endloop` -- MultiHit,
+-- DoubleHit, PoisonMultiHit and (wave 3) TripleKick -- every hit its own
+-- `critical` and `damagevariation`.  BeatUp loops too, over its party, and is
+-- Turn's own (`_beatUp`).
+local MULTIHIT = { [29] = true, [44] = true, [77] = true, [112] = true }
+-- The ConstantDamage scripts (SuperFang / StaticDamage / Psywave, the
+-- LEVEL_DAMAGE row sharing them): `constantdamage`, `checkhit`,
+-- `resettypematchup` -- no `critical`, no `damagevariation` (R2b's finding
+-- (g)).  REVERSAL runs `constantdamage` too but into DamageCalc and `stab`;
+-- Turn runs it apart.
+local FIXED_DAMAGE = { [38] = true, [40] = true, [41] = true, [131] = true, [132] = true }
 local DRAIN = { [3] = true, [8] = true }
 local RECOIL = { [48] = true }
+
+-- The damaging scripts whose `checkhit` comes before `critical` and
+-- `damagevariation` (data/moves/effects.asm): Rampage (THRASH), TrapTarget
+-- and Present -- the looping scripts too (`isMultihit`, BEAT UP).
+M.HIT_FIRST = { [27] = true, [42] = true, [111] = true }
+-- ...and the ones whose `critical` comes before `checkhit` but whose
+-- `damagevariation` comes after it: Rage, FuryCutter, Rollout, Thunder.
+M.ROLL_AFTER_CHECKHIT = { [81] = true, [97] = true, [113] = true, [114] = true }
+-- RolloutPower's MAX_ROLLOUT_COUNT.
+M.ROLLOUT_MAX = 5
 
 function M.isMultihit(effectId)
   return MULTIHIT[int(effectId, 0)] == true
 end
 
--- Draws one RNG byte for TWO_TO_FIVE (29) only; fixed counts otherwise.
-function M.hitCount(effectId, rng)
+-- The hits a script is known to run before its loop starts: DoubleHit and
+-- PoisonMultiHit (TWINEEDLE) two (`.double_hit` / `.twineedle`: `ld a, 1`,
+-- one more pass), every other script one.  MultiHit's count is not known yet
+-- -- BattleCommand_EndLoop draws it after the first hit (`multiHitCount`) --
+-- so it starts at one too.  Draws nothing.
+function M.fixedHits(effectId)
   effectId = int(effectId, 0)
   if effectId == 44 or effectId == 77 then return 2 end
-  if effectId == 29 then return 2 + (rng and rng:byte() or 0) % 4 end
+  return 1
+end
+
+-- BattleCommand_EndLoop's first pass for EFFECT_MULTI_HIT (pokecrystal
+-- engine/battle/effect_commands.asm:5271-5284, pokegold the same), drawn
+-- after the first hit's `checkfaint` / `buildopponentrage` (a first hit that
+-- knocked the target out ended the move before it): BattleRandom & 3 stands
+-- when under 2, otherwise a second BattleRandom & 3 replaces it, and the move
+-- hits that + 2 times in all -- 2 and 3 at 3/8 each, 4 and 5 at 1/8.
+function M.multiHitCount(rng)
+  local a = (rng and rng:byte() or 0) % 4
+  if a >= 2 then a = (rng and rng:byte() or 0) % 4 end
+  return a + 2
+end
+
+-- EndLoop's `.reject_triple_kick_sample` for TRIPLE KICK, drawn after its
+-- first kick the same way: BattleRandom & 3, drawn again on 0 -- the kicks in
+-- all, 1, 2 or 3 alike (`dec a / jr nz, .double_hit`; 1 is `.done_loop`).
+function M.tripleKickCount(rng)
+  for _ = 1, M.REDRAW_LIMIT do
+    local a = (rng and rng:byte() or 0) % 4
+    if a ~= 0 then return a end
+  end
   return 1
 end
 
 function M.isFixedDamage(effectId)
   return FIXED_DAMAGE[int(effectId, 0)] == true
+end
+
+-- EFFECT_OHKO: BattleCommand_OHKO, its own accuracy and $ffff (Turn).
+function M.isOhko(effectId)
+  return int(effectId, 0) == 38
 end
 
 function M.isDrain(effectId)
@@ -912,27 +2867,58 @@ function M.drainAmount(damage)
   return floor(max(0, int(damage, 0)) / 2)
 end
 
+-- BattleCommand_Recoil (effect_commands.asm:5670-5730): a quarter of
+-- wCurDamage, at least 1.  wCurDamage after `applydamage` is the HP the hit
+-- took -- the HP left when it was lethal (DoEnemyDamage's underflow) -- and 0
+-- when a substitute took it (DoSubstituteDamage ends in ResetDamage), so a
+-- recoil move that hits a doll costs its user exactly 1.
 function M.recoilAmount(damage)
   return max(1, floor(max(0, int(damage, 0)) / 4))
 end
 
--- ctx: effectId, userMon, targetMon, power, userSpeed, foeSpeed
--- Returns fixed damage, or nil when the effect fails (OHKO speed gate).
+-- BattleCommand_PayDay (move_effects/pay_day.asm): the user's level, `add a`
+-- -- doubled in a byte, its carry lost to the `add [hl]` after it -- added to
+-- the one wPayDayMoney the fight keeps, whoever's turn it is.
+function M.payDayCoins(level)
+  return (max(0, int(level, 0)) * 2) % 256
+end
+
+-- ctx: effectId, userMon, targetMon, power, rng
+-- Returns fixed damage, or nil when the effect fails.  EFFECT_OHKO is not
+-- here: Gold's is BattleCommand_OHKO -- a level gate and a raised accuracy,
+-- not Red's Speed test -- and Turn resolves it whole (`isOhko`).
+--
+-- BattleCommand_ConstantDamage (effect_commands.asm:3133-3240): SUPER FANG
+-- halves the target's HP (`srl` / `rr` over the 16-bit HP, 1 when that is 0);
+-- LEVEL_DAMAGE (SEISMIC TOSS, NIGHT SHADE) is the user's level; PSYWAVE's
+-- `.psywave_loop` draws BattleRandom until it is neither 0 nor at or past
+-- level + level / 2 (a byte add) -- the only draws these scripts make; every
+-- other (STATIC_DAMAGE: SONICBOOM, DRAGON RAGE) is the move's power.
 function M.fixedDamage(ctx)
   ctx = ctx or {}
   local effectId = int(ctx.effectId, 0)
   local userMon = ctx.userMon
   local targetMon = ctx.targetMon
   local movePower = int(ctx.power, 0)
-  local userSpeed = int(ctx.userSpeed, 0)
-  local foeSpeed = int(ctx.foeSpeed, 0)
 
-  if effectId == 38 then
-    if userSpeed <= foeSpeed then return nil end
-    return max(1, int(targetMon.hp, 0))
-  end
   if effectId == 40 then
     return max(1, floor(int(targetMon.hp, 0) / 2))
+  end
+  if effectId == M.LEVEL_DAMAGE then
+    return max(0, int(userMon.level, 1)) % 256
+  end
+  if effectId == M.PSYWAVE then
+    local level = max(0, int(userMon.level, 1)) % 256
+    local cap = (level + floor(level / 2)) % 256
+    -- A cap of 0 or 1 has no byte in range: the cart's loop never ends (a
+    -- level-0 or level-1 user).  Freezes are never kept -- the guard ends it
+    -- at the smallest damage the loop could give.
+    for _ = 1, M.REDRAW_LIMIT do
+      local r = ctx.rng and ctx.rng:byte() or 1
+      if r ~= 0 and r < cap then return r end
+      if cap <= 1 then break end
+    end
+    return 1
   end
   if effectId == 41 then
     if movePower >= 1 then return movePower end
@@ -942,12 +2928,211 @@ function M.fixedDamage(ctx)
 end
 
 -- ------------------------------------------------------------------
+-- the Gold-only damage formulas (wave 3, R2c)
+-- ------------------------------------------------------------------
+
+-- BASE_HAPPINESS (constants/pokemon_data_constants.asm): what LoadEnemyMon
+-- gives every wild and trainer monster, and what a sheet that states no
+-- `happiness` (contract K14) reads as.
+M.BASE_HAPPINESS = 70
+
+-- BattleCommand_HappinessPower / FrustrationPower (move_effects/return.asm,
+-- frustration.asm): happiness (or 255 - happiness) x 10 / 25, the quotient's
+-- low byte -- 0 at the extremes (docs/bugs_and_glitches.md, "Return and
+-- Frustration deal no damage when the user's happiness is low or high").
+function M.happinessPower(happiness)
+  local h = max(0, min(255, int(happiness, M.BASE_HAPPINESS)))
+  return floor(h * 10 / 25) % 256
+end
+function M.frustrationPower(happiness)
+  local h = max(0, min(255, int(happiness, M.BASE_HAPPINESS)))
+  return floor((255 - h) * 10 / 25) % 256
+end
+
+-- HiddenPowerDamage's types (engine/battle/hidden_power.asm): (Atk DV & 3) << 2
+-- | (Def DV & 3), plus 1 to skip NORMAL, then past BIRD and the unused types --
+-- FIGHTING .. STEEL, then FIRE .. DARK -- as the registry ids a ruleset's
+-- `typeIds` names them by.
+M.HIDDEN_POWER_TYPES = {
+  "FIGHTING", "FLYING", "POISON", "GROUND", "ROCK", "BUG", "GHOST", "STEEL",
+  "FIRE", "WATER", "GRASS", "ELECTRIC", "PSYCHIC_TYPE", "ICE", "DRAGON", "DARK",
+}
+
+-- The power and the type name HiddenPowerDamage computes from the four DVs
+-- (K7 `dvs`, 0..15 each): the top bit of Atk, Def, Speed and Special as a
+-- nibble, x 5, plus Special & 3, halved, plus 31 -- 31..70.  nil without DVs.
+function M.hiddenPower(dvs)
+  if type(dvs) ~= "table" then return nil end
+  local atk, def = max(0, int(dvs.atk, 0)) % 16, max(0, int(dvs.def, 0)) % 16
+  local spe, spc = max(0, int(dvs.spe, 0)) % 16, max(0, int(dvs.spc, 0)) % 16
+  local top = floor(atk / 8) * 8 + floor(def / 8) * 4 + floor(spe / 8) * 2 + floor(spc / 8)
+  local power = floor((top * 5 + spc % 4) / 2) + 31
+  local index = (atk % 4) * 4 + def % 4
+  return power, M.HIDDEN_POWER_TYPES[index + 1]
+end
+
+-- FlailReversalPower (data/moves/flail_reversal_power.asm), HP_BAR_LENGTH_PX
+-- 48: the HP-bar pixels at or under each row's, and the power it gives.
+M.REVERSAL_POWER = {
+  { 1, 200 }, { 4, 150 }, { 9, 100 }, { 16, 80 }, { 32, 40 }, { 48, 20 },
+}
+
+-- ConstantDamage's `.reversal`: the user's HP x 48 over its max HP -- with a
+-- max HP past a byte both sides shifted right twice first (the divisor's low
+-- byte, the product's low word; a 0 divisor, which the cart divides by and no
+-- 999-HP monster reaches, is read as 1) -- the quotient's low byte, then the
+-- first FlailReversalPower row at or past it.
+function M.reversalPower(hp, maxHp)
+  local h = max(0, int(hp, 0)) % 65536
+  local m = max(1, int(maxHp, 1)) % 65536
+  local product = h * 48
+  local q
+  if m < 256 then
+    q = floor(product / max(1, m))
+  else
+    local divisor = floor(m / 4) % 256
+    if divisor == 0 then divisor = 1 end
+    local dividend = floor(product / 65536) * 65536 + floor((product % 65536) / 4)
+    q = floor(dividend / divisor)
+  end
+  q = q % 256
+  for _, row in ipairs(M.REVERSAL_POWER) do
+    if row[1] >= q then return row[2] end
+  end
+  return M.REVERSAL_POWER[#M.REVERSAL_POWER][2]
+end
+
+-- MagnitudePower (data/moves/magnitude_power.asm): the first row whose byte is
+-- at or past BattleRandom's -- `5 percent + 1` .. `100 percent` -- gives the
+-- power and the magnitude its line names.
+M.MAGNITUDE_ROWS = {
+  { 13, 10, 4 }, { 38, 30, 5 }, { 89, 50, 6 }, { 166, 70, 7 },
+  { 217, 90, 8 }, { 242, 110, 9 }, { 255, 150, 10 },
+}
+function M.magnitude(byte)
+  local b = max(0, min(255, int(byte, 0)))
+  for _, row in ipairs(M.MAGNITUDE_ROWS) do
+    if row[1] >= b then return row[2], row[3] end
+  end
+  return 150, 10
+end
+
+-- PresentPower (data/moves/present_power.asm): 40 / 80 / 120 at or under
+-- `40 percent` / `70 percent + 1` / `80 percent`, a heal past that (nil).
+M.PRESENT_ROWS = { { 102, 40 }, { 179, 80 }, { 204, 120 } }
+function M.presentPower(byte)
+  local b = max(0, min(255, int(byte, 0)))
+  for _, row in ipairs(M.PRESENT_ROWS) do
+    if row[1] >= b then return row[2] end
+  end
+  return nil
+end
+
+-- The cart's own type constants (constants/type_constants.asm), by the
+-- registry id a ruleset's `typeIds` names them: what Gold's PRESENT hands
+-- DamageCalc as a level and a defense (`present` below) and what CheckTypeMatchup
+-- compares.  A type this table does not name reads as NORMAL's 0.
+M.TYPE_CONSTANTS = {
+  NORMAL = 0, FIGHTING = 1, FLYING = 2, POISON = 3, GROUND = 4, ROCK = 5,
+  BIRD = 6, BUG = 7, GHOST = 8, STEEL = 9, CURSE_TYPE = 19, FIRE = 20,
+  WATER = 21, GRASS = 22, ELECTRIC = 23, PSYCHIC_TYPE = 24, ICE = 25,
+  DRAGON = 26, DARK = 27,
+}
+function M.typeConstant(name)
+  if type(name) ~= "string" then return 0 end
+  return M.TYPE_CONSTANTS[name] or 0
+end
+
+-- ProtectChance (move_effects/protect.asm), after its went-first and
+-- substitute checks: b starts at $ff and halves once per consecutive use
+-- before this one (a b of 0 fails with no draw), then BattleRandom is drawn
+-- again while it is 0 and the use succeeds when (byte - 1) is under b -- the
+-- first use always does, still drawing its byte.
+function M.protectChance(rng, count)
+  local b = 255
+  for _ = 1, max(0, int(count, 0)) do
+    b = floor(b / 2)
+    if b == 0 then return false end
+  end
+  local r = 0
+  for _ = 1, M.REDRAW_LIMIT do
+    r = rng and rng:byte() or 1
+    if r ~= 0 then break end
+  end
+  if r == 0 then r = 1 end
+  return (r - 1) < b
+end
+
+-- BattleCommand_StartRain / StartSun / StartSandstorm: five turns of weather
+-- (wWeatherCount), the count HandleWeather runs down between turns.
+M.WEATHER_TURNS = 5
+M.WEATHER_OF = { [124] = "rain", [125] = "sun", [126] = "sandstorm" }
+
+-- DoWeatherModifiers (engine/battle/misc.asm:49-131, data/battle/
+-- weather_modifiers.asm): the first WeatherTypeModifiers row naming the
+-- weather and the move's type -- WATER x1.5 / FIRE x0.5 in rain, FIRE x1.5 /
+-- WATER x0.5 in sun -- and only when none does, the WeatherMoveModifiers row:
+-- SOLARBEAM x0.5 in rain.  Returns the tenths (15, 5) or nil.  `typeName` is
+-- the move's type registry id (the ruleset's `typeIds`); with none, no type
+-- row can match.
+function M.weatherTenths(weather, typeName, effectId)
+  if weather == "rain" then
+    if typeName == "WATER" then return 15 end
+    if typeName == "FIRE" then return 5 end
+  elseif weather == "sun" then
+    if typeName == "FIRE" then return 15 end
+    if typeName == "WATER" then return 5 end
+  end
+  if weather == "rain" and int(effectId, 0) == M.SOLARBEAM then return 5 end
+  return nil
+end
+
+-- HandleWeather's sandstorm: the types it never hits (`cp ROCK / GROUND /
+-- STEEL` against both of the battle types).
+M.SANDSTORM_IMMUNE = { ROCK = true, GROUND = true, STEEL = true }
+
+-- The weather lines (data/text/battle.asm): the start, the between-turn
+-- continuation and the end, per weather, with their `line` breaks (K18).
+-- The client reads the sky off these very strings (MediatedBattle
+-- weatherOfLine2), so a line and its match never drift apart.
+M.WEATHER_LINES = {
+  rain = { start = "A downpour\nstarted!", continues = "Rain continues to\nfall.",
+           ended = "The rain stopped." },
+  sun = { start = "The sunlight got\nbright!", continues = "The sunlight is\nstrong.",
+          ended = "The sunlight\nfaded." },
+  sandstorm = { start = "A SANDSTORM\nbrewed!", continues = "The SANDSTORM\nrages.",
+                ended = "The SANDSTORM\nsubsided." },
+}
+
+-- BattleCommand_TimeBasedHealContinue (effect_commands.asm:6421-6513): the
+-- heal's row in .Multipliers -- GetEighthMaxHP, GetQuarterMaxHP, GetHalfMaxHP,
+-- GetMaxHP (0..3) -- starts at the half; a time of day that is not the
+-- move's own (MORNING SUN the morning, SYNTHESIS the day, MOONLIGHT the
+-- night; never asked in a link battle -- `timeMatches` true) takes it down
+-- one; then any weather takes it up one, and anything but the sun down two
+-- more.  Returns the HP it restores.
+M.HEAL_TIME = { [128] = "morn", [129] = "day", [130] = "nite" }
+function M.timeHealAmount(maxHp, timeMatches, weather)
+  local c = 2
+  if not timeMatches then c = c - 1 end
+  if weather ~= nil then
+    c = c + 1
+    if weather ~= "sun" then c = c - 2 end
+  end
+  if c <= 0 then return Items.eighth(maxHp) end
+  if c == 1 then return Items.quarter(maxHp) end
+  if c == 2 then return Items.half(maxHp) end
+  return max(0, int(maxHp, 0)) % 65536
+end
+
+-- ------------------------------------------------------------------
 -- Phase 4 multi-turn / charge handlers
 -- ------------------------------------------------------------------
 
 function M.isCharge(effectId)
   local id = int(effectId, 0)
-  return id == 39 or id == 43
+  return id == 39 or id == 43 or id == M.SKY_ATTACK or id == M.SOLARBEAM
+    or id == M.SKULL_BASH
 end
 
 function M.isFly(effectId)
@@ -973,15 +3158,17 @@ function M.vanishes(effectId, moveOrId)
   return M.isFly(effectId) or M.isDigMove(moveOrId)
 end
 
+-- BattleCommand_Charge's lines (data/text/common_2.asm): Text_BattleUser's
+-- "<USER>", then `line` and the move's words (K17 / K18).
 function M.chargeMessage(mon, effectId, moveOrId)
   local key = M.moveKey(moveOrId)
-  local species = (mon and mon.species) or "POKéMON"
-  if key == "DIG" then return species .. " dug a hole" end
-  if key == "SOLARBEAM" then return species .. " took in sunlight" end
-  if key == "SKULL_BASH" then return species .. " lowered its head" end
-  if key == "RAZOR_WIND" then return species .. " made a whirlwind" end
-  if key == "FLY" or M.isFly(effectId) then return species .. " flew up high" end
-  return species .. " is glowing"
+  local species = (mon and mon.species) and nameOf(mon) or "POKéMON"
+  if key == "DIG" then return species .. "\ndug a hole!" end
+  if key == "SOLARBEAM" then return species .. "\ntook in sunlight!" end
+  if key == "SKULL_BASH" then return species .. "\nlowered its head!" end
+  if key == "RAZOR_WIND" then return species .. "\nmade a whirlwind!" end
+  if key == "FLY" or M.isFly(effectId) then return species .. "\nflew up high!" end
+  return species .. "\nis glowing!"
 end
 
 -- CheckHit's .FlyDigMoves (Crystal effect_commands.asm:1713-1746).
@@ -1002,8 +3189,12 @@ function M.isTrapping(effectId)
   return int(effectId, 0) == 42
 end
 
-function M.trapTurns(rng)
-  return 2 + (rng and rng:byte() or 0) % 4
+-- BattleCommand_TrapTarget (effect_commands.asm:5612-5650): BattleRandom & 3,
+-- plus 3 -- the wrap count HandleWrap ticks down at the end of every turn,
+-- the one the trap landed on included, dealing its sixteenth while the count
+-- stays above 0 and releasing at 0: 2..5 turns of residual.
+function M.wrapCount(rng)
+  return 3 + (rng and rng:byte() or 0) % 4
 end
 
 function M.isHyperBeam(effectId)
@@ -1014,24 +3205,93 @@ function M.isThrash(effectId)
   return int(effectId, 0) == 27
 end
 
-function M.thrashTurns(rng)
+-- BattleCommand_Rampage (effect_commands.asm:4923-4945): "Rampage for 1 or 2
+-- more turns", BattleRandom & 1, plus 1 -- the turns after this one.
+function M.rampageTurns(rng)
+  return 1 + (rng and rng:byte() or 0) % 2
+end
+
+-- BattleCommand_CheckRampage's confusion when the count runs out (:4888-
+-- 4921): BattleRandom & 1, plus 2.
+function M.rampageConfusion(rng)
   return 2 + (rng and rng:byte() or 0) % 2
 end
+
+-- BattleCommand_Defrost (:6311-6339), FLAME WHEEL's and SACRED FIRE's
+-- `defrost` after the hit: a frozen user thaws.  CheckTurn lets the two
+-- through a freeze by move id (`cp FLAME_WHEEL / cp SACRED_FIRE`,
+-- :195-202) -- FREEZE_BYPASS.
+M.DEFROSTS_USER = { [92] = true, [93] = true }
+M.FREEZE_BYPASS = { FLAME_WHEEL = true, SACRED_FIRE = true }
+
+-- The damage doublings the scripts run after `damagevariation`, each a 16-bit
+-- shift that pins a carry at $ffff (DoubleDamage, :5962-5987;
+-- BattleCommand_DoubleMinimizeDamage, :6515-6531): TWISTER and GUST
+-- (`doubleflyingdamage`) against a target in the sky, EARTHQUAKE
+-- (`doubleundergrounddamage`) against one underground, STOMP
+-- (`doubleminimizedamage`) against one that used MINIMIZE.
+M.DOUBLE_VS_FLYING = { [95] = true, [99] = true }
+-- ...and MAGNITUDE's `doubleundergrounddamage` after its `checkhit` (wave 3).
+M.DOUBLE_VS_UNDERGROUND = { [100] = true, [110] = true }
+M.DOUBLE_VS_MINIMIZED = { [94] = true }
 
 function M.isRage(effectId)
   return int(effectId, 0) == 81
 end
 
--- Gen1: Reflect halves physical, Light Screen halves special.  `isSpecial`
--- comes from Effects.isSpecialType(move.type, battle.specialTypes).
-function M.screenDamage(damage, defender, isSpecial)
-  local d = max(0, int(damage, 0))
-  if isSpecial then
-    if defender.lightScreen then d = floor(d / 2) end
-  else
-    if defender.reflect then d = floor(d / 2) end
+-- ------------------------------------------------------------------
+-- move priority
+-- ------------------------------------------------------------------
+--
+-- GetMovePriority (pokecrystal engine/battle/core.asm:829-850): Vital Throw
+-- answers 0 by its move id, every other move by its effect's row in
+-- data/moves/effects_priorities.asm, and a move with no row is BASE_PRIORITY
+-- (constants/battle_constants.asm: 1).  DetermineMoveOrder compares the two
+-- numbers before anything else (CompareMovePriority), so a higher one moves
+-- first whatever the Speed.
+--
+-- The cart keys the table by effect; this keys it by the move ids that carry
+-- those effects (data/moves/moves.asm), because none of the five effects has
+-- an id in this file's table -- a Gold sheet names EFFECT_PROTECT /
+-- EFFECT_ENDURE / EFFECT_PRIORITY_HIT / EFFECT_COUNTER / EFFECT_MIRROR_COAT
+-- as effect 0 (GEN2_EFFECT_ID above), and EFFECT_FORCE_SWITCH shares 28 with
+-- Gen 1's Teleport row.  The selected move's id is what is read, as the cart
+-- reads wCurPlayerMove: Metronome and Mirror Move move at base priority
+-- whatever they call.
+M.BASE_PRIORITY = 1
+M.MOVE_PRIORITY = {
+  PROTECT = 3, DETECT = 3,                            -- EFFECT_PROTECT, 3
+  ENDURE = 3,                                         -- EFFECT_ENDURE, 3
+  QUICK_ATTACK = 2, MACH_PUNCH = 2, EXTREMESPEED = 2, -- EFFECT_PRIORITY_HIT, 2
+  WHIRLWIND = 0, ROAR = 0,                            -- EFFECT_FORCE_SWITCH, 0
+  COUNTER = 0,                                        -- EFFECT_COUNTER, 0
+  MIRROR_COAT = 0,                                    -- EFFECT_MIRROR_COAT, 0
+  VITAL_THROW = 0,                                    -- `cp VITAL_THROW / ld a, 0`
+}
+
+-- From wave 3 four of those effects have ids of their own, so a sheet that
+-- states no `priority` is ordered by them as the cart orders by the effect
+-- (data/moves/effects_priorities.asm): PROTECT / ENDURE 3, COUNTER / MIRROR
+-- COAT 0 -- after VITAL THROW's move-id row, which the cart asks first.
+M.EFFECT_PRIORITY = { [120] = 3, [121] = 3, [122] = 0, [123] = 0 }
+
+-- The priority bracket of a move (a move record or its id).  A record's own
+-- `priority` (contract K8: the cart's raw GetMovePriority number, 0..255,
+-- which the client stamps from the move's effect -- or a content mod's move
+-- states) wins over the table, so a modded move with a priority effect moves
+-- in its bracket; the tables answer for a sheet that states none.
+function M.movePriority(moveOrId)
+  if type(moveOrId) == "table" and type(moveOrId.priority) == "number" then
+    return moveOrId.priority
   end
-  return d
+  local key = M.moveKey(moveOrId)
+  if key ~= "VITAL_THROW" and type(moveOrId) == "table" then
+    local byEffect = M.EFFECT_PRIORITY[int(moveOrId.effect, -1)]
+    if byEffect ~= nil then return byEffect end
+  end
+  local priority = M.MOVE_PRIORITY[key]
+  if priority == nil then return M.BASE_PRIORITY end
+  return priority
 end
 
 -- Gen1 category is type-based (Fire/Water/…/Dragon → Special; else Physical).
@@ -1043,7 +3303,7 @@ function M.isSpecialType(typeId, specialTypes)
 end
 
 -- Hand-authored Gen1 battle items (public heal amounts / X-item stages).
--- Unknown ids return nil; Turn announces "But it failed" and still spends the
+-- Unknown ids return nil; Turn announces "But it failed!" and still spends the
 -- turn (no silent soft-stall on junk ids). Hub bag proofs (PROTOCOL 15) refuse
 -- / debit against the uploaded sheet; clients still debit save.inventory.
 local ITEM_STATUS = {
@@ -1093,7 +3353,7 @@ local ITEM_HEAL = {
   BERRY = 10, BERRY_JUICE = 20,
 }
 
--- Deliberately absent from itemEffect (unknown → "But it failed", still spend
+-- Deliberately absent from itemEffect (unknown → "But it failed!", still spend
 -- the turn; bag upload also omits them via itemIsBattleUsable):
 --   PP_UP / PP_UP_2, evolutionary stones, RARE_CANDY, HM/TM,
 --   Repel / Super Repel / Max Repel, Escape Rope, and other field-only ids.
@@ -1238,65 +3498,238 @@ function M.caughtSheet(mon)
   return out
 end
 
--- Gen1 ItemUseBall factors (engine/items/item_effects.asm). Public constants.
-local BALL_DEFS = {
-  MASTER_BALL = { autoCatch = true },
-  POKE_BALL   = { randMax = 255, hpFactor = 12, wobbleFactor = 255 },
-  GREAT_BALL  = { randMax = 200, hpFactor = 8,  wobbleFactor = 200 },
-  ULTRA_BALL  = { randMax = 150, hpFactor = 12, wobbleFactor = 150 },
-  SAFARI_BALL = { randMax = 150, hpFactor = 12, wobbleFactor = 150 },
-}
-local BALL_DEFAULT = { randMax = 255, hpFactor = 12, wobbleFactor = 150 }
+-- PokeBallEffect (pokegold engine/items/item_effects.asm:212-480,
+-- pokecrystal the same), from the review fixes (FX-R2) -- the referee used to
+-- run pokered's ItemUseBall here.  In order:
+--
+--   1. a MASTER BALL catches with no draw (`.catch_without_fail`);
+--   2. BallMultiplierFunctionTable on the species' catch rate (`ballRate`);
+--   3. unless a LEVEL BALL (`jp z, .skip_hp_calc`): the HP formula
+--      (3*MaxHP - 2*HP) * rate / (3*MaxHP) with the cart's bytes
+--      (`catchHpRate`), then the status bonus -- +10 for SLP or FRZ, nothing
+--      for the rest (the routine's bug: the BRN/PSN/PAR +5 never applies) --
+--      held at 255.  HELD_CATCH_CHANCE's check passes GetItemHeldEffect the
+--      wrong register, and no item carries it: nothing;
+--   4. ONE BattleRandom: the ball catches when it is at most wFinalCatchRate
+--      (`cp b / jr z, .catch_without_fail / jr nc, .fail_to_catch`);
+--   5. a miss rolls the wobbles in the animation (GetPokeBallWobble, engine/
+--      battle_anims/pokeball_wobble.asm): up to three BattleRandom bytes, each
+--      under WobbleProbabilities' byte for the final rate, the first at or
+--      over it breaking free.  A catch draws none (`ret nz` on wWildMon).
+--
+-- Returns caught, the wobbles (a catch is 3; a miss 0..3 -- the throw's
+-- wThrownBallWobbleCount less one, which BALL_MISS_TEXT reads) and
+-- wFinalCatchRate.
 
-local function catchRoll(rng, maxV)
-  maxV = max(0, int(maxV, 0))
-  if maxV <= 0 then return 0 end
-  if maxV >= 255 then return rng and rng:byte() or 0 end
-  return (rng and rng:byte() or 0) % (maxV + 1)
+-- data/battle/wobble_probabilities.asm (game logic, not art): the first row
+-- whose catch-rate key is at least wFinalCatchRate gives the byte a wobble
+-- draw must be under (`cp b / jr nc, .checkwobble`; `cp b / ret c`).
+M.WOBBLE_PROBABILITIES = {
+  { 1, 63 }, { 2, 75 }, { 3, 84 }, { 4, 90 }, { 5, 95 }, { 7, 103 },
+  { 10, 113 }, { 15, 126 }, { 20, 134 }, { 30, 149 }, { 40, 160 },
+  { 50, 169 }, { 60, 177 }, { 80, 191 }, { 100, 201 }, { 120, 211 },
+  { 140, 220 }, { 160, 227 }, { 180, 234 }, { 200, 240 }, { 220, 246 },
+  { 240, 251 }, { 254, 253 }, { 255, 255 },
+}
+
+-- wBattleType's BATTLETYPE_FISH (constants/battle_constants.asm), which the
+-- LURE BALL asks for.
+M.BATTLETYPE_FISH = 4
+
+-- FastBallMultiplier's buggy loop reads only the first three bytes of
+-- FleeMons (data/wild/flee_mons.asm: SometimesFleeMons' MAGNEMITE, GRIMER,
+-- TANGELA), by party species id.
+M.FAST_BALL_SPECIES = { MAGNEMITE = true, GRIMER = true, TANGELA = true }
+
+-- HeavyBallMultiplier's `.WeightsTable`: the high byte the weight works out
+-- to (`heavyBallWeightByte`), under each key the boost.  Under HIGH(1024) is
+-- `.lightmon`'s -20.
+local HEAVY_BALL_WEIGHTS = { { 8, 0 }, { 12, 20 }, { 16, 30 }, { 255, 40 } }
+
+-- `sla b / jr c, .max`: doubled, $ff on the carry.
+local function doubleByte(b)
+  b = b * 2
+  if b > 255 then return 255 end
+  return b
 end
 
--- Returns caught, shakes (0-3).  RNG order: catch roll, then HP roll when
--- the first roll passed the rate check.  Wobble math draws nothing.
-function M.catchAttempt(ballId, targetMon, rng)
-  local def = BALL_DEFS[ballId] or BALL_DEFAULT
-  if def.autoCatch then return true, 3 end
+-- HeavyBallMultiplier's weight arithmetic on the Pokedex entry's weight word
+-- (the sheet's `weight`): half of it, less a sixteenth of that half and a
+-- thirty-second (`srl h / rr l`, four `srl b / rr c`, `.subbc`, one more),
+-- and only the HIGH byte compared.
+function M.heavyBallWeightByte(weight)
+  local half = floor((max(0, int(weight, 0)) % 65536) / 2)
+  local sixteenth = floor(half / 16)
+  return floor((half - sixteenth - floor(sixteenth / 2)) / 256)
+end
 
-  local rate = int(targetMon and targetMon.catchRate, 255)
-  if rate < 0 then rate = 0 elseif rate > 255 then rate = 255 end
-
-  local statusBonus, shakeBonus = 0, 5
-  local s = targetMon and targetMon.status
-  if s == "sleep" or s == "freeze" then
-    statusBonus, shakeBonus = 25, 10
-  elseif s then
-    statusBonus, shakeBonus = 12, 5
+-- BallMultiplierFunctionTable's routine for `ballId` on the catch rate `rate`
+-- (0..255).  `target` is the wild monster, `ctx.thrower` the player's monster
+-- on the field (wBattleMon), `ctx.battleType` wBattleType when the fight
+-- states it.  A ball with no row (POKé BALL, FRIEND BALL) leaves the rate.
+--
+--   * ULTRA BALL x2; GREAT BALL, SAFARI BALL ("leftover from RBY") and PARK
+--     BALL x1.5 (`srl a / add b`), each held at $ff;
+--   * HEAVY BALL: by the species' weight (`heavyBallWeightByte`) -- under
+--     102.4 kg -20 (a rate under 20 is 1: `ret nc / ld b, $1`), else
+--     +0/+20/+30/+40 held at $ff.  The weight is the Pokedex entry's, which a
+--     sheet carries as `weight` (contract K21: the client stamps it on a wild
+--     foe, Turn's copyMon keeps it); without it the referee cannot place the
+--     monster and leaves the rate.  This is the true weight for every species:
+--     Crystal's HeavyBall_GetDexEntryBank gets the wrong bank for three of
+--     them (docs/bugs_and_glitches.md, "Heavy Ball uses wrong weight value
+--     for three Pokémon") and reads bytes this referee does not have and may
+--     not ship, so a Crystal fight is read the same way -- out of the plan's
+--     scope, by its Scope section;
+--   * LEVEL BALL: x2 when the wild level is below the player's, x4 below its
+--     half, x8 below its quarter, $ff on any carry (and the HP step skipped,
+--     `catchAttempt`);
+--   * LURE BALL: x3 in a BATTLETYPE_FISH fight (`ctx.battleType`), $ff on a
+--     carry;
+--   * MOON BALL: nothing -- the routine compares the first evolution's item
+--     with MOON_STONE_RED, Gold's BURN_HEAL, which nothing evolves with;
+--   * LOVE BALL: x8 ($ff on a carry) when the two monsters are one species
+--     (the parties' species, wTempBattleMonSpecies / wTempEnemyMonSpecies)
+--     and of the SAME gender (the routine's bug), neither genderless --
+--     GetGender (`gender`, K15): the player's PARTYMON (its party DVs, a
+--     TRANSFORM never wrote them) and the wild WILDMON, whose wEnemyMonDVs a
+--     TRANSFORM did overwrite -- a transformed wild monster's gender is read
+--     off the DVs it copied (pokecrystal / pokegold LoveBallMultiplier);
+--   * FAST BALL: x4 ($ff on a carry) for MAGNEMITE, GRIMER and TANGELA alone
+--     (the routine's bug, M.FAST_BALL_SPECIES).
+function M.ballRate(ballId, rate, target, ctx)
+  ctx = type(ctx) == "table" and ctx or {}
+  local b = max(0, min(255, int(rate, 0)))
+  if ballId == "ULTRA_BALL" then return doubleByte(b) end
+  if ballId == "GREAT_BALL" or ballId == "SAFARI_BALL" or ballId == "PARK_BALL" then
+    b = b + floor(b / 2)
+    if b > 255 then return 255 end
+    return b
   end
-
-  local maxhp = max(1, int(targetMon and targetMon.maxHp, 1))
-  local hp = max(0, int(targetMon and targetMon.hp, 0))
-  local hpQuarter = max(1, floor(hp / 4))
-  local factor = def.hpFactor or BALL_DEFAULT.hpFactor
-  local f = min(255, floor(floor(maxhp * 255 / factor) / hpQuarter))
-
-  local function shakes()
-    local ballFactor2 = def.wobbleFactor or BALL_DEFAULT.wobbleFactor
-    local y = floor(rate * 100 / ballFactor2)
-    local z
-    if y > 255 then
-      z = 255
-    else
-      z = floor(f * y / 255)
+  if ballId == "HEAVY_BALL" then
+    -- HeavyBallMultiplier reads the dex entry of wEnemyMonSpecies -- the
+    -- battle struct's species, which a TRANSFORM overwrote -- so a
+    -- transformed wild monster weighs what it copied (`transformWeight`; a
+    -- copied sheet that stated no weight leaves the rate).
+    local weight = nil
+    if type(target) == "table" then
+      if target.transformed then
+        weight = int(target.transformWeight, nil)
+      else
+        weight = int(target.weight, nil)
+      end
     end
-    if s then z = z + shakeBonus end
-    if z < 10 then return 0 elseif z < 30 then return 1
-    elseif z < 70 then return 2 else return 3 end
+    if weight == nil then return b end
+    local high = M.heavyBallWeightByte(weight)
+    if high < 4 then
+      if b < 20 then return 1 end
+      return b - 20
+    end
+    for _, row in ipairs(HEAVY_BALL_WEIGHTS) do
+      if high < row[1] then
+        b = b + row[2]
+        if b > 255 then return 255 end
+        return b
+      end
+    end
+    return b
   end
+  if ballId == "LEVEL_BALL" then
+    local mine = int(type(ctx.thrower) == "table" and ctx.thrower.level, 0)
+    local enemy = int(type(target) == "table" and target.level, 0)
+    if enemy >= mine then return b end
+    if b * 2 > 255 then return 255 end
+    b = b * 2
+    local c = floor(mine / 2)
+    if enemy >= c then return b end
+    if b * 2 > 255 then return 255 end
+    b = b * 2
+    c = floor(c / 2)
+    if enemy >= c then return b end
+    return doubleByte(b)
+  end
+  if ballId == "LURE_BALL" then
+    if int(ctx.battleType, -1) ~= M.BATTLETYPE_FISH then return b end
+    return min(255, b * 3)
+  end
+  if ballId == "LOVE_BALL" then
+    local thrower = ctx.thrower
+    if type(thrower) ~= "table" or type(target) ~= "table" then return b end
+    local species = thrower.speciesId
+    if species == nil or species ~= target.speciesId then return b end
+    local mine, theirs = M.gender(thrower), M.gender(target, true)
+    if mine == nil or theirs == nil or mine ~= theirs then return b end
+    return min(255, b * 8)
+  end
+  if ballId == "FAST_BALL" then
+    if type(target) == "table" and target.speciesId and M.FAST_BALL_SPECIES[target.speciesId] then
+      return min(255, b * 4)
+    end
+    return b
+  end
+  return b
+end
 
-  local r = catchRoll(rng, def.randMax or 255) - statusBonus
-  if r < 0 then return true, 3 end
-  if r > rate then return false, shakes() end
-  if catchRoll(rng, 255) <= f then return true, 3 end
-  return false, shakes()
+-- PokeBallEffect's HP step and status bonus, in the cart's bytes: the HP
+-- doubled and the max HP tripled (16-bit pairs); when the tripled max has a
+-- high byte (a max HP of 86 or more) both are shifted right twice and a
+-- doubled HP whose low byte is then 0 becomes 1; only the LOW bytes go on --
+-- B the tripled max, C the doubled HP -- so a max HP past 341 wraps (the
+-- routine's bug).  hMultiplier is B - C as a byte, the product of the rate
+-- and it divided by B, and the quotient's LOW byte taken, 0 becoming 1.  A B
+-- of 0 (a max HP of 342 or 683) would hang the cart's _Divide (it never
+-- carries out of a zero divisor); the referee takes the quotient as 0, which
+-- the floor makes 1.  Then +10 for SLP or FRZ, held at 255.
+function M.catchHpRate(rate, hp, maxHp, status)
+  local doubled = (2 * max(0, int(hp, 0))) % 65536
+  local tripled = (3 * max(0, int(maxHp, 0))) % 65536
+  local c
+  if tripled >= 256 then
+    tripled = floor(tripled / 4)
+    doubled = floor(doubled / 4)
+    c = doubled % 256
+    if c == 0 then c = 1 end
+  else
+    c = doubled % 256
+  end
+  local b = tripled % 256
+  local multiplier = (b - c) % 256
+  local quotient = 0
+  if b > 0 then quotient = floor(max(0, min(255, int(rate, 0))) * multiplier / b) end
+  quotient = quotient % 256
+  if quotient == 0 then quotient = 1 end
+  if status == "sleep" or status == "freeze" then quotient = quotient + 10 end
+  if quotient > 255 then quotient = 255 end
+  return quotient
+end
+
+-- The wobble byte for a final rate: WobbleProbabilities' first row whose key
+-- is at least the rate.
+function M.wobbleByte(finalRate)
+  local rate = int(finalRate, 0)
+  for _, row in ipairs(M.WOBBLE_PROBABILITIES) do
+    if row[1] >= rate then return row[2] end
+  end
+  return 255
+end
+
+-- The throw (see the notes above `WOBBLE_PROBABILITIES`).  `ctx` is
+-- { thrower = the player's monster on the field, battleType = wBattleType }.
+function M.catchAttempt(ballId, targetMon, rng, ctx)
+  local function draw() return rng and rng:byte() or 0 end
+  if ballId == "MASTER_BALL" then return true, 3, 255 end
+  local target = type(targetMon) == "table" and targetMon or {}
+  local rate = M.ballRate(ballId, max(0, min(255, int(target.catchRate, 255))), target, ctx)
+  local final = rate
+  if ballId ~= "LEVEL_BALL" then
+    final = M.catchHpRate(rate, target.hp, target.maxHp, target.status)
+  end
+  if draw() <= final then return true, 3, final end
+  local threshold = M.wobbleByte(final)
+  for wobbles = 0, 2 do
+    if draw() >= threshold then return false, wobbles, final end
+  end
+  return false, 3, final
 end
 
 function M.isWildMode(mode)
@@ -1336,14 +3769,35 @@ function M.jumpKickCrash(maxHp)
   return max(1, floor(max(1, int(maxHp, 1)) / 8))
 end
 
-function M.isSwitchAndTeleport(effectId)
-  return int(effectId, 0) == 28
-end
-
 -- Mediated modes (1v1, coop_*) have no wild flee; only modes whose name
 -- contains "wild" may treat Teleport as a successful run.
 function M.teleportRunAllowed(mode)
   return type(mode) == "string" and mode:find("wild", 1, true) ~= nil
+end
+
+-- TryToRunAwayFromBattle's wild odds (pokecrystal engine/battle/core.asm,
+-- pokegold the same; wave 5 -- Red's TryRunningFromBattle shape, BattleSim's
+-- `runOdds`): nil for a getaway that draws no byte, else the number a
+-- BattleRandom byte must not exceed (`cp b / jr nc, .can_escape`).  The
+-- runner's battle Speed at or over the wild one's gets away (CompareBytes);
+-- so does a divisor of 0 -- the wild Speed / 4, its low byte (`srl b / rr a`
+-- twice) -- and a quotient of the runner's Speed x 32 (the product's low
+-- word) by it over 255 (hQuotient + 2 nonzero).  Each attempt past the first
+-- (wNumFleeAttempts counts this one) adds 30, and a sum that carries past 255
+-- gets away too.
+function M.runOdds(playerSpeed, enemySpeed, attempts)
+  local p = max(0, int(playerSpeed, 0)) % 65536
+  local e = max(0, int(enemySpeed, 0)) % 65536
+  if p >= e then return nil end
+  local divisor = floor(e / 4) % 256
+  if divisor == 0 then return nil end
+  local quotient = floor(((p * 32) % 65536) / divisor)
+  if quotient > 255 then return nil end
+  for _ = 2, max(1, int(attempts, 1)) do
+    quotient = quotient + 30
+    if quotient > 255 then return nil end
+  end
+  return quotient
 end
 
 -- RUN finishes the fight in wild/coop_wild (flee) and 1v1/coop_pvp

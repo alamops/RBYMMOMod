@@ -66,6 +66,30 @@ local Gen = need("Gen")
 local CoopBattle = need("CoopBattle")
 local Mediated = need("MediatedBattle")
 local EvolveFx = need("EvolveFx")
+-- Gen 3 (FireRed / LeafGreen / Emerald). No engine module is reached from
+-- here: the game3 stack is Gen3Ui's, the cart's own battle entry and whiteout
+-- are CoopField's Gen 3 stand-in (the object a divert hands its result to),
+-- and the forget-a-move prompt is LearnMove's Gen 3 arm.
+local Gen3 = need("Gen3")
+local Gen3Ui = need("Gen3Ui")
+local CoopField = need("CoopField")
+local LearnMove = need("LearnMove")
+
+-- ------- the screen stack, per generation
+--
+-- src/Ui.lua's doors (Ui.holds / unwindTo / top / states), restated here
+-- because Ui needs this module and a need() cycle would never resolve. Gen 1
+-- and Gen 2 read `game.stack` exactly as this file always has; a Gen 3 boot
+-- has no `game.stack` -- its screens are layers on the game3 modal stack,
+-- which Gen3Ui owns.
+local function onGen3() return Gen3.active() == true end
+
+local function stackStates(game)
+  if onGen3() then return Gen3Ui.states() end
+  local stack = game and game.stack
+  local states = stack and stack.states
+  return type(states) == "table" and states or nil
+end
 
 -- How often a standing offer is re-attempted while this client is busy.
 --
@@ -291,7 +315,7 @@ function M.overworldOf(game)
     local ok, ow = pcall(world.overworld, world)
     if ok and ow then return ow end
   end
-  local states = game and game.stack and game.stack.states
+  local states = stackStates(game)
   if type(states) ~= "table" then return nil end
   for i = #states, 1, -1 do
     local s = states[i]
@@ -342,7 +366,49 @@ function M:release()
   local encounter = self.encounter
   self.encounter = nil
   if not encounter then return false end
+  -- Gen 3: nothing was ever on screen for the encounter but the stand-in's
+  -- cover, because the divert cancelled the cart's fight before it started.
+  -- Letting it proceed is taking the cover down and starting that fight now
+  -- (CoopField's Stand:fightAlone, once).
+  local engine = encounter.engine
+  if type(engine) == "table" and engine.gen3Divert then
+    self:unwindTo(encounter.game, engine, false)
+    engine:fightAlone()
+    return true
+  end
   self:unwindTo(encounter.game, encounter.engine, false)
+  return true
+end
+
+-- Gen 3's half of "say it, then let go": a wait that ends without a join
+-- hands the cart its fight *now*, and the sentence goes in the corner.
+--
+-- On Gen 1 / Gen 2 the line is a box over the engine's battle and release()
+-- runs when it is dismissed. On Gen 3 that box could never go up: M:tell
+-- waits for Ui:whenFree, and for the whole of a trainer wait the player is
+-- not free -- the trainerbattle command holds the script VM "waiting"
+-- (Vm:isRunning counts it) under the stand-in's cover, which is exactly what
+-- Gen3Ui.occupied reads as busy. The line queued, release() queued behind it,
+-- and the game stood still under the cover for good. So the order turns
+-- round: the cover comes down and the cart's battle starts first, and the
+-- line is a toast (plus the party log) -- the corner survives the battle
+-- screen, a box would only have reached the player after the fight it was
+-- about.
+--
+-- True when the encounter was a Gen 3 stand-in and has been let go; false
+-- leaves the caller's own Gen 1 / Gen 2 path to run untouched.
+function M:letGo3(...)
+  local encounter = self.encounter
+  local engine = encounter and encounter.engine
+  if not (type(engine) == "table" and engine.gen3Divert) then return false end
+  self:release()
+  for i = 1, select("#", ...) do
+    local line = select(i, ...)
+    if type(line) == "string" and line ~= "" then
+      self:note(line)
+      self:toastLine(line)
+    end
+  end
   return true
 end
 
@@ -417,6 +483,13 @@ end
 -- as arguments, and are therefore callable from a sibling module loaded
 -- through the same need() resolver as `Coop.finishBuriedBattle(...)`.
 
+-- 2 for a fight whose prize an AMULET COIN doubled, else 1: `true` from the
+-- fight's own answer and nothing else (pokecrystal's wAmuletCoin is a flag the
+-- send-out sets, never a count).
+function M.amuletFactor(amuletCoin)
+  return amuletCoin == true and 2 or 1
+end
+
 -- Prize money, which the engine pays from inside its own battle screen and
 -- so never gets to pay for one it did not run. Its formula, at the level of
 -- the strongest monster the trainer had -- a 2-on-2 has two last opponents,
@@ -428,6 +501,15 @@ end
 -- unconditionally, which is why the caller below does not repeat it.
 function M.payTrainerPrize(engine, game, result)
   if not engine then return 0 end
+  -- Gen 3: the cart's own prize (M.prize3 below): class money x the last
+  -- monster's level x 4, doubled for the trainer's own double battle and for
+  -- an AMULET COIN this player fielded.
+  if engine.gen3Divert then
+    if result ~= "win" or engine.kind ~= "trainer" then return 0 end
+    return M.prize3(engine.trainerId, game, {
+      double = engine.double, amuletCoin = engine.amuletCoin,
+    })
+  end
   local trainer = engine.trainer
     or (engine.battle and engine.battle.trainer)
   local enemyParty = engine.enemyParty
@@ -437,7 +519,13 @@ function M.payTrainerPrize(engine, game, result)
     for _, mon in ipairs(enemyParty or {}) do
       best = math.max(best, tonumber(mon.level) or 0)
     end
-    local prize = (tonumber(trainer.baseMoney) or 0) * best
+    -- Gold's AMULET COIN: pokecrystal WinTrainerBattle `.give_money` doubles
+    -- wBattleReward when wAmuletCoin is set (`.DoubleReward`), and the fight
+    -- that knows whether one came out on this player's seat stamps it here
+    -- (`amuletCoin`: src/SoloBattle.lua from MediatedBattle:amuletCoin2, the
+    -- co-op ending from CoopBattle's).  A Kanto cart has no held items, so a
+    -- Gen 1 battle never carries it.
+    local prize = (tonumber(trainer.baseMoney) or 0) * best * M.amuletFactor(engine.amuletCoin)
     local save = game and game.save
     if prize > 0 and save then
       Gen.money.set(save, math.min(999999, Gen.money.get(save) + prize))
@@ -445,6 +533,63 @@ function M.payTrainerPrize(engine, game, result)
     end
   end
   return 0
+end
+
+-- ------- Gen 3's half of the ritual
+
+-- This player's own party: the save's on Gen 1 / Gen 2, the live session's on
+-- Gen 3 (game.save there is a snapshot rebuilt at save time -- a fight that
+-- wrote its HP and EXP into it would be undone by the next save).
+function M.ownParty(game)
+  if onGen3() then
+    local party = Gen3.party()
+    if type(party) == "table" then return party end
+    local session = type(game) == "table" and game.session or nil
+    if type(session) == "table" then return session.party end
+  end
+  return game and game.save and game.save.party
+end
+
+-- The cart's prize for a trainer this player beat (battle/prize.lua through
+-- the engine: FireRed's `4 x last level x class money x multiplier`, Emerald's
+-- own reward table), doubled for the trainer's own double battle and for an
+-- AMULET COIN this player fielded (HOLD_EFFECT_DOUBLE_PRIZE), and paid into
+-- the live session through Gen.money. A co-op win pays each player what
+-- beating that trainer alone would have paid -- see M.ranksPoints for why.
+function M.prize3(trainerId, game, opts)
+  opts = opts or {}
+  local tid = tonumber(trainerId)
+  if not tid then return 0 end
+  local Prize = Gen3.engine("src.core.game3.battle.prize")
+  local Trainers = Gen3.engine("src.core.game3.scripting.trainers")
+  local Profile = Gen3.engine("src.core.game3.battle.profile")
+  if not Prize then return 0 end
+  local session = Gen3.session()
+  local rules = nil
+  if Profile then
+    local ok, prof = pcall(Profile.get, session)
+    rules = ok and type(prof) == "table" and prof.rules or nil
+  end
+  local mult = opts.amuletCoin and 2 or 1
+  local ok, amount
+  if type(rules) == "table" and rules.money == "rse" and type(Prize.rewardRse) == "function" then
+    ok, amount = pcall(Prize.rewardRse, tid, { double = opts.double or false,
+                                               moneyMultiplier = mult })
+  elseif type(Prize.calc) == "function" then
+    local info = Trainers and type(Trainers.info) == "function" and Trainers.info(tid) or nil
+    ok, amount = pcall(Prize.calc, tid, {
+      lastLevel = info and tonumber(info.lastLevel) or nil,
+      double = opts.double or false, moneyMultiplier = mult,
+    })
+  end
+  amount = ok and math.floor(tonumber(amount) or 0) or 0
+  if amount <= 0 then return 0 end
+  local save = (type(game) == "table" and game.save) or Gen3.session()
+  if type(save) ~= "table" then return 0 end
+  -- Gen.money resolves a Gen 3 save to the live session and caps at 999999.
+  local before = Gen.money.get(save)
+  Gen.money.set(save, before + amount)
+  return Gen.money.get(save) - before
 end
 
 -- Which of a buried battle's two callbacks is the one that will actually run.
@@ -486,7 +631,19 @@ end
 --
 -- Body lives on EvolveFx so Sessions:endMediated can call the same offer
 -- without requiring this module (that graph is a cycle).
+--
+-- Never after a lost fight, on any cart.  pokered EndOfBattle
+-- (engine/battle/end_of_battle.asm) jumps past EvolutionAfterBattle outside a
+-- link battle whenever wBattleResult is not 0 (`and a / jr nz,
+-- .resetVariables`), and a loss is RemoveFaintedPlayerMon's 1 -- a mutual
+-- last-monster knockout against the computer included, which the Red referee
+-- states as the computer's win (FX-R1); pokecrystal / pokegold ExitBattle
+-- `.not_linked` returns before EvolveAfterBattle on a LOSE the same way
+-- (EvolveFx's Gold and Gen 3 arms already decline it; its Gen 1 arm offered).
+-- The engine port's BattleState:finish runs Evolution.checkParty whatever
+-- the result -- a divergence the mod does not copy.
 function M.offerEvolutions(game, leveledUp, result, evoResolved)
+  if result == "loss" or result == "lose" then return false end
   return EvolveFx.offerEvolutions(game, leveledUp, result, evoResolved, {
     warn = function(fmt, ...) mod.log:warn(fmt, ...) end,
     ui = mod.ui,
@@ -501,7 +658,18 @@ end
 -- wiped. Returns the same pair M:consume has always returned: whether there
 -- was anything to finish at all, and -- when there was -- whether the engine
 -- ran the blackout ritual itself so the caller must not run a second one.
+--
+-- A Gen 3 stand-in that is already finished -- its ritual ran, or it was
+-- handed back and the cart's own battle owns the ending (CoopField
+-- Stand:finish / fightAlone) -- answers `true, true`: handled, and the ritual
+-- is somebody else's.  Not `false`: to M:onBattleOver false means "no engine
+-- battle behind this one", and it would then finish a walk-in trainer again
+-- off the plan's npcId (M:syntheticFinish3 pays the prize and sets the flag a
+-- second time -- it is not idempotent) or run a second whiteout on a loss.
 function M.finishBuriedBattle(engine, game, result, blackout)
+  if engine and engine.gen3Divert then
+    if engine.finished then return true, true end
+  end
   local finish = M.buriedFinisher(engine)
   if not finish then return false end
 
@@ -562,11 +730,22 @@ end
 function M.blacksOut(result, game)
   if result == "loss" then return true end
   local party = game and game.save and game.save.party
+  -- Gen 3's save is a snapshot rebuilt at save time; the live party is the
+  -- session's.
+  local gen3 = onGen3()
+  if gen3 then party = Gen3.party() or party end
   if type(party) ~= "table" or #party == 0 then return false end
+  local fighters = 0
   for _, mon in ipairs(party) do
-    if (tonumber(mon.hp) or 0) > 0 then return false end
+    -- An egg is carried, never standing: a party of fainted monsters and an
+    -- egg is a wiped team on the cart (Gen 3 only -- nothing else had eggs
+    -- with HP to count).
+    if not (gen3 and CoopField.isEgg3(mon)) then
+      fighters = fighters + 1
+      if (tonumber(mon.hp) or 0) > 0 then return false end
+    end
   end
-  return true
+  return fighters > 0
 end
 
 -- Where a blackout returns to. Prefer the live overworld's own healPoint
@@ -625,11 +804,19 @@ function M.healParty(game)
     mon.status = nil
     for _, mv in ipairs(mon.moves or {}) do
       local def = moves and moves[mv.id]
-      -- RestoreBonusPP adds maxPP/5 per PP UP, floored -- and a move this
-      -- build has no record of is left exactly as it was rather than given a
-      -- PP figure invented from nothing.
+      -- The cart's maximum: a fifth of the base per PP UP, floored and
+      -- capped at 7 (pokered AddBonusPP, pokecrystal / pokegold ComputeMaxPP
+      -- -- so a 40-PP move with three PP Ups heals to 61, not 64;
+      -- Mediated.maxPpOf) -- and a move this build has no record of is left
+      -- exactly as it was rather than given a PP figure invented from nothing.
+      -- A Gold slot may state only its raised `maxPp` (the engine's
+      -- Mon.ppUpsOf recovers the count from it), so the count is read the way
+      -- the sheet reads it, and a stated maximum is kept in step, as the
+      -- engine's own Mon.restoreAllPp keeps it.
       if def and def.pp then
-        mv.pp = def.pp + (tonumber(mv.ppUps) or 0) * math.floor(def.pp / 5)
+        local ups = Mediated.slotPpUps(mv, def, Gen.generation(game))
+        mv.pp = Mediated.maxPpOf(def.pp, ups) or def.pp
+        if mv.maxPp ~= nil then mv.maxPp = mv.pp end
       end
     end
   end
@@ -705,6 +892,18 @@ function M:blackout(game, context)
   local save = game and game.save
   local noun = (type(context) == "string" and context ~= "") and context
     or "2-on-2"
+  -- Gen 3: the cart's own whiteout -- its money rule (FireRed's level x badge
+  -- table, Emerald's half), its heal and its warp to the last heal location
+  -- -- through CoopField's stand-in half, which parks the warp until the
+  -- screen is free exactly as the pump below does for Gen 1 / Gen 2.
+  -- Strict: this whiteout answers no trainerbattle command, so its warp waits
+  -- for any script to finish rather than cutting one off (CoopField.free3).
+  if onGen3() then
+    if CoopField.whiteout3(game, nil, { strict = true }) then return true end
+    mod.log:warn("a lost %s could not black you out (no Gen 3 session); walk "
+      .. "to a POKéMON CENTER to heal", noun)
+    return false
+  end
   if not save then
     mod.log:warn("a lost %s could not black you out (no save); walk to a "
       .. "POKéMON CENTER to heal", noun)
@@ -765,6 +964,8 @@ function M:pumpBlackout(dt)
   pending.clock = (pending.clock or 0) + (dt or 0)
   local stack = pending.game and pending.game.stack
   local top = stack and stack.top and stack:top()
+  -- (Gen 3 never parks a warp here: M:blackout hands it to CoopField, whose
+  -- pump is ticked by the client every frame.)
   if not (top and top.isOverworld) then
     if pending.clock < BLACKOUT_WARP_WAIT then return false end
     -- Given up on rather than fired blind. The party is healed and the money
@@ -829,6 +1030,25 @@ function M:note(text)
   })
 end
 
+-- A line this module says *unasked* -- the answer to an ask, a partner who
+-- left, a clock that ran out -- put up when the player is free to read it.
+--
+-- On Gen 3 that is Ui:whenFree (src/Ui.lua): the cart's own BAG, POKéMON list,
+-- dialogue or battle is a layer on the game3 stack, and a box pushed over one
+-- draws straight through it while the cart's half-finished action waits. On
+-- Gen 1 and Gen 2 Ui.occupied is always false and whenFree is `return show()`,
+-- so every line goes up exactly when it always did. A ui without whenFree (a
+-- suite's stub) says it at once.
+function M:tell(text, onDone, opts)
+  local ui = self.ui
+  if not ui then return nil end
+  if type(ui.whenFree) == "function" then
+    return ui:whenFree(nil, function() return ui:say(text, onDone) end,
+      opts or { owner = "coop" })
+  end
+  return ui:say(text, onDone)
+end
+
 -- The corner of the screen, for a line whose moment is too short to be read
 -- anywhere else.
 --
@@ -860,6 +1080,15 @@ end
 -- over a cosmetic field.
 local function fightName(label)
   return label or "a battle"
+end
+
+-- A Gen 3 stand-in of a kind co-op does not fight (CoopField marks it
+-- `coopRefused3`: a Safari wild, a roamer, a legend, a ghost, a facility, a
+-- lesson, two trainers, Steven -- Config.COOP_REFUSED_GEN3).  src/Client.lua
+-- never offers one; this is the module's own refusal, so no other caller can
+-- seat one in a co-op 2v2 either.
+function M.refusedKind3(state)
+  return type(state) == "table" and state.gen3Divert == true and state.coopRefused3 ~= nil
 end
 
 -- ------- against an NPC: the player who arrives first
@@ -911,6 +1140,7 @@ function M:onTrainerBattle(game, state, mapId)
   local kind = state.kind
   if not kind and state.battle and state.battle.trainer then kind = "trainer" end
   if kind ~= "trainer" then return false end
+  if M.refusedKind3(state) then return false end
   if not (self.transport:isReady() and self.party:has()) then return false end
   if self.running then return false end
   -- PARTY > NPC: OFF: fight the engine trainer, post nothing. Same answer
@@ -939,7 +1169,14 @@ function M:onTrainerBattle(game, state, mapId)
     local who = away.name or "Your friend"
     local line = ("%s was too far\nto join!"):format(who)
     self:note(line)
-    self.ui:say(line)
+    if state.gen3Divert then
+      -- Gen 3: the cart's own battle starts the moment this answers false
+      -- (the divert hands it back), and a box left on the game3 stack would
+      -- sit over it holding its input. The corner says it instead.
+      self:toastLine(line)
+    else
+      self.ui:say(line)
+    end
     return false
   end
 
@@ -958,6 +1195,14 @@ function M:onTrainerBattle(game, state, mapId)
   local lead = enemyParty and enemyParty[1]
   local key = M.battleKey(mapId, oppClass,
     lead and lead.species, lead and lead.level)
+  -- Gen 3 has something better than a class and a lead: the cart's own
+  -- trainer number, unique per trainer and the same on every copy of the cart
+  -- -- so two partners agree by construction, and "BUG CATCHER RICK" is the
+  -- label rather than a class id.
+  if state.gen3Divert then
+    label = state.label or label
+    key = M.battleKey(mapId, "t", state.trainerId)
+  end
   -- Concrete overworld id (and event flag) from the engine's checkpoint --
   -- what an invite joiner needs on the wire so they never fuzzy-match a Bug
   -- Catcher by class. See M.originOf / PROTOCOL 20.
@@ -1037,6 +1282,7 @@ function M:onWildEncounter(game, state, mapId)
   local kind = state.kind
   if not kind and state.battle and state.battle.wild then kind = "wild" end
   if kind ~= "wild" then return false end
+  if M.refusedKind3(state) then return false end
   if not (self.transport:isReady() and self.party:has()) then return false end
   if self.running or self.waiting or self.ask then return false end
   -- PARTY > WILD: OFF: leave the engine wild alone, including when the
@@ -1063,7 +1309,12 @@ function M:onWildEncounter(game, state, mapId)
     local offer = self.offer
     -- Pop the just-pushed wild; their battle key will not match ours, so
     -- joinedEngine would leave this fight under the co-op screen otherwise.
-    if game and game.stack and game.stack:top() == state then
+    if state.gen3Divert then
+      -- Gen 3: the cart never started it, so dropping the stand-in's cover is
+      -- the whole of discarding it -- nothing of the cart's is left waiting.
+      state.finished = true
+      if state.takeDown then state:takeDown() end
+    elseif game and game.stack and game.stack:top() == state then
       game.stack:pop()
     end
     return self:autoJoin(offer)
@@ -1085,6 +1336,10 @@ function M:onWildEncounter(game, state, mapId)
   if not mon then return false end
   local species = mon.species
   local label = Wire.label(tostring(species or ""):gsub("_", " "))
+  -- Gen 3 keeps species as a number; the label is the cart's name for it.
+  if state.gen3Divert then
+    label = Wire.label(Gen3.speciesName(tonumber(species)) or tostring(species))
+  end
   local key = M.battleKey(mapId, species, mon.level)
 
   self.encounter = {
@@ -1097,6 +1352,32 @@ function M:onWildEncounter(game, state, mapId)
     wildCatchMon = mon,
   }
   return self:beginWildCoop()
+end
+
+-- Would M:onWildEncounter take a wild met on `mapId` right now?  Its gates,
+-- asked before there is an encounter to hand it.
+--
+-- Gen 3 asks this *before* the stand-in's monster is built (src/Client.lua's
+-- wantsDivert3): building one rolls the cart's RNG the way the cart's own
+-- foe does, so a wild that co-op then declined -- a partner on another map,
+-- a partner mid-trade -- was rolled twice, and the monster the cart fought was
+-- not the one the RNG would have given it. Everything here reads the
+-- roster, the party and this module's own state; the one gate it cannot ask
+-- (another fight already on the stack) is still asked by onWildEncounter.
+function M:wouldTakeWild(mapId)
+  if not (self.transport:isReady() and self.party:has()) then return false end
+  if self.running or self.waiting or self.ask then return false end
+  if not self:wantsWild() then return false end
+  if self.offer and self.offer.mode ~= "coop_wild" then return false end
+  local partners = self.party:partners()
+  if #partners == 0 then return false end
+  if self:partnerAway(mapId) then return false end
+  for _, partner in ipairs(partners) do
+    local row = self.roster:get(partner.id)
+    if row and row.busy then return false end
+  end
+  if self.offer and self:sessionBusy() then return false end
+  return true
 end
 
 -- Start a Party vs Wild wait: same wire as a trainer wait, and the same
@@ -1148,6 +1429,10 @@ end
 -- as `coop:onStack(...)`, and a sibling module holding a game but no Coop
 -- instance reaches the same answer as `Coop.stackHolds(game, target)`.
 function M.stackHolds(game, target)
+  if onGen3() then
+    if target == nil then return nil end
+    return Gen3Ui.has(target)
+  end
   local stack = game and game.stack
   local states = stack and stack.states
   if not (target and type(states) == "table") then return nil end
@@ -1172,6 +1457,12 @@ function M:onStack(game, target) return M.stackHolds(game, target) end
 -- text boxes and transitions. `Coop.unwindStackTo(game, target, alsoPop)` from
 -- a sibling; `self:unwindTo(...)` everywhere it already is.
 function M.unwindStackTo(game, target, alsoPop)
+  -- Gen 3: the same rule on the game3 stack (Gen3Ui.unwindTo refuses a target
+  -- that already left, exactly as the check below does).
+  if onGen3() then
+    if target == nil then return false end
+    return Gen3Ui.unwindTo(game, target, alsoPop) == true
+  end
   local stack = game and game.stack
   if not (stack and target) then return false end
   -- Never go looking for something that is not there.
@@ -1366,7 +1657,7 @@ function M:announceAlone(name, onDone)
   end
   self.aloneAnnounced = true
   local who = name or self.party:partnerName() or "Your friend"
-  self.ui:say(("%s was brave\nand went 1-on-1!"):format(who), onDone)
+  self:tell(("%s was brave\nand went 1-on-1!"):format(who), onDone)
   return true
 end
 
@@ -1433,6 +1724,11 @@ function M:considerOffer(game, myMap)
   -- inFight, which is why the mutual case is answered above this rather than
   -- by it.
   if self:inFight(game) then return false end
+  -- Gen 3: the cart's own menu or dialogue is up (the BAG, a sign, START...).
+  -- A battle pushed now would sit over it with the cart's action half done,
+  -- so the offer stands and M:update's retry takes it the moment the player
+  -- is free -- the same deferral a busy trade gets.
+  if onGen3() and Gen3Ui.occupied() then return false end
   return self:autoJoin(offer)
 end
 
@@ -1682,8 +1978,7 @@ function M:closeAskBox()
   local held = self.askBox
   self.askBox = nil
   if not held then return false end
-  local stack = held.game and held.game.stack
-  local states = stack and stack.states
+  local states = stackStates(held.game)
   if not (states and held.box) then return false end
   if states[#states] ~= held.box then return false end
   return self:unwindTo(held.game, held.box, true)
@@ -1707,6 +2002,16 @@ function M.isFightState(state)
 end
 
 function M.stackHasFight(game)
+  -- Gen 3: the cart's own battle is not a layer at all (it runs inside the
+  -- field phase), so it is asked for by name; the mod's screens and a divert's
+  -- stand-in are layers like any other.
+  if onGen3() then
+    if Gen3.inBattle() then return true end
+    for _, state in ipairs(Gen3Ui.states()) do
+      if M.isFightState(state) then return true end
+    end
+    return false
+  end
   local stack = game and game.stack
   if not stack then return false end
   local states = stack.states
@@ -1725,6 +2030,13 @@ end
 -- the exclusion, every divert predicate would see "already in a fight" and
 -- refuse itself.
 function M.stackHasFightExcept(game, except)
+  if onGen3() then
+    if Gen3.inBattle() then return true end
+    for _, state in ipairs(Gen3Ui.states()) do
+      if state ~= except and M.isFightState(state) then return true end
+    end
+    return false
+  end
   local stack = game and game.stack
   if not stack then return false end
   local states = stack.states
@@ -1773,17 +2085,30 @@ function M:onAsk(game, msg)
   -- size. A future `size` on the ask wins when present. Stashed on ask so
   -- onPartyEnd can still name the fight after membership has already reset.
   local n = tonumber(msg.size) or self.party:count()
-  self.ask = { role = "asked", id = id, name = name, side = side, clock = 0,
-               size = n }
-  self.ui:confirm(game, ("%s wants a\n%s battle!"):format(
-      name, partyFightNoun(n)),
-    function(yes)
-      local pending = self.ask
-      if not (pending and pending.role == "asked") then return end
-      if not yes then self.ask = nil end
-      self.transport:send(Wire.COOP_ANSWER,
-        { id = pending.id, accept = yes and true or false })
-    end)
+  local asked = { role = "asked", id = id, name = name, side = side, clock = 0,
+                  size = n }
+  self.ask = asked
+  local function show()
+    return self.ui:confirm(game, ("%s wants a\n%s battle!"):format(
+        name, partyFightNoun(n)),
+      function(yes)
+        local pending = self.ask
+        if not (pending and pending.role == "asked") then return end
+        if not yes then self.ask = nil end
+        self.transport:send(Wire.COOP_ANSWER,
+          { id = pending.id, accept = yes and true or false })
+      end)
+  end
+  -- Held until the player is free on Gen 3 (see M:tell), and dropped unseen
+  -- if the ask ended meanwhile -- answered by the clock, withdrawn, or
+  -- overtaken by another.
+  if type(self.ui.whenFree) == "function" then
+    self.ui:whenFree(game, show, {
+      owner = "coop", alive = function() return self.ask == asked end,
+    })
+  else
+    show()
+  end
 end
 
 function M:onDecline(msg)
@@ -1802,7 +2127,12 @@ function M:onDecline(msg)
       return
     end
     local who = name or self.party:partnerName() or "Your friend"
-    self.ui:say(("%s decided\nnot to join."):format(who), function()
+    -- Gen 3: the fight first, the two sentences in the corner (M:letGo3).
+    if self:letGo3(("%s decided\nnot to join."):format(who),
+                   "You can take\nthem alone!") then
+      return
+    end
+    self:tell(("%s decided\nnot to join."):format(who), function()
       self.ui:say("You can take\nthem alone!", function()
         self:release()
       end)
@@ -1818,13 +2148,13 @@ function M:onDecline(msg)
   if reason == "mismatch" then
     -- Hub refused party-vs-party size (unequal, or not 2-or-3). Cleared above
     -- so the asker is never left armed waiting out "Nobody answered in time".
-    self.ui:say("Party sizes\ndon't match.")
+    self:tell("Party sizes\ndon't match.")
   elseif reason == "timeout" then
-    self.ui:say("Nobody answered\nin time.")
+    self:tell("Nobody answered\nin time.")
   elseif reason == "gone" then
-    self.ui:say(("%s went\noffline."):format(name or "Someone"))
+    self:tell(("%s went\noffline."):format(name or "Someone"))
   else
-    self.ui:say(("%s said no."):format(name or "Someone"))
+    self:tell(("%s said no."):format(name or "Someone"))
   end
 end
 
@@ -1979,7 +2309,7 @@ function M:claimBuriedEngine(game, plan)
   end
   local npcId = Wire.npcId(plan.npcId)
   if not npcId then return nil end
-  local states = game and game.stack and game.stack.states
+  local states = stackStates(game)
   if type(states) ~= "table" then return nil end
   for i = #states, 1, -1 do
     local state = states[i]
@@ -2081,7 +2411,7 @@ function M:begin(game, plan)
     ready = false,
   }
 
-  local packed = CoopBattle.packParty(game and game.save and game.save.party, game)
+  local packed = CoopBattle.packParty(M.ownParty(game), game)
   if not packed then
     -- The engine's link modules are what pack a party, and without them there
     -- is no battle to have. Said out loud, and the trainer handed back, rather
@@ -2095,8 +2425,10 @@ function M:begin(game, plan)
   -- builds all four battlers and holds only its own save. A badge set read
   -- locally by the host would hand its own boosts to everybody and nobody
   -- else theirs -- and, worse, the four copies of the field would disagree
-  -- about how hard everyone hits.
-  local mine = M.badgesOf(game)
+  -- about how hard everyone hits.  A party battle is the hub's `coop_pvp` (the
+  -- same reading as the mediated screen's mode, below): a link battle, where
+  -- `buildField` hands nobody their badges, so none are sent for it either.
+  local mine = M.badgesOf(game, M.ranksPoints(plan) and "coop_pvp" or nil)
   self.battle.badges[self.party.selfId or "me"] = mine
   self.transport:send(Wire.COOP_RELAY,
     { payload = { t = "party", mons = packed, badges = mine } })
@@ -2132,17 +2464,34 @@ end
 -- The badges this player has earned, as a list for the wire.
 --
 -- Same dual-gen path as MediatedBattle.badgesOf (MK403): never hard-require
--- Gen 1 `src.battle.Damage` on Gold.
-function M.badgesOf(game)
-  return Mediated.badgesOf(game)
+-- Gen 1 `src.battle.Damage` on Gold.  `mode` as there: a link mode
+-- (`coop_pvp`) sends none, anything else -- nil included -- what the save holds.
+function M.badgesOf(game, mode)
+  return Mediated.badgesOf(game, mode)
 end
 
 -- Give up on a battle that cannot be assembled, without breaking rule 2: the
 -- trainer somebody walked into is still fought.
+--
+-- And say so to the hub, with the same one-goodbye-closes-all COOP_LEAVE a
+-- finished battle sends. The hub seated every member the moment the plan was
+-- agreed, and since #87 it refuses to seat a player still bound to an
+-- unfinished fight -- so an assembly given up here in silence left all of them
+-- hub-busy until the hour-long sweep (COOP_BATTLE_MAX), and the others waiting
+-- in `begin`, or on a screen for a battle_ready, for a fight nobody was coming
+-- to. With nothing running yet the hub closes the group, calls the record off
+-- and tells everyone in it (M:onBattleOutcome). Sent for any assembly, id or
+-- not: the goodbye names no fight, it closes whichever group the hub has this
+-- player in -- and there is only ever the one -- while a goodbye from a
+-- member it has already let out is dropped there.
 function M:abandon(text)
+  local assembling = self.battle ~= nil
   self.running = false
   self.battle = nil
-  self.ui:say(text, function() self:release() end)
+  if assembling then self.transport:send(Wire.COOP_LEAVE, {}) end
+  -- Gen 3: the held trainer is handed back before the line (M:letGo3).
+  if self:letGo3(text) then return nil end
+  self:tell(text, function() self:release() end)
   return nil
 end
 
@@ -2231,22 +2580,45 @@ end
 --
 -- Nil-safe about the screen: the record on the hub is opened when the battle is
 -- *agreed*, and the screen goes up a short exchange later, so a message that
--- arrives in that window has nowhere to go and is dropped. It cannot be one that
--- matters -- mmo.battle_ready is not sent until every seat has uploaded a party,
--- and the uploads come from the screens.
+-- arrives in that window has nowhere to go and is dropped. A ready or an event
+-- cannot be one that matters -- mmo.battle_ready is not sent until every seat
+-- has uploaded a party, and the uploads come from the screens. An outcome can;
+-- see M:onBattleOutcome.
 function M:onBattleReady(msg)
   local ready = Wire.battleReady(msg)
   if ready and self.state then self.state:onBattleReady(ready) end
 end
 
+-- Read in this boot's own vocabulary (Wire.battleEvent's `generation`): Gen 1
+-- and Gen 2 read an event exactly as before Gen 3 had a stream, and only a
+-- Gen 3 client reads the Gen 3 kinds and fields its referee sends.
 function M:onBattleEvent(msg)
-  local event = Wire.battleEvent(msg)
-  if event and self.state then self.state:onBattleEvent(event) end
+  local state = self.state
+  local event = Wire.battleEvent(msg, Gen.generation(state and state.game))
+  if event and state then state:onBattleEvent(event) end
 end
 
+-- In this boot's own vocabulary too: an outcome's `payDay` is bounded by the
+-- reader's cart (Wire.battleOutcome's `generation` -- Red and Gold's 999999
+-- from contract K11, Gen 3's u16).
+--
+-- **The one message that does matter before the screen is up.** An outcome
+-- that arrives while this client is still assembling can only be the hub
+-- calling the fight off -- a member gave up (M:abandon) or dropped before
+-- every seat uploaded, so there is no sim to have decided anything. The hub
+-- has already let every seat out; dropping it here left this client waiting
+-- in `begin` for a field that is never coming, with the trainer it walked
+-- into still held. Matched on the plan's id, so a stale outcome for some
+-- other fight cannot end this one.
 function M:onBattleOutcome(msg)
-  local outcome = Wire.battleOutcome(msg)
-  if outcome and self.state then self.state:onBattleOutcome(outcome) end
+  local state = self.state
+  local outcome = Wire.battleOutcome(msg, Gen.generation(state and state.game))
+  if not outcome then return end
+  if state then return state:onBattleOutcome(outcome) end
+  local plan = self.battle and self.battle.plan
+  if plan and plan.id ~= nil and outcome.battle == plan.id then
+    return self:abandon("The battle was\ncalled off.")
+  end
 end
 
 -- Transport became ready again under a live mediated co-op fight.
@@ -2279,12 +2651,12 @@ function M:tryStart(game)
     -- The host is the only client that ever sees all four parties, so it is
     -- the only one that can know this -- and the other three are sitting in
     -- `begin` with `running` set, waiting for a field that is now never
-    -- coming. Told over the relay first and then closed with the same
-    -- one-goodbye-closes-all COOP_LEAVE a finished battle uses: after the
-    -- goodbye the group is gone and there is no longer any path to reach them.
+    -- coming. Told over the relay first, so they hear the reason; abandon's
+    -- COOP_LEAVE then closes the group, and after that goodbye there is no
+    -- longer any path to reach them. A refusal without a sentence of its own
+    -- for them still reaches them, as the hub calling the fight off.
     if closeGroup then
       self.transport:send(Wire.COOP_RELAY, { payload = { t = "abort" } })
-      self.transport:send(Wire.COOP_LEAVE, {})
     end
     return self:abandon(why or "That battle can't\nstart.")
   end
@@ -2399,9 +2771,116 @@ function M:buildField(game, battle, humans)
   -- thing about the NPC side that is not already in the slots, and every
   -- client needs it to show the same face and play the same theme. A client
   -- that joined by answering an invitation never walked into this trainer and
-  -- so has no other way to know.
+  -- so has no other way to know.  Gold's record carries no `id` (the engine
+  -- names a trainer by its class and member, src/world/gen2/World.lua
+  -- startScriptedBattle), so there the id is the pair (`M.trainerToken2`).
   local trainer = plan.engine and plan.engine.trainer
-  return { slots = slots, host = plan.hostId, trainer = trainer and trainer.id }
+  local named = trainer and trainer.id
+  if Gen.generation(game) == 2 then named = M.trainerToken2(game, trainer) end
+  return { slots = slots, host = plan.hostId, trainer = named }
+end
+
+-- ------- Gold: a trainer by its class and member
+--
+-- The cart names a trainer by the two bytes its `trainer` struct carries
+-- (macros/scripts/maps.asm `trainer`): the class constant and the member's
+-- number inside it -- `loadtrainer` takes the same pair -- and the engine's
+-- battle record keeps both (src/world/gen2/World.lua startScriptedBattle:
+-- `class`, the numeric constant; `classId`, its name; `memberId`, the member
+-- row's own constant out of trainer_constants.asm).  No `id`: so before this a
+-- Gold co-op field named no trainer, and an invite joiner fought one with no
+-- record -- no name on the field, the "two parties" theme for a gym leader,
+-- and nothing to vouch for a held item a THIEF took off the trainer.
+--
+-- On the wire the pair is one Wire.id-shaped token, `<class>-<memberId>`: the
+-- class number (digits) and the member constant (`[%w_]`), so the one hyphen
+-- splits it unambiguously and no new field is needed.  nil when either half
+-- is missing or the token would not survive Wire.id (a modded member past 40
+-- characters) -- the joiner then fights faceless, as before.
+function M.trainerToken2(game, trainer)
+  if type(trainer) ~= "table" then return nil end
+  local member = trainer.memberId
+  if type(member) ~= "string" or not member:match("^[%w_]+$") then return nil end
+  local class = tonumber(trainer.class)
+  if not class then
+    -- A record that names its class only by constant: the class row's index.
+    local data = game and game.data
+    local classes = type(data) == "table" and type(data.trainers) == "table"
+      and data.trainers.classes or nil
+    local row = type(classes) == "table" and type(trainer.classId) == "string"
+      and classes[trainer.classId] or nil
+    class = type(row) == "table" and tonumber(row.index) or nil
+  end
+  if not class or class < 0 or class ~= math.floor(class) then return nil end
+  return Wire.id(("%d-%s"):format(class, member))
+end
+
+-- The joiner's half: this client's own record for the trainer a Gold field's
+-- token names, built from its own copy of the data the way the engine builds
+-- the walk-in's -- Trainers.lookup over the class's members (engine data, read
+-- only; the Gold engine's module, required lazily behind the generation the
+-- caller checked) -- and shaped like World:startScriptedBattle's `opts.trainer`
+-- so everything that reads a walk-in's record reads this one alike:
+--
+--   class / classId / memberId   the pair, and the class constant (the music
+--                                 ladder's key, Gen.gen2BattleSong)
+--   name / trainerName / className   "YOUNGSTER JOEY", "JOEY", "YOUNGSTER" --
+--                                 a rival is wRivalName alone, this player's
+--                                 own (PlaceEnemysName's RIVAL1 / RIVAL2 arm)
+--   roster                        the member's party rows, whose held items
+--                                 CoopBattle:trainerItems2 vouches for
+--   items / attributes / baseMoney   the class's attribute row
+--
+-- No `party` (the engine-built monsters: the trainer's side is the field's
+-- own, packed by whoever walked in) and no `id` -- exactly as the walk-in's
+-- record has none, so nothing keyed on a Gen 1 id (Coop:syntheticFinish's
+-- class bind) reads a Gold record differently on the two clients.  nil for a
+-- token this build has no member for.
+function M.trainerRecord2(game, token)
+  if type(token) ~= "string" then return nil end
+  local classText, member = token:match("^(%d+)%-([%w_]+)$")
+  local class = tonumber(classText)
+  if not (class and member) then return nil end
+  local data = game and game.data
+  if not (type(data) == "table" and type(data.trainers) == "table") then return nil end
+  local ok, Trainers = pcall(require, "src.world.gen2.Trainers")
+  if not (ok and type(Trainers) == "table" and type(Trainers.classIndex) == "function"
+          and type(Trainers.lookup) == "function") then
+    return nil
+  end
+  local okIndex, byClass = pcall(Trainers.classIndex, data.trainers)
+  local entry = okIndex and type(byClass) == "table" and byClass[class] or nil
+  local rows = type(entry) == "table" and type(entry.trainers) == "table" and entry.trainers or nil
+  local number
+  for i, row in ipairs(rows or {}) do
+    if type(row) == "table" and row.id == member then number = i; break end
+  end
+  if not number then return nil end
+  local okLook, record = pcall(Trainers.lookup, data.trainers, class, number)
+  if not (okLook and type(record) == "table") then return nil end
+  local display = record.name
+  if type(record.className) == "string" and record.className ~= "" then
+    display = record.className .. " " .. (record.name or "")
+  end
+  local bareName = record.name
+  if record.classId == "RIVAL1" or record.classId == "RIVAL2" then
+    local save = game.save
+    display = (type(save) == "table" and type(save.rival) == "table"
+      and save.rival.name) or "???"
+    bareName = display
+  end
+  return {
+    class = record.class,
+    classId = record.classId,
+    memberId = record.id,
+    name = display,
+    trainerName = bareName,
+    className = record.className,
+    roster = record.roster,
+    baseMoney = record.baseMoney,
+    attributes = record.attributes,
+    items = record.items,
+  }
 end
 
 -- The NPC side, taken from the battle the engine already built.
@@ -2472,7 +2951,16 @@ end
 function M.trainerFor(game, field, engine)
   if engine and engine.trainer then return engine.trainer end
   local id = Wire.id(field and field.trainer)
+  -- Gen 3: the field names the cart's trainer number; the record is this
+  -- client's own copy of that trainer row.
+  if id and onGen3() then return CoopField.trainerRecord3(tonumber(id)) end
   if not (id and game and game.data) then return nil end
+  -- Gold: the field names the class and member (`M.trainerToken2`), and the
+  -- record is built off this client's own data.  Never the Gen 1 lookup
+  -- below: Gold's `data.trainers` is the class table (`classes`,
+  -- `battleTower`), and a token that happened to name one of its keys would
+  -- hand the screen that table as a trainer.
+  if Gen.generation(game) == 2 then return M.trainerRecord2(game, id) end
   return (game.data.trainers or {})[id]
 end
 
@@ -2481,6 +2969,9 @@ end
 -- Never by class alone -- two Bug Catchers on Route 3 must not share a purse.
 function M.trainerPrizeInfo(game, npcId)
   if not (npcId and game and game.data) then return nil, 0, nil, nil end
+  -- Gen 3 has no npcPool to read a class off (its trainers are numbered rows,
+  -- and the prize is M.prize3's).
+  if onGen3() then return nil, 0, nil, nil end
   local ow = M.overworldOf(game)
   local npc = ow and ow.npcPool and ow.npcPool[npcId]
   local def = npc and npc.def
@@ -2511,9 +3002,77 @@ end
 -- co-op fight names a trainer class (field / engine / screen), that class
 -- must match the NPC. Hub cannot verify map data; without the bind a forged
 -- wire npcId could mark a random object beaten.
+-- Gen 3's synthetic finish, for an invite joiner who never walked into the
+-- trainer: the trainer's flag set in this client's own flag store (so the
+-- trainer is beaten in both worlds, as a walk-in's opcode sets it), and the
+-- prize the walk-in would have been paid.
+--
+-- Everything that names the trainer here came off the wire from the partner:
+-- the npcId, and the fight's trainer record too (an invite joiner's screen
+-- looked the record up from the field's trainer id -- M.trainerFor). The two
+-- agreeing proves only that the partner was consistent. So the bind is to
+-- this client's own world, the way Gen 1's is to its npcPool: the trainer has
+-- to be one standing on the map this player is on (CoopField.trainerOnMap3 --
+-- the map's own object events, asked which trainer each one fights). A
+-- trainer who is not here is not beaten here and pays nothing, whatever the
+-- partner says: without the bind a partner could name a gym leader three
+-- towns away and have this save mark them beaten and pay their purse. The
+-- consistency check stays as a cheap second refusal.
+function M:syntheticFinish3(game, npcId, coopState)
+  local tid = CoopField.originTrainer3(npcId)
+  if not tid then return false end
+  local expected = coopState and coopState.trainer
+    and tonumber(coopState.trainer.trainerId or coopState.trainer.id)
+  if expected and expected ~= tid then
+    mod.log:warn("co-op win skipped synthetic finish for trainer %s -- the "
+      .. "fight was against trainer %s; reload near the trainer if the defeat "
+      .. "flag looks wrong", tostring(tid), tostring(expected))
+    return false
+  end
+  if not CoopField.trainerOnMap3(tid) then
+    mod.log:warn("co-op win skipped synthetic finish for trainer %s -- no such "
+      .. "trainer stands on this map, so nothing was marked beaten or paid; the "
+      .. "fight still counts for your partner", tostring(tid))
+    return false
+  end
+  local record = CoopField.trainerRecord3(tid)
+  if not record then
+    mod.log:warn("co-op win could not finish trainer %s -- this cart has no "
+      .. "such trainer; the fight still counts for your partner", tostring(tid))
+    return false
+  end
+  local Flags = Gen3.engine("src.core.game3.scripting.flags")
+  local Space = Gen3.engine("src.core.game3.scripting.space")
+  local store = Space and ((type(Space.getStore) == "function" and Space.getStore())
+    or Space.store) or nil
+  if Flags and store and type(Flags.trainerFlagId) == "function"
+     and type(Flags.setFlag) == "function" then
+    local ok, err = pcall(function()
+      Flags.setFlag(store, nil, Flags.trainerFlagId(tid), true)
+    end)
+    if not ok then
+      mod.log:warn("co-op win could not mark trainer %s beaten (%s); reload "
+        .. "near the trainer if they challenge you again", tostring(tid),
+        tostring(err))
+    end
+  end
+  M.prize3(tid, game, {
+    double = record.doubleBattle,
+    amuletCoin = coopState and type(coopState.amuletCoin3) == "function"
+      and coopState:amuletCoin3() or nil,
+  })
+  M.offerEvolutions(game, coopState and coopState.leveledUp or nil, "win",
+    coopState and coopState.evoResolved or nil)
+  return true
+end
+
 function M:syntheticFinish(game, plan, coopState)
   local npcId = Wire.npcId(plan and plan.npcId)
   if not npcId then return false end
+  -- Gen 3: the npcId is the cart's trainer number (CoopField.originId3), and
+  -- the finish is the cart's: the trainer's flag in this client's own flag
+  -- store, and its prize.
+  if onGen3() then return self:syntheticFinish3(game, npcId, coopState) end
   local save = game and game.save
   if not save then return false end
 
@@ -2560,9 +3119,16 @@ function M:syntheticFinish(game, plan, coopState)
   end
 
   local trainer, best, class, partyIndex = M.trainerPrizeInfo(game, npcId)
-  local prize = (tonumber(trainer and trainer.baseMoney) or 0) * best
+  -- Doubled for an AMULET COIN this player sent out (Gold; see
+  -- M.payTrainerPrize) -- the screen is the one that saw it come out.
+  local amulet = coopState and type(coopState.amuletCoin2) == "function"
+    and coopState:amuletCoin2() or nil
+  local prize = (tonumber(trainer and trainer.baseMoney) or 0) * best * M.amuletFactor(amulet)
   if prize > 0 then
-    save.money = math.min(999999, (tonumber(save.money) or 0) + prize)
+    -- Through Gen.money, which knows where each generation keeps it: Gold
+    -- keeps it on `save.player.money`, and writing `save.money` here paid
+    -- every Gold invite joiner's prize into a field nothing reads.
+    Gen.money.set(save, math.min(999999, Gen.money.get(save) + prize))
   end
 
   if ow then
@@ -2656,7 +3222,13 @@ function M:startBattle(game, field)
     partyIndex = partyIndex or pidx
   end
   if not oppClass and trainer then
+    -- Gold's record names its class by constant (`classId`) and has no `id`;
+    -- the walk-in's engine battle carries the same reading
+    -- (src/Client.lua's Gold aliases: `oppClass = classId or class`).
     oppClass = trainer.id
+    if oppClass == nil and Gen.generation(game) == 2 then
+      oppClass = trainer.classId or trainer.class
+    end
   end
   partyIndex = tonumber(partyIndex) or 1
   -- The picture, unlike the record, is not re-derived. The engine loads a pic
@@ -2681,8 +3253,10 @@ function M:startBattle(game, field)
     }
     if slot.owner and self.party:isSelf(slot.owner) then
       mine = i
-      built.party = game and game.save and game.save.party
-      built.bag = game and game.save and game.save.inventory
+      built.party = M.ownParty(game)
+      -- Gen 3's bag is the session's pockets, read by Sheet3 at upload; there
+      -- is no `inventory` table to hand the screen.
+      built.bag = (not onGen3()) and game and game.save and game.save.inventory or nil
     elseif slot.owner then
       built.party = CoopBattle.unpackParty(game, slot.party)
     else
@@ -2763,6 +3337,11 @@ function M:startBattle(game, field)
       if plan.kind ~= "wild" and plan.mode ~= "coop_wild" then return nil end
       return plan.wildCatchMon or M.wildMonOf(plan.engine)
     end)(),
+    -- Gold's battle type off the encounter the host walked into (a forced-item
+    -- encounter holds item 1 every time), for the wild held item the host
+    -- rolls at its upload (CoopBattle:wildMons, MediatedBattle.rollWildItem2).
+    wildBattleType = engine and type(engine.battle) == "table"
+      and engine.battle.battleType or nil,
     -- Whether a win here is worth points, so the screen can say so once
     -- rather than leave a player wondering why their rating did not move.
     ranksPoints = M.ranksPoints(battle.plan),
@@ -2782,6 +3361,16 @@ function M:startBattle(game, field)
   if engine then
     self:unwindTo(game, engine, true)
     self.engineBattle = engine
+    -- Gen 3: the fight the stand-in held is being fought now, so the cart's
+    -- battle-start bookkeeping runs now (and only now -- a wait that timed
+    -- out handed the fight back, and the cart's own start ran it then).
+    if engine.gen3Divert and type(engine.begin3) == "function" then
+      local ok, why = pcall(engine.begin3, engine)
+      if not ok then
+        mod.log:warn("the start of this battle could not be recorded (%s); the "
+          .. "battle itself is unaffected", tostring(why))
+      end
+    end
   end
   -- The encounter slot is emptied here whatever was in it, and the two cases
   -- it empties are different.
@@ -2878,11 +3467,48 @@ function M:onBattleOver(result, game, state, toLearn)
     -- party -- which is exactly the party the evolution check will walk.
     self.engineBattle.leveledUp = state and state.leveledUp or nil
     self.engineBattle.evoResolved = state and state.evoResolved or nil
+    -- Gen 3's prize doubles for an AMULET COIN this player fielded; only the
+    -- screen knows which of our monsters were sent out.
+    if self.engineBattle.gen3Divert and state and type(state.amuletCoin3) == "function" then
+      self.engineBattle.amuletCoin = state:amuletCoin3()
+    elseif state and type(state.amuletCoin2) == "function" then
+      -- ...and Gold's (M.payTrainerPrize), the same question asked the same way.
+      self.engineBattle.amuletCoin = state:amuletCoin2() == true or nil
+    end
     self.encounter = { engine = self.engineBattle, game = game }
     self.engineBattle = nil
   end
   self:note(("The %s ended in a %s."):format(
     partyFightNoun(self.party:count()), tostring(result)))
+
+  -- A fight between players is a link battle, and no cart ends one with a
+  -- whiteout: Gen 3 reloads the party it started with (pokefirered
+  -- cable_club.c CB2_ReturnFromCableClubBattle -> LoadPlayerParty), Gold the
+  -- party it saved before the Colosseum (pokecrystal engine/link/link.asm
+  -- `farcall LoadPokemonData`), and Red heals it in the Cable Club
+  -- (pokered CableClub_DoBattleOrTradeAgain `predef HealParty`) -- no money
+  -- taken, no trip to a POKeMON CENTER, and nothing owed after it.  The
+  -- screen fought with copies of this player's monsters
+  -- (CoopBattle.sparOpts), so the save already stands as it did before.
+  -- Every generation since wave 5 (Red and Gold used to white out the loser).
+  if M.ranksPoints(plan) or (state ~= nil and Mediated.LINK_MODES[state.mode] == true) then
+    return
+  end
+
+  -- An escape is no defeat.  A refereed Red / Gold fight that ended on a
+  -- `run` -- the party's own RUN, the wild monster's ROAR / WHIRLWIND sending
+  -- ours off (the referees name the target's side the runner and the loser:
+  -- BattleSim Turn `_concedeRun` since FX-R1, BattleSim2's), or the party's
+  -- sending the wild one off -- reads as a "loss" or a "win" off the outcome's
+  -- lists, and a "loss" is a blackout to `blacksOut`.  The carts end every one
+  -- of those on the move's or GotAwayText's line and nothing more (pokered
+  -- SwitchAndTeleportEffect / TryRunningFromBattle set wEscapedFromBattle or
+  -- wBattleResult 2, never HandlePlayerBlackOut; pokecrystal's ForceSwitch /
+  -- TryToRunAwayFromBattle a DRAW), so the rest of this ending reads it as the
+  -- engine's own "run", as src/SoloBattle.lua's `engineResult` does for a
+  -- solo fight.  Gen 3 keeps its reading.
+  local outcome = result
+  if refereed and state.medEndReason == "run" and not state.gen3 then outcome = "run" end
 
   -- Asked here, first, and once.
   --
@@ -2891,7 +3517,17 @@ function M:onBattleOver(result, game, state, toLearn)
   -- ritual heals, and the forget-a-move menu and the engine's post-battle flow
   -- both touch the same party. Asked later it would be answering about the
   -- world after the fix rather than the world that needed one.
-  local blackout = M.blacksOut(result, game)
+  local blackout = M.blacksOut(outcome, game)
+  -- A knockout draw is one decision for every client: the referee's sheets
+  -- say both sides are down. Leftover HP on this save does not complete the
+  -- trainer. A timeout, a disconnect and a forfeit stay draws, and halt
+  -- when this party is still standing. Gen 3's rule (BattleSim3's knockout
+  -- draw, read off the outcome's `reason` -- the hub sends no `how`); Red and
+  -- Gold keep deciding a draw's blackout from this save alone.
+  if outcome == "draw" and state and state.gen3
+     and CoopField.knockoutHow3(state.medEndHow, state.medEndReason) then
+    blackout = true
+  end
 
   self:offerForgets(game, toLearn)
   -- Consumed, not dropped. The trainer has been fought -- by four of them --
@@ -2918,14 +3554,24 @@ function M:onBattleOver(result, game, state, toLearn)
   -- exit, which is what reaches this function. The ritual's save writes land
   -- immediately; its warp waits for whatever the two lines above may have put
   -- on screen (see M:pumpBlackout).
-  local handled, engineRitual = self:consume(result, blackout)
+  local handled, engineRitual = self:consume(outcome, blackout)
   -- Invite / menu joiner: no buried BattleState, so consume is a no-op. On a
   -- win, finish the trainer off synthetically from the waiter's npcId --
   -- defeat flag, prize, afterBattle -- without pushing a fake battle. Never
   -- when consume already ran (walk-in engineBattle): that would double-pay.
-  if not handled and result == "win" and plan and plan.npcId then
+  if not handled and outcome == "win" and plan and plan.npcId then
     handled = self:syntheticFinish(game, plan, state)
   end
+  -- Gen 3 never whites out a won battle, whatever it cost one player's team.
+  -- pret decides the whiteout from the battle's outcome alone
+  -- (CB2_EndTrainerBattle / IsPlayerDefeated: B_OUTCOME_WON returns to the
+  -- field and carries the script on), and a partner battle won with the
+  -- player's own half wiped -- Emerald's multi battles -- leaves that party
+  -- exactly as the fight left it, which is also what battle_bridge.lua's
+  -- writeback does for any win. Running the ritual here was worse than a
+  -- divergence: the trainer's beaten script (the badge, the TM, the words)
+  -- runs after the win, and the warp halted it halfway through.
+  if onGen3() and outcome == "win" then return end
   if blackout and not (handled and engineRitual) then self:blackout(game) end
 end
 
@@ -2959,6 +3605,22 @@ function M:offerForgets(game, toLearn)
   local function nextOne()
     local entry = table.remove(pending, 1)
     if not entry then return end
+    -- Gen 3 has no MoveLearnMenu: the cart's own exchange (LearnMove.begin
+    -- through LearnMove.open's Gen 3 arm -- "is trying to learn", the yes /
+    -- no, the summary's move picker) with its own completion, which is what
+    -- paces the next one.
+    if onGen3() then
+      local opened = LearnMove.open(game, entry.mon, entry.move, function()
+        nextOne()
+      end, { ui = self.ui, battle = false })
+      if not opened then
+        mod.log:warn("could not open the move-learning prompt for move %s; it "
+          .. "can still be learned by levelling again or from the MOVE "
+          .. "RELEARNER", tostring(entry.move))
+        nextOne()
+      end
+      return
+    end
     local ok = pcall(function()
       mod.ui.push(game, "MoveLearnMenu", entry.mon, entry.move)
     end)
@@ -3004,13 +3666,15 @@ function M:onPartyEnd()
   if self.ask then
     self.ask = nil
     self:closeAskBox()
-    self.ui:say(("The %s battle\nis off."):format(noun))
+    self:tell(("The %s battle\nis off."):format(noun))
   end
   -- A player standing at a trainer waiting for a partner who has just left the
   -- party is a player waiting for nobody, so the fight is handed back rather
   -- than left suspended. Rule 2: it still ends in a battle.
   if hadWait then
-    self.ui:say("There's nobody\nto wait for.", function() self:release() end)
+    -- Gen 3: the fight first, the sentence in the corner (M:letGo3).
+    if self:letGo3("There's nobody\nto wait for.") then return end
+    self:tell("There's nobody\nto wait for.", function() self:release() end)
   end
 end
 
@@ -3031,7 +3695,7 @@ function M:onPeerGone(id)
   if self.ask and self.ask.peer == id then
     self.ask = nil
     self:closeAskBox()
-    self.ui:say("They went offline.")
+    self:tell("They went offline.")
   end
   -- A live battle has to hear about it too, and this is the case that bites:
   -- the host waits for every human's action before resolving a turn, so a
@@ -3113,8 +3777,12 @@ function M:update(dt, game)
       -- with everything else above the battle.
       local who = self.party:partnerName() or "Your friend"
       local line = ("%s couldn't\njoin!"):format(who)
-      self:note(line)
-      self.ui:say(line, function() self:release() end)
+      -- Gen 3: the fight first, the line in the corner (M:letGo3) -- a box
+      -- here waits on a player the waiting trainer script never frees.
+      if not self:letGo3(line) then
+        self:note(line)
+        self:tell(line, function() self:release() end)
+      end
     end
   end
 
@@ -3135,7 +3803,7 @@ function M:update(dt, game)
       end
       self.ask = nil
       self:closeAskBox()
-      self.ui:say("Nobody answered\nin time.")
+      self:tell("Nobody answered\nin time.")
     end
   end
 end

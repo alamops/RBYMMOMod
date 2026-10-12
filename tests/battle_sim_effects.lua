@@ -78,8 +78,8 @@ local function dummyFighter(slot, side)
   return { slot = slot or 1, side = side or "a" }
 end
 
-local function apply(effectId, user, target)
-  return Effects.applyPrimary({
+local function apply(effectId, user, target, extra)
+  local ctx = {
     effectId = effectId,
     rng = { byte = function() return 0 end },
     userMon = user,
@@ -87,15 +87,32 @@ local function apply(effectId, user, target)
     userFighter = dummyFighter(1, "a"),
     targetFighter = dummyFighter(2, "b"),
     moveIndex = 1,
-  })
+  }
+  for k, v in pairs(extra or {}) do ctx[k] = v end
+  return Effects.applyPrimary(ctx)
+end
+
+-- R1c: only the routines that ask CheckTargetSubstitute -- the primary
+-- stat drops, PoisonEffect, ConfusionEffect -- stop at a doll (effects.asm
+-- :1436-1446).  SleepEffect, TransformEffect_ and MimicEffect never ask.
+do
+  local user = dummyMon()
+  local target = dummyMon({ species = "Beta", substitute = 40 })
+  -- A generator stuck on 0 would spin `.setSleepCounter` forever on the
+  -- cart; the referee's REDRAW_GUARD answers 1 instead.
+  local out = apply(32, user, target)
+  eq(out.nothing, false, "SLEEP_EFFECT reaches the monster behind a substitute")
+  eq(target.status, "sleep", "SLEEP_EFFECT lands through a substitute")
+  eq(target.statusTurns, 1, "a stream of zero bytes is the guard's 1 turn, not a hang")
+  eq(target.substitute, 40, "...and the doll stands")
 end
 
 do
   local user = dummyMon()
   local target = dummyMon({ species = "Beta", substitute = 40 })
-  local out = apply(32, user, target)
-  eq(out.nothing, true, "SLEEP_EFFECT vs substitute is nothing")
-  eq(target.status, nil, "SLEEP_EFFECT does not land through a substitute")
+  local out = apply(49, user, target)
+  eq(out.nothing, true, "CONFUSION_EFFECT vs substitute is nothing (CheckTargetSubstitute)")
+  eq(target.confusion, nil, "CONFUSION_EFFECT does not confuse through a substitute")
 end
 
 do
@@ -109,25 +126,37 @@ end
 do
   local user = dummyMon()
   local target = dummyMon({ species = "Beta", substitute = 40, lastMoveIndex = 1 })
+  -- DisableEffect never asks CheckTargetSubstitute (R1b, effects.asm
+  -- :1286-1367): its only test is MoveHitTest, whose doll check is the
+  -- broken drain one -- so it reaches the monster behind the doll.
   local out = apply(86, user, target)
-  eq(out.nothing, true, "DISABLE_EFFECT vs substitute is nothing")
-  eq(target.disable, nil, "DISABLE_EFFECT does not lock a move behind a substitute")
+  eq(out.nothing, false, "DISABLE_EFFECT is not stopped by a substitute")
+  eq(target.disable ~= nil, true, "DISABLE_EFFECT locks a move behind a substitute")
 end
 
 do
   local user = dummyMon()
   local target = dummyMon({ species = "Beta", substitute = 40 })
   local out = apply(57, user, target)
-  eq(out.nothing, true, "TRANSFORM_EFFECT vs substitute is nothing")
-  eq(user.transformed, nil, "TRANSFORM_EFFECT does not copy through a substitute")
+  eq(out.nothing, false, "TRANSFORM_EFFECT goes through a substitute")
+  eq(user.transformed, true, "TRANSFORM_EFFECT copies the monster behind a substitute")
 end
 
 do
-  local user = dummyMon()
-  local target = dummyMon({ species = "Beta", substitute = 40, lastMoveIndex = 1 })
-  local out = apply(82, user, target)
-  eq(out.nothing, true, "MIMIC_EFFECT vs substitute is nothing")
-  eq(user.moves[1] and user.moves[1].id, "thump", "MIMIC_EFFECT does not copy through a substitute")
+  local user = dummyMon({ moves = {
+    { id = "MIMIC", name = "MIMIC", pp = 7, maxPp = 10, ppUps = 0, power = 0,
+      accuracy = 255, type = 0, effect = 82, chance = 0 },
+  } })
+  local target = dummyMon({ species = "Beta", substitute = 40 })
+  local out = apply(82, user, target, { mimicSlot = 1 })
+  eq(out.nothing, false, "MIMIC_EFFECT goes through a substitute")
+  eq(user.moves[1] and user.moves[1].id, "thump", "MIMIC_EFFECT copies the picked move behind a doll")
+  eq(user.moves[1] and user.moves[1].pp, 7, "...and the slot keeps MIMIC's PP (`ld [hl], a` writes the id alone)")
+  Effects.restoreMoves(user)
+  eq(user.moves[1] and user.moves[1].id .. ":" .. user.moves[1].pp, "MIMIC:7",
+     "a switch-out gives the party's MIMIC back, at the slot's PP")
+  local missed = apply(82, user, target, {})
+  eq(missed.messages[1], "But, it failed!", "MIMIC with no pick fails")
 end
 
 do
@@ -188,6 +217,110 @@ do
   eq(Effects.applyVitamin(capped, "PROTEIN"), nil, "fails at Stat Exp ≥ 25600")
 end
 
+-- The stored-stat machinery (Effects' "Stored battle stats" note), on bare
+-- monster tables: CalculateModifiedStat's two clamps, StatModifierUp/Down's
+-- one each, the walls, the penalty, and the glitch re-runs.
+eq(Effects.applyStage(1, -6), 1, "applyStage floors at 1 (1 x 25/100 = 0)")
+eq(Effects.applyStage(500, 2), 999, "applyStage caps at 999")
+do
+  local mon = dummyMon()
+  Effects.ensureBattleStats(mon)
+  eq(mon.cur.atk, 40, "a bare monster gets battle stats from its stats")
+  eq(mon.partyStats.atk, 40, "...and a party struct")
+  local seat = dummyFighter(0, "a")
+  seat.badges = { BOULDERBADGE = true, SOULBADGE = true }
+  local outcome, stage = Effects.changeStat({ mon = mon, fighter = seat, stat = "atk",
+    delta = 1, mover = seat })
+  eq(outcome, "rose", "a raise rises")
+  eq(stage, 1, "...to +1")
+  -- 40 x 150/100 = 60 -> +7 = 67; Speed 40 -> +5 = 45 (the badge re-run).
+  eq(mon.cur.atk, 67, "the raised stat is rebuilt, then badge-boosted")
+  eq(mon.cur.spd, 45, "...and every other badge stat is boosted too")
+
+  local foe = dummyMon({ species = "Beta", status = "paralysis" })
+  Effects.ensureBattleStats(foe)
+  Effects.changeStat({ mon = mon, fighter = seat, stat = "acc", delta = 1,
+    mover = seat, nonMover = foe })
+  eq(foe.cur.spd, 10, "the re-penalty quarters the paralysed non-mover: 40 -> 10")
+
+  mon.cur.atk = 999
+  local before = mon.stages.atk
+  outcome, stage = Effects.changeStat({ mon = mon, fighter = seat, stat = "atk",
+    delta = 2, mover = seat })
+  eq(outcome, "stuck", "a raise on 999 fails")
+  eq(stage, before + 1, "...and a +2 nets +1")
+
+  local low = dummyMon({ species = "Gamma" })
+  Effects.ensureBattleStats(low)
+  low.cur.def = 1
+  outcome, stage = Effects.changeStat({ mon = low, fighter = dummyFighter(3, "b"),
+    stat = "def", delta = -1, mover = seat })
+  eq(outcome, "stuck", "a drop on 1 fails")
+  eq(stage, 0, "...the stage wound back")
+  low.stages.def = -6
+  eq((Effects.changeStat({ mon = low, fighter = dummyFighter(3, "b"), stat = "def",
+    delta = -1, mover = seat })), "min", "-6 cannot go lower")
+
+  local burned = dummyMon({ status = "burn" })
+  Effects.ensureBattleStats(burned)
+  Effects.applyStatusPenalty(burned)
+  eq(burned.cur.atk, 20, "a burn halves the stored Attack")
+  Effects.loadBattleStats(burned, { BOULDERBADGE = true })
+  eq(burned.cur.atk, 22, "a switch-in: 40 -> 20 -> +2 = 22")
+end
+
+-- CantLowerAnymore (pokered effects.asm): `cp ATTACK_DOWN_SIDE_EFFECT; ret nc`
+-- -- a side-effect drop that finds the stage already at -6 fails without a
+-- word, as it does at a stat of 1; a primary at -6 still prints its line.
+do
+  local function floored()
+    local mon = dummyMon({ species = "Beta" })
+    Effects.ensureBattleStats(mon)
+    mon.stages.spd = -6
+    return mon
+  end
+  local sideTarget = floored()
+  local side = Effects.applySide({
+    effectId = 70, chance = 100, rng = { byte = function() return 0 end },
+    targetMon = sideTarget, targetFighter = dummyFighter(3, "b"),
+    userFighter = dummyFighter(0, "a"),
+  })
+  eq(side.proc, true, "the side effect procs")
+  eq(#side.messages, 0, "and says nothing at -6")
+  eq(#side.events, 0, "nor emits a stat event")
+  eq(sideTarget.stages.spd, -6, "the stage stays at -6")
+
+  local primary = apply(20, dummyMon(), floored())
+  -- CantLowerAnymore's NothingHappenedText (R1b, effects.asm :705-710).
+  eq(primary.messages[1], "Nothing happened!", "the primary at -6 says so")
+  eq(#primary.messages, 1, "...once")
+end
+
+-- Red's side-effect odds, re-derived from the expressions pokered writes them
+-- as (engine/battle/effects.asm, RGBDS `percent` = `* $ff / 100`), so a typo in
+-- the table cannot hide behind a vector built from the same typo.
+do
+  local function percent(n) return math.floor(n * 255 / 100) end
+  local CART = {
+    [2] = percent(20) + 1, [77] = percent(20) + 1, [33] = percent(40) + 1,
+    [4] = percent(10) + 1, [5] = percent(10) + 1, [6] = percent(10) + 1,
+    [34] = percent(30) + 1, [35] = percent(30) + 1, [36] = percent(30) + 1,
+    [31] = percent(10) + 1, [37] = percent(30) + 1,
+    [68] = percent(33) + 1, [69] = percent(33) + 1, [70] = percent(33) + 1,
+    [71] = percent(33) + 1, [76] = percent(10),
+  }
+  local count = 0
+  for id, threshold in pairs(Effects.SIDE_THRESHOLD) do
+    count = count + 1
+    eq(threshold, CART[id], "SIDE_THRESHOLD[" .. id .. "] is the cart's expression")
+    eq(Effects.sideThreshold(id, 0), CART[id], "chance 0 reads it for effect " .. id)
+  end
+  eq(count, 16, "sixteen side-effect ids, no more")
+  eq(Effects.COMPUTER_DROP_MISS, percent(25) + 1, "the computer's drop miss is 25 percent + 1")
+  eq(Effects.sideThreshold(4, 30), percent(30), "an explicit percent has no + 1")
+  eq(Effects.sideThreshold(0, 100), 0, "no routine, no threshold")
+end
+
 eq(Effects.itemFailsOnFainted(Effects.itemEffect("POTION")), true,
    "Potion fails on a fainted mon")
 eq(Effects.itemFailsOnFainted(Effects.itemEffect("ETHER")), true,
@@ -199,6 +332,122 @@ eq(Effects.itemFailsOnFainted(Effects.itemEffect("PROTEIN")), true,
 eq(Effects.itemFailsOnFainted(Effects.itemEffect("REVIVE")), false,
    "Revive is faintedOnly, not a fail-on-fainted")
 eq(Effects.itemFailsOnFainted(nil), false, "nil effect is not fail-on-fainted")
+
+-- RP1 (gen12-referee-gaps-fix polish): GetMaxPP over the PP Up bits the byte
+-- holds now (Effects.getMaxPp; engine/items/item_effects.asm GetMaxPP /
+-- AddBonusPP), the base behind a sheet's stated maximum (basePpOf),
+-- ItemUsePPRestore's `.restorePP` (restorePp) -- a slot past its wrap brought
+-- DOWN to the maximum, MAX ETHER's whole-byte compare -- and a MIMIC's
+-- switch-out re-reading GetMaxPP over the bits its slot holds by then.
+do
+  eq(Effects.getMaxPp(35, 0), 35, "GetMaxPP: no PP Up is the base")
+  eq(Effects.getMaxPp(35, 3), 56, "...each PP Up adds a fifth of it")
+  eq(Effects.getMaxPp(40, 3), 61, "...capped at 7 a PP Up")
+  eq(Effects.getMaxPp(10, 1), 12, "...a fifth of 10 is 2")
+  eq(Effects.basePpOf(56, 3), 35, "the base behind 56 with three PP Ups")
+  eq(Effects.basePpOf(61, 3), 40, "...behind 61")
+  eq(Effects.basePpOf(18, 0), 18, "...with none, the maximum itself")
+  eq(Effects.basePpOf(17, 1), nil, "...and none behind 17 with one (16, then 18)")
+  eq(Effects.basePpOf(99, 0), nil, "...nor past the six bits a base fits in")
+
+  local m = { pp = 63, ppUps = 0, maxPp = 35 }
+  eq(Effects.restorePp(m, 10), true, "ETHER on a slot past its wrap: restored")
+  eq(m.pp, 35, "...brought down to GetMaxPP (63 + 10 is past it)")
+  eq(Effects.restorePp(m, 10), false, "ETHER at the maximum: `ret z`, no effect")
+  m = { pp = 30, ppUps = 0, maxPp = 35 }
+  eq(Effects.restorePp(m, 10), true, "ETHER: 10 more...")
+  eq(m.pp, 35, "...kept at the maximum")
+  m = { pp = 5, ppUps = 2, maxPp = 49 }
+  Effects.restorePp(m, 10)
+  eq(m.pp .. "/" .. m.ppUps, "15/2", "ETHER below the maximum: +10, the PP Ups beside it")
+  m = { pp = 20, ppUps = 1, maxPp = 20 }
+  eq(Effects.restorePp(m, true), true,
+     "MAX ETHER on a full move with a PP Up: the whole byte is not the maximum -- restored")
+  eq(m.pp, 20, "...to what it had")
+  m = { pp = 20, ppUps = 0, maxPp = 20 }
+  eq(Effects.restorePp(m, true), false, "MAX ETHER on a full move with none: no effect")
+  m = { pp = 63, ppUps = 3, maxPp = 56 }
+  eq(Effects.restorePp(m, true), true, "MAX ETHER past a wrap: restored")
+  eq(m.pp, 56, "...down to the maximum")
+
+  local user = dummyMon({ moves = {
+    { id = "MIMIC", name = "MIMIC", pp = 1, maxPp = 12, basePp = 10, ppUps = 1, power = 0,
+      accuracy = 255, type = 0, effect = 82, chance = 0 },
+  } })
+  apply(82, user, dummyMon({ species = "Beta" }), { mimicSlot = 1 })
+  eq(user.moves[1].maxPp .. "/" .. tostring(user.moves[1].basePp), "12/10",
+     "MIMIC's copy keeps MIMIC's GetMaxPP and the base behind it (the ETHER reads the party's MIMIC)")
+  user.moves[1].pp, user.moves[1].ppUps = 63, 0      -- a borrow, as DecrementPP leaves it
+  Effects.restoreMoves(user)
+  local back = user.moves[1]
+  eq(back.id .. ":" .. back.pp .. "/" .. back.ppUps .. "/" .. back.maxPp, "MIMIC:63/0/10",
+     "the switch-out's MIMIC: the slot's byte, and GetMaxPP over the PP Ups it holds now")
+end
+
+-- FX-R1: ItemUseBall's Rand1 loop, its W > 255 capture, PSYWAVE's two
+-- ranges, and an OHKO's wDamage -- each fed a scripted byte stream, so the
+-- draws themselves are the claim.
+do
+  local function scripted(bytes)
+    local used = 0
+    return {
+      byte = function()
+        used = used + 1
+        local b = bytes[used]
+        if b == nil then error("drew past the scripted bytes", 0) end
+        return b
+      end,
+      used = function() return used end,
+    }
+  end
+  local wild = { catchRate = 45, hp = 100, maxHp = 100 }
+  -- GREAT BALL: 201 and 255 are redrawn (`cp b / jr c, .loop` against 200),
+  -- 46 kept -- over the rate of 45 by one: no Rand2, broken free.
+  local rng = scripted({ 201, 255, 46 })
+  local caught = Effects.catchAttempt("GREAT_BALL", wild, rng)
+  eq(caught, false, "GREAT BALL: Rand1 46 > rate 45 fails")
+  eq(rng.used(), 3, "...after redrawing 201 and 255 (ItemUseBall `.loop`)")
+  -- ULTRA BALL: 151 is redrawn too (the second `cp b`, against 150).
+  rng = scripted({ 151, 200, 45, 0 })
+  caught = Effects.catchAttempt("ULTRA_BALL", wild, rng)
+  eq(caught, true, "ULTRA BALL: 151 and 200 redrawn, 45 passes, Rand2 0 catches")
+  eq(rng.used(), 4, "...four bytes")
+  -- POKé BALL takes any byte.
+  rng = scripted({ 255 })
+  eq(Effects.catchAttempt("POKE_BALL", wild, rng), false, "POKé BALL: 255 kept, over the rate")
+  eq(rng.used(), 1, "...one byte")
+  -- W > 255 captures before Rand2 (`jr nz, .captured`): HP 4 of 100 is a
+  -- quarter of 1, so W = 100 * 255 / 12 = 2125.
+  rng = scripted({ 10 })
+  eq(Effects.catchAttempt("POKE_BALL", { catchRate = 45, hp = 4, maxHp = 100 }, rng), true,
+     "W > 255: captured on Rand1 alone")
+  eq(rng.used(), 1, "...no Rand2 drawn")
+  -- MASTER BALL: `.loop`'s Random comes before the ball is looked at.
+  rng = scripted({ 77 })
+  eq(Effects.catchAttempt("MASTER_BALL", wild, rng), true, "MASTER BALL catches")
+  eq(rng.used(), 1, "...after the one byte `.loop` drew first")
+
+  -- PSYWAVE at level 2 (b = 3): the player's [1, 3) redraws a 0; the
+  -- computer's [0, 3) keeps it.
+  rng = scripted({ 0, 3, 2 })
+  eq(Effects.psywaveDamage(2, rng, false), 2, "the player's PSYWAVE redraws 0 and 3")
+  eq(rng.used(), 3, "...three bytes")
+  rng = scripted({ 3, 0 })
+  eq(Effects.psywaveDamage(2, rng, true), 0, "the computer's PSYWAVE keeps a 0 (core.asm :4776-4789)")
+  eq(rng.used(), 2, "...after redrawing 3")
+  eq(Effects.psywaveDamage(1, scripted({}), false), 1, "the player's b of 1 freezes the cart: 1, no draw")
+  eq(Effects.setDamage({ moveId = "PSYWAVE", userMon = { level = 2 }, rng = scripted({ 0 }),
+                         computerMover = true }), 0,
+     "setDamage passes the computer's range on")
+
+  -- OneHitKOEffect_'s $FFFF through STAB (a 16-bit add: 32766) and the rows
+  -- (each quotient's low two bytes).
+  eq(Effects.ohkoDamage(false, {}), 65535, "OHKO: no STAB, no row")
+  eq(Effects.ohkoDamage(true, {}), 32766, "STAB wraps: 65535 + 32767 = 32766")
+  eq(Effects.ohkoDamage(false, { 200 }), 65534, "a 2x row: 131070 keeps its low word")
+  eq(Effects.ohkoDamage(true, { 50, 50 }), 8191, "STAB then two halving rows")
+  eq(Effects.ohkoDamage(false, { 0 }), 0, "an immunity row: 0")
+end
 
 if failures > 0 then
   io.stderr:write(failures .. " failure(s)\n")

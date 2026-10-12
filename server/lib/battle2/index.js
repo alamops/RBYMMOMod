@@ -10,7 +10,8 @@
  * no ROM-derived table may live in this repository.
  *
  * Sibling of lib/battle/ (Gen1). Same purity rules; Gen2 formulas differ
- * (SpA/SpD, crit ladder, 85–100% variance, damage cap 999, freeze 1/5 thaw,
+ * (SpA/SpD, crit ladder, 85–100% variance, DamageCalc's 997+2 the one damage
+ * cap, freeze 1/5 thaw,
  * burn/poison /8). Vectors: tests/fixtures/battle_sim2_vectors.json.
  */
 
@@ -22,9 +23,13 @@ const Rng = require('./Rng.js');
 const Turn = require('./Turn.js');
 const events = require('./events.js');
 const Effects = require('./Effects.js');
+const Items = require('./Items.js');
+// The computer's AI (contract K16): AIChooseMove and AI_SwitchOrTryItem.
+const AiMove = require('./AiMove.js');
+const AiSwitch = require('./AiSwitch.js');
 
 module.exports = {
-  damage, accuracy, crit, status, Rng, Turn, events, Effects,
+  damage, accuracy, crit, status, Rng, Turn, events, Effects, Items, AiMove, AiSwitch,
   VERSION: 1,
   GENERATION: 2,
 };

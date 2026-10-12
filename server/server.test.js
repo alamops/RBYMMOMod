@@ -1543,6 +1543,37 @@ const STATUS_CONTRACT_FIELDS = [
   'admin',  // 0.9.0: which connection holds an admin code -- operator surfaces only
 ].sort();
 
+// The lock a hub holds is named by every operator surface that names its
+// protocol: the startup line, the status snapshot and stats(). Those two
+// numbers are the pair a refused player's sentence carries, so a host
+// reading any one of them after a refusal can answer it without opening
+// config.json -- and a Gen 3 hub (PROTOCOL 30) must not read as "gen 1"
+// anywhere, which the startup line used to say for every lock but 2.
+async function statusAndStatsNameTheGenerationTest() {
+  for (const generation of [1, 2, 3]) {
+    const lines = [];
+    const log = {
+      debug() {}, warn() {}, error() {},
+      info(message) { lines.push(String(message)); },
+    };
+    const { handle, dir } = await startStatusServer({ generation }, { log });
+    try {
+      ok(handle.relay.generation === generation,
+        `a generation ${generation} config locks the relay to ${generation}`);
+      ok(readStatus(handle).generation === generation,
+        `the status snapshot names generation ${generation}`);
+      ok(handle.stats().generation === generation,
+        `and so does stats(), which the admin socket answers with`);
+      ok(lines.some((line) => line.includes(`listening on`)
+        && line.includes(`gen ${generation})`)),
+        `the startup line says gen ${generation}`);
+    } finally {
+      await handle.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+}
+
 async function statusSnapshotCreatedAtStartupTest() {
   const { handle, dir } = await startStatusServer();
   try {
@@ -2189,6 +2220,7 @@ async function main() {
   await gracefulShutdownInProcessTest();
   await gracefulShutdownSigtermTest();
   await statusSnapshotCreatedAtStartupTest();
+  await statusAndStatsNameTheGenerationTest();
   await statusUpdatesAfterJoinAndLeaveTest();
   await statusStoppedAtOnCloseTest();
   await statusSnapshotCarriesNothingSensitiveTest();

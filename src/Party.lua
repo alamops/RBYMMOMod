@@ -108,10 +108,38 @@ end
 
 -- Everything about the party goes, including a half-finished invite: a
 -- prompt left armed across a disconnect would answer to a hub that is no
--- longer listening.
+-- longer listening.  So do the sentences still waiting for the player to
+-- come out of the cart's menus (see M:tell): they were about the party that
+-- just went.
 function M:reset()
   self.id, self.members = nil, {}
   self.outgoing, self.incoming = nil, nil
+  local ui = self.ui
+  if type(ui) == "table" and type(ui.dropDeferred) == "function" then
+    ui:dropDeferred(self)
+  end
+end
+
+-- ------- prompts that wait for the player
+--
+-- Everything this module puts on screen unasked -- an invite, a "said no", a
+-- "joined the party" -- arrives off the hub, whatever the player is doing.
+-- On Gen 3 it waits while the cart is using the screen (its BAG, START, an
+-- NPC's sentence: src/Ui.lua's Ui.occupied) and goes up when they are free,
+-- through Ui:whenFree.  A ui without it (the suite's stubs), and Gen 1 / Gen 2
+-- (never occupied), show it at once, as always.  What the player just asked
+-- for from the MMO menu (M:invite's lines) is on screen already and has no
+-- reason to wait.
+local function whenFree(self, game, show, opts)
+  local ui = self.ui
+  if type(ui) == "table" and type(ui.whenFree) == "function" then
+    return ui:whenFree(game, show, opts)
+  end
+  return show()
+end
+
+function M:tell(text)
+  return whenFree(self, nil, function() return self.ui:say(text) end, { owner = self })
 end
 
 -- A line in the chat log, so the party's own history says when it started
@@ -164,14 +192,24 @@ function M:onInvite(game, msg)
     return
   end
 
-  self.incoming = { from = from, name = name }
-  self.ui:confirm(game, ("%s wants to\nteam up!"):format(name), function(yes)
-    local pending = self.incoming
-    self.incoming = nil
-    if not pending then return end
-    self.transport:send(Wire.PARTY_RESPOND,
-      { to = pending.from, accept = yes and true or false })
-  end)
+  -- Held, not refused, while the player is in the cart's own menus (Gen 3):
+  -- `incoming` is set now, so a second invite meanwhile is declined exactly as
+  -- it would be with the box up, and the box goes up once they are free --
+  -- unless the ask is gone by then (the inviter left, a party formed, a
+  -- reset), which drops it unseen.  There is no clock: the inviter has none
+  -- either, and the hub re-checks both sides when the answer arrives.
+  local incoming = { from = from, name = name }
+  self.incoming = incoming
+  whenFree(self, game, function()
+    if self.incoming ~= incoming then return nil end
+    return self.ui:confirm(game, ("%s wants to\nteam up!"):format(name), function(yes)
+      local pending = self.incoming
+      self.incoming = nil
+      if not pending then return end
+      self.transport:send(Wire.PARTY_RESPOND,
+        { to = pending.from, accept = yes and true or false })
+    end)
+  end, { alive = function() return self.incoming == incoming end, owner = self })
 end
 
 function M:onDecline(msg)
@@ -181,9 +219,9 @@ function M:onDecline(msg)
   -- who said no might say yes later, somebody already travelling with a
   -- friend cannot be asked again until they are not.
   if msg.reason == "in_party" then
-    self.ui:say(("%s is already\nin a party."):format(name))
+    self:tell(("%s is already\nin a party."):format(name))
   else
-    self.ui:say(("%s said no."):format(name))
+    self:tell(("%s said no."):format(name))
   end
 end
 
@@ -202,7 +240,7 @@ function M:onPeerGone(id)
   if self.outgoing and self.outgoing.to == id then
     local name = self.outgoing.name or "They"
     self.outgoing = nil
-    self.ui:say(("%s went\noffline."):format(name))
+    self:tell(("%s went\noffline."):format(name))
   end
   -- Their prompt may still be on screen; the callback checks for this and
   -- answers nothing, which is right -- there is nobody to answer.
@@ -259,14 +297,14 @@ function M:onParty(msg)
       if not was[mid] and not self:isSelf(mid) then
         local name = member.name or "Someone"
         self:note(("%s joined the party."):format(name))
-        self.ui:say(("%s joined\nthe party."):format(name))
+        self:tell(("%s joined\nthe party."):format(name))
       end
     end
     for mid, member in pairs(was) do
       if not now[mid] and not self:isSelf(mid) then
         local name = member.name or "Someone"
         self:note(("%s left the party."):format(name))
-        self.ui:say(("%s left\nthe party."):format(name))
+        self:tell(("%s left\nthe party."):format(name))
       end
     end
     return
@@ -274,7 +312,7 @@ function M:onParty(msg)
 
   local with = formationCopy(self:partners())
   self:note(("Teamed up %s."):format(with))
-  self.ui:say(("You're in a party\n%s!"):format(with))
+  self:tell(("You're in a party\n%s!"):format(with))
 end
 
 -- The hub says the party is over.  Reasons are `left` (we are the one who
@@ -297,11 +335,11 @@ function M:onEnd(msg)
   -- list together; keep the singular peer_left copy at size 2.
   if #partners > 1 then
     self:note("Someone left the party.")
-    self.ui:say("Someone left\nthe party.")
+    self:tell("Someone left\nthe party.")
   else
     local name = (partners[1] and partners[1].name) or "Your friend"
     self:note(("%s left the party."):format(name))
-    self.ui:say(("%s left\nthe party."):format(name))
+    self:tell(("%s left\nthe party."):format(name))
   end
 end
 

@@ -42,6 +42,7 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
 const { Turn, events: Events } = require('./lib/battle');
+const { plainBattleLine } = require('./lib/sanitize');
 
 const ROOT = path.join(__dirname, '..');
 const DRIVER = path.join(ROOT, 'tests', 'drivers', 'battle_turn_parity.lua');
@@ -76,6 +77,11 @@ function mn(o) {
   };
   if (o.catchRate !== undefined) out.catchRate = o.catchRate;
   if (o.evs) out.evs = o.evs;
+  if (o.baseSpd !== undefined) out.baseSpd = o.baseSpd;
+  // K1's `traded`, and raw sheet fields the shorthand above does not carry
+  // (reflect, disable, ...) -- both absent from every scenario before G1b's.
+  if (o.traded) out.traded = true;
+  Object.assign(out, o.extra || {});
   return out;
 }
 
@@ -96,6 +102,38 @@ function drainInto(battle, into) {
   const list = battle.drainEvents();
   for (const event of list) into.push(event);
   batches.push(list.length);
+}
+
+// The stored battle stats behind the stream (the g1_* scenarios): every
+// standing seat's `cur` and stages, and its screens, at the point the scenario
+// asks. Only a scenario that calls this carries a `probes` key at all, so every
+// scenario that predates it encodes exactly as it did.
+let probes = [];
+
+function probe(battle, at) {
+  for (const fighter of battle.fighters) {
+    const mon = fighter.active ? fighter.mons[fighter.active - 1] : null;
+    if (mon && mon.hp > 0) {
+      probes.push({
+        at, slot: fighter.slot,
+        atk: mon.cur.atk, def: mon.cur.def, spd: mon.cur.spd, spc: mon.cur.spc,
+        sAtk: mon.stages.atk, sDef: mon.stages.def, sSpd: mon.stages.spd,
+        sSpc: mon.stages.spc, sAcc: mon.stages.acc, sEva: mon.stages.eva,
+        reflect: mon.reflect === true, lightScreen: mon.lightScreen === true,
+      });
+    }
+  }
+}
+
+// A flinch the stream never shows (the g1_flinch_* scenarios): a standing
+// seat's FLINCHED bit, read between turns -- after one turn's events and the
+// next turn's open, which is where the reset does or does not happen. Rows of
+// their own shape in the same `probes` list.
+function probeFlinch(battle, at) {
+  for (const fighter of battle.fighters) {
+    const mon = fighter.active ? fighter.mons[fighter.active - 1] : null;
+    if (mon && mon.hp > 0) probes.push({ at, slot: fighter.slot, flinch: mon.flinch === true });
+  }
 }
 
 const SCENARIOS = [];
@@ -829,13 +867,21 @@ scenario('trap_chain', (events) => {
   battle.submitChoice('p1', { action: 'fight', move: 0 });
   battle.submitChoice('p2', { action: 'fight', move: 0 });
   drainInto(battle, events);
-  // The forced turns resolve one tick at a time; ten is past the longest roll.
+  // Both are players (a link fight), and the cart gives both the battle menu
+  // while the trap runs (MainInBattleLoop: DisplayBattleMenu before the
+  // USING_TRAPPING_MOVE checks): FIGHT is the trapper's continuation and the
+  // held monster's CANNOT_MOVE (`_menuFight`), each turn resolving on the last
+  // answer. Ten turns is past the longest roll.
   for (let step = 1; step <= 10; step += 1) {
+    battle.submitChoice('p1', { action: 'fight', move: 0 });
+    battle.submitChoice('p2', { action: 'fight', move: 0 });
     battle.tick(step);
     drainInto(battle, events);
   }
-  // A referee-filled answer cannot be taken back -- the refusal is silent, so
-  // what this pins is that neither runtime emits an `unchose` for it.
+  // A player's lock-in is the player's own answer: it can be taken back --
+  // an `unchose` -- and the seat owes again (a switch to the monster already
+  // out is refused).
+  battle.submitChoice('p2', { action: 'fight', move: 0 });
   battle.submitChoice('p2', { action: 'cancel' });
   battle.submitChoice('p2', { action: 'switch', slot: 0 });
   drainInto(battle, events);
@@ -849,6 +895,8 @@ scenario('trap_chain', (events) => {
 //     the fallback is not a defensive branch -- it is what half the fights on a
 //     mixed hub narrate under, and the two runtimes have to agree on it word
 //     for word.
+// (DISABLE picks its slot at random -- DisableEffect's `BattleRandom & 3`,
+// R1b: seed 4243 picks THUMP HIT.)
 scenario('move_names', (events) => {
   // `mv` writes effect=0, so the two effect moves are built by hand the way
   // `explode_double_ko` builds EXPLODE. 86 is DISABLE_EFFECT and 82 is
@@ -872,7 +920,7 @@ scenario('move_names', (events) => {
   // No `name` at all: the protocol-25 sheet, narrated under its id.
   const nudge = () => mv('nudge', 10, 255, 0);
   const battle = build({
-    id: 'mn', mode: '1v1', seed: 4242, choiceTimeout: 60, reconnectGrace: 60,
+    id: 'mn', mode: 'wild', seed: 4243, choiceTimeout: 60, reconnectGrace: 60,
     sides: {
       a: [{ playerId: 'p1', name: 'Ann', mons: [
         mn({ species: 'Alpha', maxHp: 400, spd: 90,
@@ -883,7 +931,7 @@ scenario('move_names', (events) => {
     },
   });
   drainInto(battle, events);
-  // 1: both swing. "Alpha used SLOW SWIPE" and "Beta used THUMP HIT" are the
+  // 1: both swing. "Alpha used SLOW SWIPE!" and "Beta used THUMP HIT!" are the
   //    line this whole field exists for; before it they read "slow_swipe".
   battle.submitChoice('p1', { action: 'fight', move: 0 });
   battle.submitChoice('p2', { action: 'fight', move: 0 });
@@ -894,8 +942,11 @@ scenario('move_names', (events) => {
   battle.submitChoice('p1', { action: 'fight', move: 1 });
   battle.submitChoice('p2', { action: 'fight', move: 0 });
   drainInto(battle, events);
-  // 3: Mimic copies Bob's last move. The copy has to carry the name across
-  //    with it, or "Alpha learned THUMP HIT" reverts to the slug here and on
+  // 3: Mimic copies Bob's first move -- the player's menu in a fight against
+  //    the computer (R1c: MimicEffect `.letPlayerChooseMove`, its cursor on the
+  //    first row; a link fight's pick is `BattleRandom & 3`), hence `wild`.
+  //    The copy has to carry the name across with it, or "Alpha learned
+  //    THUMP HIT" reverts to the slug here and on
   //    every turn the copy is used afterwards. Bob falls back to the move that
   //    carries no name at all.
   battle.submitChoice('p1', { action: 'fight', move: 2 });
@@ -911,6 +962,3063 @@ scenario('move_names', (events) => {
   }
   return battle;
 });
+
+// 27-29. uploaded badge sets, and where the referee lets them count
+//     (Turn.BADGE_MODES / Turn.BADGE_SIDE: side a of a fight against the
+//     computer, never a link battle -- pokered's ApplyBadgeStatBoosts returns
+//     early in one). Speeds sit a step apart so a SOULBADGE that leaked would
+//     reorder the field rather than merely move a damage number, and the npc
+//     fight carries a special move so VOLCANOBADGE is read on both ends of a
+//     hit. `badges_link` and `badges_coop_pvp` fight as though nobody held a
+//     badge; `badges_npc` boosts side a and ignores side b's upload. Until
+//     these, no scenario carried a badge at all, so the twins had never been
+//     held to the same boost even where the boost is right.
+const allBadges = () => ({
+  BOULDERBADGE: true, THUNDERBADGE: true, SOULBADGE: true,
+  VOLCANOBADGE: true,
+});
+
+scenario('badges_link', (events) => {
+  const thump = () => mv('thump', 40, 255, 0);
+  const battle = build({
+    id: 'bl', mode: '1v1', seed: 2718, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', badges: allBadges(), mons: [
+        mn({ species: 'Alpha', maxHp: 200, atk: 60, spd: 40, moves: [thump()] })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [
+        mn({ species: 'Beta', maxHp: 200, atk: 60, spd: 42, moves: [thump()] })] }],
+    },
+  });
+  drainInto(battle, events);
+  for (let i = 0; i < 3; i += 1) {
+    battle.submitChoice('p1', { action: 'fight', move: 0 });
+    battle.submitChoice('p2', { action: 'fight', move: 0 });
+    drainInto(battle, events);
+  }
+  return battle;
+});
+
+scenario('badges_coop_pvp', (events) => {
+  const thump = () => mv('thump', 40, 255, 0);
+  const battle = build({
+    id: 'bp', mode: 'coop_pvp', seed: 3141, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [
+        { playerId: 'a1', name: 'Ann', badges: allBadges(), mons: [
+          mn({ species: 'Alpha', maxHp: 300, atk: 60, spd: 40, moves: [thump()] })] },
+        { playerId: 'a2', name: 'Abe', badges: allBadges(), mons: [
+          mn({ species: 'Gamma', maxHp: 300, atk: 55, spd: 30, moves: [thump()] })] },
+      ],
+      b: [
+        { playerId: 'b1', name: 'Bob', badges: allBadges(), mons: [
+          mn({ species: 'Beta', maxHp: 300, atk: 60, spd: 42, moves: [thump()] })] },
+        { playerId: 'b2', name: 'Bea', badges: allBadges(), mons: [
+          mn({ species: 'Delta', maxHp: 300, atk: 55, spd: 34, moves: [thump()] })] },
+      ],
+    },
+  });
+  drainInto(battle, events);
+  for (let i = 0; i < 2; i += 1) {
+    battle.submitChoice('a1', { action: 'fight', move: 0, target: 3 });
+    battle.submitChoice('a2', { action: 'fight', move: 0, target: 4 });
+    battle.submitChoice('b1', { action: 'fight', move: 0, target: 0 });
+    battle.submitChoice('b2', { action: 'fight', move: 0, target: 1 });
+    drainInto(battle, events);
+  }
+  return battle;
+});
+
+scenario('badges_npc', (events) => {
+  const thump = () => mv('thump', 40, 255, 0);
+  const zap = () => mv('zap', 40, 255, 1);
+  const battle = build({
+    id: 'bn', mode: 'coop_npc', seed: 1618, choiceTimeout: 60, reconnectGrace: 60,
+    specialTypes: [1],
+    sides: {
+      a: [
+        { playerId: 'a1', name: 'Ann', badges: allBadges(), mons: [
+          mn({ species: 'Alpha', maxHp: 300, atk: 60, spd: 40, moves: [thump()] })] },
+        { playerId: 'a2', name: 'Abe', badges: allBadges(), mons: [
+          mn({ species: 'Gamma', maxHp: 300, spc: 60, spd: 30, moves: [zap()] })] },
+      ],
+      b: [
+        { playerId: 'n1', name: 'NpcA', badges: allBadges(), mons: [
+          mn({ species: 'Beta', maxHp: 300, atk: 60, spd: 42, moves: [thump()] })] },
+        { playerId: 'n2', name: 'NpcB', badges: allBadges(), mons: [
+          mn({ species: 'Delta', maxHp: 300, spc: 60, spd: 37, moves: [zap()] })] },
+      ],
+    },
+  });
+  drainInto(battle, events);
+  for (let i = 0; i < 2; i += 1) {
+    battle.submitChoice('a1', { action: 'fight', move: 0, target: 3 });
+    battle.submitChoice('a2', { action: 'fight', move: 0, target: 4 });
+    battle.submitChoice('n1', { action: 'fight', move: 0, target: 0 });
+    battle.submitChoice('n2', { action: 'fight', move: 0, target: 1 });
+    drainInto(battle, events);
+  }
+  return battle;
+});
+
+
+// 30-41. Gen 1 stored battle stats (docs/plans/gen12-referee-fidelity.md §1
+//     items 1-5, task G1a): every trigger of the badge-stacking glitch, the
+//     re-penalty glitch, the resets, the 999 / 1 walls, critical hits on party
+//     stats, Reflect and Light Screen in the defence, the 8-bit scaling, the
+//     Explosion order, the 997 cap, the self-hit's borrowed Reflect and the
+//     flinch reset at turn open. `probe` pins the battle stats themselves; the
+//     "Gen 1 stored battle stats" tests below state the hand-checked numbers.
+//     `baseSpd: 0` holds a crit off where it would blur a number, 255 with a
+//     high-crit move forces one.
+function fx(id, power, effect, o = {}) {
+  const out = {
+    id, pp: o.pp === undefined ? 60 : o.pp, power, accuracy: 255,
+    type: o.type === undefined ? 0 : o.type, effect,
+    chance: o.chance === undefined ? 0 : o.chance,
+  };
+  if (o.highCrit) out.highCrit = true;
+  return out;
+}
+
+// The player's own raise (50 = ATTACK_UP2) and an accuracy raise (14) each
+// re-run every badge; the wild monster's paralysis is re-quartered each time.
+scenario('g1_stack_up', (events) => {
+  const battle = build({
+    id: 'g1u', mode: 'wild', seed: 6101, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', badges: allBadges(), mons: [
+        mn({ species: 'Alpha', maxHp: 300, atk: 100, def: 80, spd: 60, spc: 50,
+          baseSpd: 0, moves: [fx('sharpen', 0, 50), fx('aim', 0, 14),
+            fx('thump', 40, 0)] })] }],
+      b: [{ playerId: 'wild', name: 'Wild', mons: [
+        mn({ species: 'Beta', maxHp: 300, spd: 80, status: 'PAR', baseSpd: 0,
+          moves: [fx('splash', 0, 85)] })] }],
+    },
+  });
+  drainInto(battle, events);
+  probe(battle, 0);
+  [0, 1, 2].forEach((move, i) => {
+    battle.submitChoice('p1', { action: 'fight', move });
+    battle.submitChoice('wild', { action: 'fight', move: 0 });
+    drainInto(battle, events);
+    probe(battle, i + 1);
+  });
+  return battle;
+});
+
+// The enemy's drops on the player: a primary (18), a side-effect drop (71,
+// Psychic's) and an accuracy drop (22) -- each re-runs the badges, and the
+// re-penalty halves the burned target's Attack again every time.
+scenario('g1_stack_down', (events) => {
+  const battle = build({
+    id: 'g1d', mode: 'wild', seed: 6102, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', badges: allBadges(), mons: [
+        mn({ species: 'Alpha', maxHp: 300, atk: 100, def: 80, spd: 60, spc: 50,
+          status: 'BRN', baseSpd: 0, moves: [fx('splash', 0, 85)] })] }],
+      b: [{ playerId: 'wild', name: 'Wild', mons: [
+        mn({ species: 'Beta', maxHp: 300, spd: 90, baseSpd: 0,
+          moves: [fx('growl', 0, 18), fx('psyray', 40, 71, { chance: 100 }),
+            fx('sand', 0, 22)] })] }],
+    },
+  });
+  drainInto(battle, events);
+  probe(battle, 0);
+  [0, 1, 2].forEach((move, i) => {
+    battle.submitChoice('p1', { action: 'fight', move: 0 });
+    battle.submitChoice('wild', { action: 'fight', move });
+    drainInto(battle, events);
+    probe(battle, i + 1);
+  });
+  return battle;
+});
+
+// An X item and Rage: both are the player's raises, so both re-run the badges;
+// the item's re-penalty lands on the battler opposite and Rage's on the
+// attacker that built it.
+scenario('g1_rage_xitem', (events) => {
+  const battle = build({
+    id: 'g1r', mode: 'wild', seed: 6103, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', badges: allBadges(), bag: { X_SPEED: 1 },
+        mons: [
+          mn({ species: 'Alpha', maxHp: 400, atk: 100, def: 80, spd: 60, spc: 50,
+            baseSpd: 0, moves: [fx('fury', 20, 81)] })] }],
+      b: [{ playerId: 'wild', name: 'Wild', mons: [
+        mn({ species: 'Beta', maxHp: 400, atk: 80, spd: 50, status: 'BRN',
+          baseSpd: 0, moves: [fx('thump', 10, 0)] })] }],
+    },
+  });
+  drainInto(battle, events);
+  probe(battle, 0);
+  battle.submitChoice('p1', { action: 'item', item: 'X_SPEED' });
+  battle.submitChoice('wild', { action: 'fight', move: 0 });
+  drainInto(battle, events);
+  probe(battle, 1);
+  for (let turn = 2; turn <= 3; turn += 1) {
+    battle.submitChoice('p1', { action: 'fight', move: 0 });
+    battle.submitChoice('wild', { action: 'fight', move: 0 });
+    drainInto(battle, events);
+    probe(battle, turn);
+  }
+  return battle;
+});
+
+// The resets: a switch-in reloads party -> badges with every stage at 0, and
+// Haze copies the unmodified stats over both battlers -- badges and the foe's
+// paralysis penalty lifted with the stages.
+scenario('g1_resets', (events) => {
+  const battle = build({
+    id: 'g1z', mode: 'wild', seed: 6104, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', badges: allBadges(), mons: [
+        mn({ species: 'Alpha', maxHp: 300, atk: 100, def: 80, spd: 60, spc: 50,
+          baseSpd: 0, moves: [fx('sharpen', 0, 50), fx('haze', 0, 25)] }),
+        mn({ species: 'Gamma', maxHp: 300, baseSpd: 0, moves: [fx('splash', 0, 85)] }),
+      ] }],
+      b: [{ playerId: 'wild', name: 'Wild', mons: [
+        mn({ species: 'Beta', maxHp: 300, spd: 80, status: 'PAR', baseSpd: 0,
+          moves: [fx('splash', 0, 85)] })] }],
+    },
+  });
+  drainInto(battle, events);
+  const plan = [
+    { action: 'fight', move: 0 },
+    { action: 'switch', slot: 1 },
+    { action: 'switch', slot: 0 },
+    { action: 'fight', move: 0 },
+    { action: 'fight', move: 1 },
+  ];
+  plan.forEach((choice, i) => {
+    battle.submitChoice('p1', choice);
+    battle.submitChoice('wild', { action: 'fight', move: 0 });
+    drainInto(battle, events);
+    probe(battle, i + 1);
+  });
+  return battle;
+});
+
+// The walls, in a link fight (no badges; the re-penalty is unconditional): a
+// raise past 999 stores 999, the next raise on that 999 fails with the stage
+// wound back one step (+2 nets +1), and a drop on a stat already at 1 fails
+// the same way (-2 nets -1).
+scenario('g1_walls', (events) => {
+  const battle = build({
+    id: 'g1w', mode: '1v1', seed: 6105, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', maxHp: 300, atk: 500, spd: 90, baseSpd: 0,
+          moves: [fx('sharpen', 0, 50), fx('soften', 0, 19),
+            fx('crush', 0, 59)] })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [
+        mn({ species: 'Beta', maxHp: 300, def: 1, spd: 60, status: 'PAR',
+          baseSpd: 0, moves: [fx('splash', 0, 85)] })] }],
+    },
+  });
+  drainInto(battle, events);
+  probe(battle, 0);
+  [0, 0, 1, 2].forEach((move, i) => {
+    battle.submitChoice('p1', { action: 'fight', move });
+    battle.submitChoice('p2', { action: 'fight', move: 0 });
+    drainInto(battle, events);
+    probe(battle, i + 1);
+  });
+  return battle;
+});
+
+// A critical hit reads both party stats: the raised, badged, burned Attack and
+// the foe's Reflect all fall away.
+scenario('g1_crit_party', (events) => {
+  const battle = build({
+    id: 'g1c', mode: 'wild', seed: 6106, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', badges: allBadges(), mons: [
+        mn({ species: 'Alpha', maxHp: 300, atk: 100, def: 80, spd: 60, spc: 50,
+          status: 'BRN', baseSpd: 255,
+          moves: [fx('sharpen', 0, 50), fx('slash', 70, 0, { highCrit: true })] })] }],
+      b: [{ playerId: 'wild', name: 'Wild', mons: [
+        mn({ species: 'Beta', maxHp: 400, def: 100, spd: 30, baseSpd: 0,
+          moves: [fx('wall', 0, 65), fx('splash', 0, 85)] })] }],
+    },
+  });
+  drainInto(battle, events);
+  probe(battle, 0);
+  battle.submitChoice('p1', { action: 'fight', move: 0 });
+  battle.submitChoice('wild', { action: 'fight', move: 0 });
+  drainInto(battle, events);
+  probe(battle, 1);
+  battle.submitChoice('p1', { action: 'fight', move: 1 });
+  battle.submitChoice('wild', { action: 'fight', move: 1 });
+  drainInto(battle, events);
+  probe(battle, 2);
+  return battle;
+});
+
+// Transform copies the battle and unmodified stats, never the party ones: the
+// transformed monster's crit swings with its own pre-Transform Attack, and a
+// crit on it reads its own pre-Transform Defense.
+scenario('g1_transform_crit', (events) => {
+  const battle = build({
+    id: 'g1t', mode: '1v1', seed: 6107, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', maxHp: 400, atk: 30, def: 30, spd: 90, spc: 30,
+          baseSpd: 255, moves: [fx('mimicry', 0, 57)] })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [
+        mn({ species: 'Beta', maxHp: 400, atk: 200, def: 100, spd: 40, spc: 100,
+          baseSpd: 255, moves: [fx('slash', 70, 0, { highCrit: true })] })] }],
+    },
+  });
+  drainInto(battle, events);
+  for (let turn = 1; turn <= 2; turn += 1) {
+    battle.submitChoice('p1', { action: 'fight', move: 0 });
+    battle.submitChoice('p2', { action: 'fight', move: 0 });
+    drainInto(battle, events);
+    probe(battle, turn);
+  }
+  return battle;
+});
+
+// Screens double the defence before the scaling: 512 x2 = 1024 wraps to a 0
+// byte and divides as 1. A second Reflect fails, a fixed-damage move ignores
+// it, and Haze takes both screens down.
+scenario('g1_screens', (events) => {
+  const battle = build({
+    id: 'g1s', mode: '1v1', seed: 6109, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', maxHp: 900, def: 512, spd: 90, baseSpd: 0,
+          moves: [fx('wall', 0, 65), fx('glow', 0, 64), fx('splash', 0, 85)] })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [
+        mn({ species: 'Beta', maxHp: 400, atk: 100, spd: 30, baseSpd: 0,
+          moves: [fx('thump', 10, 0), fx('sonic', 20, 41), fx('haze', 0, 25)] })] }],
+    },
+  });
+  drainInto(battle, events);
+  [[0, 0], [0, 1], [1, 2], [2, 0]].forEach(([mine, theirs], i) => {
+    battle.submitChoice('p1', { action: 'fight', move: mine });
+    battle.submitChoice('p2', { action: 'fight', move: theirs });
+    drainInto(battle, events);
+    probe(battle, i + 1);
+  });
+  return battle;
+});
+
+// The 997 cap sits before the type chart and the roll: 4200 is held to 997+2
+// (a 999-HP target, so the event states the whole hit).
+scenario('g1_cap', (events) => {
+  const battle = build({
+    id: 'g1k', mode: '1v1', seed: 6109, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', maxHp: 999, def: 10, spd: 90, types: [2],
+          baseSpd: 0, moves: [fx('splash', 0, 85)] })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [
+        mn({ species: 'Beta', level: 100, maxHp: 400, atk: 250, spd: 30,
+          types: [1], baseSpd: 0, moves: [fx('crush', 200, 0)] })] }],
+    },
+  });
+  drainInto(battle, events);
+  battle.submitChoice('p1', { action: 'fight', move: 0 });
+  battle.submitChoice('p2', { action: 'fight', move: 0 });
+  drainInto(battle, events);
+  return battle;
+});
+
+// Explosion halves the defence after the scaling: 300 -> 75 -> 37, not
+// 300 -> 150 unscaled.
+scenario('g1_explode_order', (events) => {
+  const battle = build({
+    id: 'g1x', mode: '1v1', seed: 6110, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', maxHp: 900, def: 300, spd: 90, types: [2],
+          baseSpd: 0, moves: [fx('splash', 0, 85)] })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [
+        mn({ species: 'Beta', level: 50, maxHp: 400, atk: 100, spd: 30,
+          types: [1], baseSpd: 0, moves: [fx('blast', 170, 7)] })] }],
+    },
+  });
+  drainInto(battle, events);
+  battle.submitChoice('p1', { action: 'fight', move: 0 });
+  battle.submitChoice('p2', { action: 'fight', move: 0 });
+  drainInto(battle, events);
+  return battle;
+});
+
+// The confusion self-hit borrows the OPPONENT's Reflect for its own Defense:
+// 160 against 9 x2 is 73 a hit rather than 144.
+scenario('g1_self_hit_reflect', (events) => {
+  const battle = build({
+    id: 'g1h', mode: '1v1', seed: 6111, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', maxHp: 900, atk: 160, def: 9, spd: 30, confusion: 6,
+          baseSpd: 0, moves: [fx('splash', 0, 85)] })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [
+        mn({ species: 'Beta', maxHp: 400, spd: 90, baseSpd: 0,
+          moves: [fx('wall', 0, 65), fx('splash', 0, 85)] })] }],
+    },
+  });
+  drainInto(battle, events);
+  for (let turn = 1; turn <= 5; turn += 1) {
+    battle.submitChoice('p1', { action: 'fight', move: 0 });
+    battle.submitChoice('p2', { action: 'fight', move: turn === 1 ? 0 : 1 });
+    drainInto(battle, events);
+  }
+  return battle;
+});
+
+// ...and in a 2v2 the Reflect it borrows is the battler opposite's: Ann (seat
+// 0) faces Bob's Reflect, Abe (seat 1) faces Bea, who has none.
+scenario('g1_opposite_reflect', (events) => {
+  const battle = build({
+    id: 'g1o', mode: 'coop_pvp', seed: 6112, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [
+        { playerId: 'a1', name: 'Ann', mons: [
+          mn({ species: 'Alpha', maxHp: 900, atk: 160, def: 9, spd: 30, confusion: 6,
+            baseSpd: 0, moves: [fx('splash', 0, 85)] })] },
+        { playerId: 'a2', name: 'Abe', mons: [
+          mn({ species: 'Gamma', maxHp: 900, atk: 160, def: 9, spd: 20, confusion: 6,
+            baseSpd: 0, moves: [fx('splash', 0, 85)] })] },
+      ],
+      b: [
+        { playerId: 'b1', name: 'Bob', mons: [
+          mn({ species: 'Beta', maxHp: 400, spd: 90, baseSpd: 0,
+            moves: [fx('wall', 0, 65), fx('splash', 0, 85)] })] },
+        { playerId: 'b2', name: 'Bea', mons: [
+          mn({ species: 'Delta', maxHp: 400, spd: 80, baseSpd: 0,
+            moves: [fx('splash', 0, 85)] })] },
+      ],
+    },
+  });
+  drainInto(battle, events);
+  for (let turn = 1; turn <= 5; turn += 1) {
+    battle.submitChoice('a1', { action: 'fight', move: 0, target: 3 });
+    battle.submitChoice('a2', { action: 'fight', move: 0, target: 4 });
+    battle.submitChoice('b1', { action: 'fight', move: turn === 1 ? 0 : 1, target: 0 });
+    battle.submitChoice('b2', { action: 'fight', move: 0, target: 1 });
+    drainInto(battle, events);
+  }
+  probe(battle, 5);
+  return battle;
+});
+
+// A flinch landed on a monster that already moved dies at the next turn's
+// open (MainInBattleLoop) instead of costing it that turn.
+scenario('g1_flinch_reset', (events) => {
+  const battle = build({
+    id: 'g1f', mode: '1v1', seed: 6113, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', maxHp: 400, spd: 90, baseSpd: 0,
+          moves: [fx('thump', 10, 0)] })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [
+        mn({ species: 'Beta', maxHp: 400, spd: 30, baseSpd: 0,
+          moves: [fx('stomp', 10, 31, { chance: 100 })] })] }],
+    },
+  });
+  drainInto(battle, events);
+  for (let i = 0; i < 3; i += 1) {
+    battle.submitChoice('p1', { action: 'fight', move: 0 });
+    battle.submitChoice('p2', { action: 'fight', move: 0 });
+    drainInto(battle, events);
+  }
+  return battle;
+});
+
+// 42-58. Gen 1 priority, obedience, the called-move path and the flinch-reset
+//     skip (docs/plans/gen12-referee-fidelity.md §1 items 6-8, task G1b).
+//     Every obedience seed was picked by a scan to reach the branch its
+//     comment names; the "Gen 1 priority, obedience" tests below force each
+//     branch with scripted bytes, and the vector pack's `obedience` section
+//     pins the rolls themselves.
+
+// Quick Attack +1, Counter -1, read off the selected move; the same move on
+// both sides falls to Speed. 1v1 is a link fight: priority is every mode's.
+scenario('g1_priority', (events) => {
+  const kit = () => [fx('QUICK_ATTACK', 10, 0), fx('thump', 10, 0), fx('COUNTER', 10, 0)];
+  const battle = build({
+    id: 'g1q', mode: '1v1', seed: 6301, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', maxHp: 400, spd: 30, baseSpd: 0, moves: kit() })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [
+        mn({ species: 'Beta', maxHp: 400, spd: 90, baseSpd: 0, moves: kit() })] }],
+    },
+  });
+  drainInto(battle, events);
+  for (const [a, b] of [[0, 1], [0, 0], [1, 2], [2, 2], [0, 2]]) {
+    battle.submitChoice('p1', { action: 'fight', move: a });
+    battle.submitChoice('p2', { action: 'fight', move: b });
+    drainInto(battle, events);
+  }
+  return battle;
+});
+
+// Four actors in three brackets: the two Quick Attacks at Speed 20 are one
+// tie group (one byte: this seed's turn-1 byte is >= 128, NpcA's first; its
+// turn-2 byte is below, Ann's first -- 6304 since COUNTER draws only its hit
+// test, 6302 before), then the plain move, then the Counter at Speed 99,
+// last.
+scenario('g1_priority_group', (events) => {
+  const battle = build({
+    id: 'g1g', mode: 'coop_npc', seed: 6304, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [
+        { playerId: 'a1', name: 'Ann', mons: [
+          mn({ species: 'Alpha', maxHp: 400, spd: 20, baseSpd: 0,
+            moves: [fx('QUICK_ATTACK', 10, 0)] })] },
+        { playerId: 'a2', name: 'Abe', mons: [
+          mn({ species: 'Gamma', maxHp: 400, spd: 50, baseSpd: 0,
+            moves: [fx('thump', 10, 0)] })] },
+      ],
+      b: [
+        { playerId: 'n1', name: 'NpcA', mons: [
+          mn({ species: 'Beta', maxHp: 400, spd: 20, baseSpd: 0,
+            moves: [fx('QUICK_ATTACK', 10, 0)] })] },
+        { playerId: 'n2', name: 'NpcB', mons: [
+          mn({ species: 'Delta', maxHp: 400, spd: 99, baseSpd: 0,
+            moves: [fx('COUNTER', 10, 0)] })] },
+      ],
+    },
+  });
+  drainInto(battle, events);
+  for (let i = 0; i < 2; i += 1) {
+    battle.submitChoice('a1', { action: 'fight', move: 0, target: 3 });
+    battle.submitChoice('a2', { action: 'fight', move: 0, target: 4 });
+    battle.submitChoice('n1', { action: 'fight', move: 0, target: 0 });
+    battle.submitChoice('n2', { action: 'fight', move: 0, target: 1 });
+    drainInto(battle, events);
+  }
+  return battle;
+});
+
+// A Metronome that calls Quick Attack moved at Metronome's bracket: the
+// faster foe goes first. The call spends Alpha's last PP and takes no
+// Struggle recoil, and runs no second paralysis gate; the next turn's
+// Struggle is the real thing and does recoil.
+scenario('g1_metronome_last_pp', (events) => {
+  const battle = build({
+    id: 'g1m', mode: 'wild', seed: 6302, choiceTimeout: 60, reconnectGrace: 60,
+    metronomePool: [fx('QUICK_ATTACK', 10, 0)],
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', maxHp: 400, spd: 120, status: 'PAR', baseSpd: 0,
+          moves: [fx('metronome', 0, 83, { pp: 1 })] })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [
+        mn({ species: 'Beta', maxHp: 400, spd: 90, baseSpd: 0,
+          moves: [fx('thump', 10, 0)] })] }],
+    },
+  });
+  drainInto(battle, events);
+  for (let i = 0; i < 2; i += 1) {
+    battle.submitChoice('p1', { action: 'fight', move: 0 });
+    battle.submitChoice('p2', { action: 'fight', move: 0 });
+    drainInto(battle, events);
+  }
+  return battle;
+});
+
+// The whole CheckForDisobedience ladder on one traded level-100 monster with
+// no badge (cap 10), paralysed, against a foe behind a Reflect (seed 6809's
+// twelve turns are listed beside the Lua twin).
+scenario('g1_obey_ladder', (events) => {
+  const battle = build({
+    id: 'g1l', mode: 'wild', seed: 6809, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', level: 100, maxHp: 999, atk: 30, def: 60, spd: 90,
+          status: 'PAR', traded: true, baseSpd: 0,
+          moves: [fx('thump', 10, 0), fx('chop', 10, 0), fx('splash', 0, 85)] })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [
+        mn({ species: 'Beta', maxHp: 999, spd: 30, baseSpd: 0, extra: { reflect: true },
+          moves: [fx('splash', 0, 85)] })] }],
+    },
+  });
+  drainInto(battle, events);
+  for (let turn = 1; turn <= 12; turn += 1) {
+    battle.submitChoice('p1', { action: 'fight', move: 0 });
+    battle.submitChoice('p2', { action: 'fight', move: 0 });
+    drainInto(battle, events);
+    if (turn === 5) probe(battle, 5);
+  }
+  return battle;
+});
+
+// An R1 pass, then `.useRandomMove`: "used instead," and the PP comes off the
+// CHOSEN slot, then a loaf line. Level 60 under RAINBOWBADGE (cap 50).
+scenario('g1_obey_instead', (events) => {
+  const battle = build({
+    id: 'g1i', mode: 'wild', seed: 6316, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann',
+        badges: { CASCADEBADGE: true, RAINBOWBADGE: true }, mons: [
+          mn({ species: 'Alpha', level: 60, maxHp: 400, spd: 90, traded: true, baseSpd: 0,
+            moves: [fx('thump', 10, 0), fx('chop', 10, 0), fx('splash', 0, 85)] })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [
+        mn({ species: 'Beta', maxHp: 400, spd: 30, baseSpd: 0,
+          moves: [fx('splash', 0, 85)] })] }],
+    },
+  });
+  drainInto(battle, events);
+  for (let i = 0; i < 3; i += 1) {
+    battle.submitChoice('p1', { action: 'fight', move: 0 });
+    battle.submitChoice('p2', { action: 'fight', move: 0 });
+    drainInto(battle, events);
+  }
+  return battle;
+});
+
+// `.useRandomMove`'s four refusals, each on seed 6303 -- whose rolls answer
+// "use another move" -- and each falling to `.monDoesNothing` without a
+// `.chooseMove` draw.
+const refusal = (name, moves, extra) => (events) => {
+  const battle = build({
+    id: name, mode: 'wild', seed: 6303, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann',
+        badges: { CASCADEBADGE: true, RAINBOWBADGE: true }, mons: [
+          mn({ species: 'Alpha', level: 60, maxHp: 400, spd: 90, traded: true,
+            baseSpd: 0, moves, extra })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [
+        mn({ species: 'Beta', maxHp: 400, spd: 30, baseSpd: 0,
+          moves: [fx('splash', 0, 85)] })] }],
+    },
+  });
+  drainInto(battle, events);
+  battle.submitChoice('p1', { action: 'fight', move: 0 });
+  battle.submitChoice('p2', { action: 'fight', move: 0 });
+  drainInto(battle, events);
+  return battle;
+};
+scenario('g1_obey_refuse_one', refusal('g1r1', [fx('thump', 10, 0)]));
+scenario('g1_obey_refuse_disabled', refusal('g1r2',
+  [fx('thump', 10, 0), fx('chop', 10, 0)], { disable: { moveIndex: 2, turns: 5 } }));
+scenario('g1_obey_refuse_struggle', refusal('g1r3',
+  [fx('thump', 10, 0, { pp: 0 }), fx('chop', 10, 0, { pp: 0 })]));
+scenario('g1_obey_refuse_pp', refusal('g1r4',
+  [fx('thump', 10, 0), fx('chop', 10, 0, { pp: 0 })]));
+
+// No roll at all: EARTHBADGE's cap (101) over a level-100 traded monster, and
+// CASCADEBADGE's 30 over a level-30 one -- the cap compare comes first.
+scenario('g1_obey_capped', (events) => {
+  const battle = build({
+    id: 'g1c', mode: 'coop_wild', seed: 6302, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [
+        { playerId: 'a1', name: 'Ann', badges: { EARTHBADGE: true }, mons: [
+          mn({ species: 'Alpha', level: 100, maxHp: 400, spd: 90, traded: true,
+            baseSpd: 0, moves: [fx('thump', 10, 0), fx('chop', 10, 0)] })] },
+        { playerId: 'a2', name: 'Abe', badges: { CASCADEBADGE: true }, mons: [
+          mn({ species: 'Gamma', level: 30, maxHp: 400, spd: 70, traded: true,
+            baseSpd: 0, moves: [fx('thump', 10, 0), fx('chop', 10, 0)] })] },
+      ],
+      b: [{ playerId: 'w', name: 'Wild', mons: [
+        mn({ species: 'Beta', maxHp: 900, spd: 30, baseSpd: 0,
+          moves: [fx('splash', 0, 85)] })] }],
+    },
+  });
+  drainInto(battle, events);
+  for (let i = 0; i < 2; i += 1) {
+    battle.submitChoice('a1', { action: 'fight', move: 0, target: 3 });
+    battle.submitChoice('a2', { action: 'fight', move: 0, target: 3 });
+    battle.submitChoice('w', { action: 'fight', move: 0, target: 0 });
+    drainInto(battle, events);
+  }
+  return battle;
+});
+
+// Never in a link fight, and never for side b: both traded level-100s with no
+// badge obey every turn and draw nothing for it.
+const obeyNever = (id, mode, aTraded) => (events) => {
+  const battle = build({
+    id, mode, seed: 6809, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', level: 100, maxHp: 999, spd: 90, traded: aTraded, baseSpd: 0,
+          moves: [fx('thump', 10, 0), fx('chop', 10, 0)] })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [
+        mn({ species: 'Beta', level: 100, maxHp: 999, spd: 30, traded: true, baseSpd: 0,
+          moves: [fx('thump', 10, 0), fx('chop', 10, 0)] })] }],
+    },
+  });
+  drainInto(battle, events);
+  for (let i = 0; i < 3; i += 1) {
+    battle.submitChoice('p1', { action: 'fight', move: 0 });
+    battle.submitChoice('p2', { action: 'fight', move: 0 });
+    drainInto(battle, events);
+  }
+  return battle;
+};
+scenario('g1_obey_link', obeyNever('g1k', '1v1', true));
+scenario('g1_obey_side_b', obeyNever('g1b', 'wild', false));
+
+// The flinch-reset skip: a raging monster on the player's seat that a slower
+// Stomp flinches keeps the flinch through the next turn's open and loses its
+// Rage to it; in a link fight the reset is unconditional.
+const rageFlinch = (id, mode) => (events) => {
+  const battle = build({
+    id, mode, seed: 6303, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', maxHp: 400, spd: 90, baseSpd: 0,
+          moves: [fx('fury', 20, 81)] })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [
+        mn({ species: 'Beta', maxHp: 400, spd: 30, baseSpd: 0,
+          moves: [fx('stomp', 10, 31, { chance: 100 })] })] }],
+    },
+  });
+  drainInto(battle, events);
+  for (let turn = 1; turn <= 3; turn += 1) {
+    battle.submitChoice('p1', { action: 'fight', move: 0 });
+    battle.submitChoice('p2', { action: 'fight', move: 0 });
+    drainInto(battle, events);
+    probeFlinch(battle, turn);
+  }
+  return battle;
+};
+scenario('g1_flinch_rage', rageFlinch('g1fr', 'wild'));
+// ...and in a link fight too: both sides are "the player" by the owner's rule
+// (R1b).
+scenario('g1_flinch_rage_link', rageFlinch('g1fl', '1v1'));
+
+// A Hyper Beam user that a slower Stomp flinches does not recharge:
+// FlinchSideEffect calls ClearHyperBeam on its target (effects.asm :991), so
+// at the next open the reset takes the flinch (probe 1) and the beam fires
+// again, to be flinched again (probe 2). (Gap 4, closed by R1b; this scenario
+// used to pin the referee's kept recharge.)
+scenario('g1_flinch_recharge', (events) => {
+  const battle = build({
+    id: 'g1fh', mode: 'wild', seed: 6303, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', maxHp: 400, spd: 90, baseSpd: 0,
+          moves: [fx('beam', 20, 80)] })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [
+        mn({ species: 'Beta', maxHp: 400, spd: 30, baseSpd: 0,
+          moves: [fx('stomp', 10, 31, { chance: 100 })] })] }],
+    },
+  });
+  drainInto(battle, events);
+  battle.submitChoice('p1', { action: 'fight', move: 0 });
+  battle.submitChoice('p2', { action: 'fight', move: 0 });
+  drainInto(battle, events);
+  probeFlinch(battle, 1);
+  battle.submitChoice('p1', { action: 'fight', move: 0 });
+  battle.submitChoice('p2', { action: 'fight', move: 0 });
+  drainInto(battle, events);
+  probeFlinch(battle, 2);
+  battle.submitChoice('p1', { action: 'fight', move: 0 });
+  battle.submitChoice('p2', { action: 'fight', move: 0 });
+  drainInto(battle, events);
+  return battle;
+});
+
+// The Gen 1 review fixes (task FX1); tests/battle_sim_turn.lua section 27
+// states the numbers behind each.
+//
+// A Leech Seed tick that knocks the seeded monster out: the seeder is read
+// before the damage, and still healed by the whole 1/16.
+scenario('g1_leech_ko', (events) => {
+  const battle = build({
+    id: 'g1ls', mode: '1v1', seed: 6501, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', hp: 50, maxHp: 100, spd: 90, baseSpd: 0,
+          moves: [fx('seed', 0, 84)] })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [
+        mn({ species: 'Beta', hp: 3, maxHp: 100, spd: 10, baseSpd: 0,
+          moves: [fx('splash', 0, 85)] })] }],
+    },
+  });
+  drainInto(battle, events);
+  battle.submitChoice('p1', { action: 'fight', move: 0 });
+  battle.submitChoice('p2', { action: 'fight', move: 0 });
+  drainInto(battle, events);
+  return battle;
+});
+
+// Rage builds only after an opponent's move lands: the raging monster's own
+// poison, the Leech Seed on it and its confusion self-hits build nothing.
+scenario('g1_rage_quiet', (events) => {
+  const battle = build({
+    id: 'g1rq', mode: 'wild', seed: 6509, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', badges: allBadges(), mons: [
+        mn({ species: 'Alpha', maxHp: 400, atk: 100, def: 80, spd: 90, spc: 50,
+          status: 'PSN', confusion: 4, baseSpd: 0, moves: [fx('fury', 20, 81)],
+          extra: { raging: true, rageMove: 1, leechSeed: { fromSlot: 3 } } })] }],
+      b: [{ playerId: 'wild', name: 'Wild', mons: [
+        mn({ species: 'Beta', maxHp: 400, spd: 10, baseSpd: 0,
+          moves: [fx('splash', 0, 85)] })] }],
+    },
+  });
+  drainInto(battle, events);
+  probe(battle, 0);
+  for (let turn = 1; turn <= 3; turn += 1) {
+    battle.submitChoice('p1', { action: 'fight', move: 0 });
+    battle.submitChoice('wild', { action: 'fight', move: 0 });
+    drainInto(battle, events);
+    probe(battle, turn);
+  }
+  return battle;
+});
+
+// The hit that knocks the raging monster out builds nothing, so the burned
+// attacker is not halved a second time by the re-penalty.
+scenario('g1_rage_lethal', (events) => {
+  const battle = build({
+    id: 'g1rl', mode: 'wild', seed: 6503, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', badges: allBadges(), mons: [
+        mn({ species: 'Alpha', hp: 20, maxHp: 300, atk: 100, def: 80, spd: 90,
+          spc: 50, baseSpd: 0, moves: [fx('fury', 20, 81)] }),
+        mn({ species: 'Gamma', maxHp: 300, baseSpd: 0,
+          moves: [fx('splash', 0, 85)] })] }],
+      b: [{ playerId: 'wild', name: 'Wild', mons: [
+        mn({ species: 'Beta', maxHp: 300, atk: 200, spd: 10, status: 'BRN',
+          baseSpd: 0, moves: [fx('thump', 80, 0)] })] }],
+    },
+  });
+  drainInto(battle, events);
+  probe(battle, 0);
+  battle.submitChoice('p1', { action: 'fight', move: 0 });
+  battle.submitChoice('wild', { action: 'fight', move: 0 });
+  drainInto(battle, events);
+  probe(battle, 1);
+  return battle;
+});
+
+// A Substitute that soaks the hit does not stop the build, and a two-hit move
+// builds once per hit. A 5-HP doll breaks on the first hit, which ends the
+// move: one build, +1. A 12-HP doll (g1_rage_sub_late) breaks on the second:
+// both thrown, both build, +2.
+const rageSub = (id, seed, doll) => (events) => {
+  const battle = build({
+    id, mode: '1v1', seed, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', maxHp: 400, spd: 90, baseSpd: 0,
+          moves: [fx('fury', 20, 81)],
+          extra: { raging: true, rageMove: 1, substitute: doll } })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [
+        mn({ species: 'Beta', maxHp: 400, spd: 10, baseSpd: 0,
+          moves: [fx('kicks', 20, 44)] })] }],
+    },
+  });
+  drainInto(battle, events);
+  probe(battle, 0);
+  battle.submitChoice('p1', { action: 'fight', move: 0 });
+  battle.submitChoice('p2', { action: 'fight', move: 0 });
+  drainInto(battle, events);
+  probe(battle, 1);
+  return battle;
+};
+scenario('g1_rage_sub', rageSub('g1rs', 6504, 5));
+scenario('g1_rage_sub_late', rageSub('g1rsl', 6504, 12));
+
+// The two builds no hit carries: a missed Disable (power 0: the build comes
+// before its own hit test) and a missed Explosion (`.notDone`).
+scenario('g1_rage_misses', (events) => {
+  const blind = (id, power, effect) => Object.assign(fx(id, power, effect), { accuracy: 0 });
+  const battle = build({
+    id: 'g1rm', mode: '1v1', seed: 6505, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', maxHp: 400, spd: 90, baseSpd: 0,
+          moves: [fx('fury', 20, 81)],
+          extra: { raging: true, rageMove: 1, lastMoveIndex: 1 } })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [
+        mn({ species: 'Beta', maxHp: 400, spd: 10, baseSpd: 0,
+          moves: [blind('numb', 0, 86), blind('boom', 130, 7)] })] }],
+    },
+  });
+  drainInto(battle, events);
+  probe(battle, 0);
+  [0, 1].forEach((move, i) => {
+    battle.submitChoice('p1', { action: 'fight', move: 0 });
+    battle.submitChoice('p2', { action: 'fight', move });
+    drainInto(battle, events);
+    probe(battle, i + 1);
+  });
+  return battle;
+});
+
+// A trap's later turns are the trapper's own attack, so each tick builds the
+// trapped monster's Rage and the re-penalty finds the trapper (slot 4), not
+// the battler standing opposite (slot 3).
+scenario('g1_rage_trap', (events) => {
+  const battle = build({
+    id: 'g1rt', mode: 'coop_pvp', seed: 6506, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [
+        { playerId: 'a1', name: 'Ann', mons: [
+          mn({ species: 'Alpha', maxHp: 400, spd: 90, baseSpd: 0,
+            moves: [fx('fury', 20, 81)],
+            extra: { raging: true, rageMove: 1 } })] },
+        { playerId: 'a2', name: 'Amy', mons: [
+          mn({ species: 'Gamma', maxHp: 400, spd: 80, baseSpd: 0,
+            moves: [fx('splash', 0, 85)] })] },
+      ],
+      b: [
+        { playerId: 'b1', name: 'Bob', mons: [
+          mn({ species: 'Beta', maxHp: 400, atk: 200, spd: 20, status: 'BRN',
+            baseSpd: 0, moves: [fx('splash', 0, 85)] })] },
+        { playerId: 'b2', name: 'Bea', mons: [
+          mn({ species: 'Delta', maxHp: 400, atk: 200, spd: 10, status: 'BRN',
+            baseSpd: 0, moves: [fx('wrap', 5, 42)] })] },
+      ],
+    },
+  });
+  drainInto(battle, events);
+  probe(battle, 0);
+  for (let turn = 1; turn <= 4; turn += 1) {
+    battle.submitChoice('a1', { action: 'fight', move: 0, target: 3 });
+    battle.submitChoice('a2', { action: 'fight', move: 0, target: 3 });
+    battle.submitChoice('b1', { action: 'fight', move: 0, target: 0 });
+    battle.submitChoice('b2', { action: 'fight', move: 0, target: 0 });
+    for (let step = 1; step <= 3; step += 1) battle.tick(turn * 10 + step);
+    drainInto(battle, events);
+    probe(battle, turn);
+  }
+  return battle;
+});
+
+// A Bide aimed at field slot 0 is released at slot 0 -- slot 0 is a real seat,
+// not "no aim" (this file once read it with `||` and let the spread aim pick).
+scenario('g1_bide_slot0', (events) => {
+  const battle = build({
+    id: 'g1bz', mode: 'coop_pvp', seed: 3, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [
+        { playerId: 'a1', name: 'Ann', mons: [
+          mn({ species: 'Alpha', maxHp: 400, spd: 90, baseSpd: 0,
+            moves: [fx('tap', 10, 0)] })] },
+        { playerId: 'a2', name: 'Amy', mons: [
+          mn({ species: 'Gamma', maxHp: 400, spd: 80, baseSpd: 0,
+            moves: [fx('splash', 0, 85)] })] },
+      ],
+      b: [
+        { playerId: 'b1', name: 'Bob', mons: [
+          mn({ species: 'Beta', maxHp: 400, spd: 10, baseSpd: 0,
+            moves: [fx('bide', 0, 26)] })] },
+        { playerId: 'b2', name: 'Bea', mons: [
+          mn({ species: 'Delta', maxHp: 400, spd: 5, baseSpd: 0,
+            moves: [fx('splash', 0, 85)] })] },
+      ],
+    },
+  });
+  drainInto(battle, events);
+  for (let turn = 1; turn <= 4; turn += 1) {
+    battle.submitChoice('a1', { action: 'fight', move: 0, target: 3 });
+    battle.submitChoice('a2', { action: 'fight', move: 0, target: 3 });
+    battle.submitChoice('b1', { action: 'fight', move: 0, target: 0 });
+    battle.submitChoice('b2', { action: 'fight', move: 0, target: 0 });
+    for (let step = 1; step <= 3; step += 1) battle.tick(turn * 10 + step);
+    drainInto(battle, events);
+  }
+  return battle;
+});
+
+// A side-effect drop at -6 says nothing; only a primary prints the line.
+scenario('g1_side_min', (events) => {
+  const battle = build({
+    id: 'g1sm', mode: '1v1', seed: 6507, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [
+        mn({ species: 'Alpha', maxHp: 400, spd: 90, baseSpd: 0,
+          moves: [fx('bubble', 10, 70, { chance: 100 }), fx('goo', 0, 20)] })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [
+        mn({ species: 'Beta', maxHp: 400, spd: 10, baseSpd: 0,
+          moves: [fx('splash', 0, 85)],
+          extra: { stages: { atk: 0, def: 0, spd: -6, spc: 0, acc: 0, eva: 0 } } })] }],
+    },
+  });
+  drainInto(battle, events);
+  for (const move of [0, 1]) {
+    battle.submitChoice('p1', { action: 'fight', move });
+    battle.submitChoice('p2', { action: 'fight', move: 0 });
+    drainInto(battle, events);
+  }
+  return battle;
+});
+
+// 67-80. Gen 1 side-effect odds (task FX4). Red's move records carry no
+// chance, so every Red move reaches the referee at chance 0 and the odds are
+// each pokered routine's own constant (Effects.SIDE_THRESHOLD). A g1_odds_*
+// scenario fights one turn per seed -- a fast Alpha's side-effect move into a
+// slow Beta, chance 0 -- with seeds a scan picked so the routine's byte is
+// exactly threshold - 1 (it lands) and then exactly the threshold (it does
+// not). `probeSide` pins every battle's draw count (`rng`) and the target's
+// condition.
+
+// After each battle's turn: its RNG state, then every standing seat's
+// condition, confusion, flinch and the two stages a side-effect drop moves.
+function probeSide(battle, at) {
+  probes.push({ at, rng: battle.rng.state() });
+  for (const fighter of battle.fighters) {
+    const mon = fighter.active ? fighter.mons[fighter.active - 1] : null;
+    if (mon && mon.hp > 0) {
+      probes.push({
+        at, slot: fighter.slot, status: mon.status || '',
+        confusion: mon.confusion || 0, flinch: mon.flinch === true,
+        sSpd: mon.stages.spd, sSpc: mon.stages.spc,
+      });
+    }
+  }
+}
+
+// One turn per entry, every battle's events into the one stream: Alpha (p1,
+// fast) uses `move`, Beta (p2, slow) splashes. An entry may swap either move
+// (`aMove` / `bMove`), the speeds, the mode, the ruleset's `typeIds`, and
+// Beta's HP, status, types and raw sheet fields (`bExtra`).
+function sideTurns(id, entries) {
+  return (events) => {
+    let battle = null;
+    entries.forEach((e, index) => {
+      battle = build({
+        id: `${id}${index + 1}`, mode: e.mode || '1v1', seed: e.seed, choiceTimeout: 60,
+        reconnectGrace: 60, typeIds: e.typeIds,
+        sides: {
+          a: [{ playerId: 'p1', name: 'Ann', mons: [
+            mn({ species: 'Alpha', maxHp: 400, spd: e.aSpd || 90, types: [1],
+              baseSpd: 0, moves: [e.aMove || e.move] })] }],
+          b: [{ playerId: 'p2', name: 'Bob', mons: [
+            mn({ species: 'Beta', hp: e.bHp, maxHp: 400, spd: e.bSpd || 10,
+              baseSpd: 0, types: e.bTypes || [1], status: e.bStatus,
+              moves: [e.bMove || fx('splash', 0, 85)], extra: e.bExtra })] }],
+        },
+      });
+      drainInto(battle, events);
+      battle.submitChoice('p1', { action: 'fight', move: 0 });
+      battle.submitChoice('p2', { action: 'fight', move: 0 });
+      drainInto(battle, events);
+      probeSide(battle, index + 1);
+    });
+    return battle;
+  };
+}
+
+const hit = (effect, o = {}) => fx('hit', 10, effect, { chance: o.chance, type: o.type });
+
+// Each pair: the byte at threshold - 1, then at the threshold. The scan's
+// seeds put the routine's byte at the same draw (acc, crit, roll, then the
+// side byte), so one seed serves every family whose threshold it straddles.
+const odds = (id, effect, below, at) => sideTurns(id, [
+  { seed: below, move: hit(effect) }, { seed: at, move: hit(effect) }]);
+scenario('g1_odds_poison1', odds('g1op1', 2, 11078, 6227)); // 51 / 52
+scenario('g1_odds_poison2', odds('g1op2', 33, 192, 3)); // 102 / 103
+scenario('g1_odds_twineedle', odds('g1otw', 77, 11078, 6227)); // 51 / 52
+scenario('g1_odds_burn1', odds('g1ob1', 4, 18957, 14106)); // 25 / 26
+scenario('g1_odds_freeze1', odds('g1of1', 5, 18957, 14106)); // 25 / 26
+scenario('g1_odds_paralyze2', odds('g1op2p', 36, 8071, 3220)); // 76 / 77
+scenario('g1_odds_flinch1', odds('g1ofl1', 31, 18957, 14106)); // 25 / 26
+scenario('g1_odds_flinch2', odds('g1ofl2', 37, 8071, 3220)); // 76 / 77
+scenario('g1_odds_drop', odds('g1odr', 71, 28460, 23588)); // 84 / 85
+scenario('g1_odds_confuse', odds('g1ocf', 76, 23829, 18957)); // 24 / 25
+
+// The computer's drop (wild Beta, fast, lowers Alpha's Speed): the extra miss
+// byte comes first -- 63 misses and draws nothing more; 64 passes, and the
+// side byte 84 then lands. g1_odds_drop is the link fight that never draws it.
+scenario('g1_odds_computer_drop', sideTurns('g1ocd', [
+  { seed: 12021, mode: 'wild', aSpd: 10, bSpd: 90, aMove: fx('splash', 0, 85), bMove: hit(70) },
+  { seed: 9921, mode: 'wild', aSpd: 10, bSpd: 90, aMove: fx('splash', 0, 85), bMove: hit(70) },
+]));
+
+// Precedence on one seed (the side byte is 50): chance 0 is the cart's 26 and
+// misses; an explicit 20 is floor(20 * 255 / 100) = 51 and lands; 19 is 48 and
+// misses. A chance on an effect with no side routine draws nothing -- the last
+// two battles end on the same RNG state.
+scenario('g1_side_precedence', sideTurns('g1sp', [
+  { seed: 15950, move: hit(4) },
+  { seed: 15950, move: hit(4, { chance: 20 }) },
+  { seed: 15950, move: hit(4, { chance: 19 }) },
+  { seed: 15950, move: hit(0, { chance: 100 }) },
+  { seed: 15950, move: hit(0) },
+]));
+
+// What each routine checks before it draws, on one seed whose side byte is 0
+// -- any draw would land -- so a battle that ends on battle 1's RNG state (the
+// plain hit) drew nothing (the Lua driver's comment numbers each battle).
+const POISON_AXIS = ['NORMAL', 'POISON'];
+const FIRE_AXIS = ['NORMAL', 'FIRE'];
+const SUB = { substitute: 200 };
+const DOLL = { substitute: 1 };
+scenario('g1_side_gates', sideTurns('g1sg', [
+  { seed: 21964, move: hit(0) },
+  { seed: 21964, move: hit(4), bStatus: 'PSN' },
+  { seed: 21964, move: hit(4), bTypes: [0] },
+  { seed: 21964, move: hit(2), typeIds: POISON_AXIS },
+  { seed: 21964, move: hit(2) },
+  { seed: 21964, move: hit(4), bExtra: SUB },
+  { seed: 21964, move: hit(31), bExtra: SUB },
+  { seed: 21964, move: hit(2), bExtra: SUB },
+  { seed: 21964, move: hit(71), bExtra: SUB },
+  { seed: 21964, move: hit(76), bExtra: SUB },
+  { seed: 21964, move: hit(4), bExtra: DOLL },
+  { seed: 21964, move: hit(77), bExtra: DOLL },
+  { seed: 21964, move: hit(4, { type: 1 }), typeIds: FIRE_AXIS, bStatus: 'FRZ', bTypes: [0] },
+  { seed: 21964, move: hit(71), bExtra: { mist: true } },
+  { seed: 21964, move: hit(0), bHp: 1 },
+  { seed: 21964, move: hit(4), bHp: 1 },
+]));
+
+// Multi-hit moves after a broken Substitute: a first-hit break ends the move
+// (`.nullifyEffect` zeroed the effect before TwoToFiveAttacksEffect could mark
+// it multi-hit); a later break leaves it going, the effect still gone (the Lua
+// driver's comment numbers each battle).
+const multi = (effect) => fx('multi', 40, effect);
+scenario('g1_multi_sub', sideTurns('g1ms', [
+  { seed: 29011, move: multi(29) },
+  { seed: 29011, move: multi(29), bExtra: { substitute: 5 } },
+  { seed: 29011, move: multi(29), bExtra: { substitute: 15 } },
+  { seed: 29007, move: multi(44) },
+  { seed: 29007, move: multi(44), bExtra: { substitute: 5 } },
+  { seed: 29007, move: multi(44), bExtra: { substitute: 15 } },
+  { seed: 11078, move: multi(77) },
+  { seed: 11078, move: multi(77), bExtra: { substitute: 5 } },
+  { seed: 11078, move: multi(77), bExtra: { substitute: 15 } },
+  { seed: 11078, move: multi(0) },
+  { seed: 29011, move: multi(29), bExtra: { substitute: 9 } },
+  { seed: 29007, move: multi(44), bExtra: { substitute: 8 } },
+]));
+
+// ------------------------------------------------------------------
+// R1a (gen12-referee-gaps-fix): the damage tails, AlwaysHappenSideEffects,
+// COUNTER, RAGE / THRASH PP, called multi-turn moves, Leech Seed, Pay Day and
+// the self-hit -- each against pokered, one battle per case (the Lua driver's
+// comments spell out every battle).
+// ------------------------------------------------------------------
+
+// After each turn of a `duels` battle: the RNG state, wDamage (`lastDamage`)
+// and the Pay Day pile, then every seat's monster -- standing or not -- with
+// the volatiles these rows move. `pp` is the slots' PP, comma-joined.
+function probeDuel(battle, at, turn) {
+  probes.push({
+    at, turn, rng: battle.rng.state(), last: battle.lastDamage,
+    payA: battle.payDay.a, payB: battle.payDay.b,
+  });
+  for (const fighter of battle.fighters) {
+    fighter.mons.forEach((mon, i) => {
+      probes.push({
+        at, turn, slot: fighter.slot, mon: i + 1, hp: mon.hp,
+        sub: mon.substitute || 0, zero: mon.subAtZero === true,
+        raging: mon.raging === true, recharge: mon.mustRecharge === true,
+        charging: !!mon.charging, invuln: mon.invulnerable === true,
+        thrash: !!mon.thrashing, bide: !!mon.bide,
+        conf: mon.confusion || 0, tox: mon.toxicCounter || 0,
+        sAtk: mon.stages.atk, pp: mon.moves.map((m) => String(m.pp)).join(','),
+      });
+    });
+  }
+}
+
+// One battle per entry (the Lua driver's `duels`): Ann's Alpha (p1) against
+// Bob's Beta (p2), one game turn per `turns` pair, a closing outcome row.
+function duels(id, entries) {
+  return (events) => {
+    let battle = null;
+    entries.forEach((e, index) => {
+      const at = index + 1;
+      battle = build({
+        id: `${id}${at}`, mode: e.mode || '1v1', seed: e.seed, choiceTimeout: 60,
+        reconnectGrace: 60, typeIds: e.typeIds, chart: e.chart, metronomePool: e.pool,
+        sides: {
+          a: [{ playerId: 'p1', name: 'Ann', mons: [mn(e.a)] }],
+          b: [{ playerId: 'p2', name: 'Bob', mons: [mn(e.b)] }],
+        },
+      });
+      drainInto(battle, events);
+      const turns = e.turns || [[0, 0]];
+      for (let t = 0; t < turns.length; t += 1) {
+        if (battle.outcome()) break;
+        const turnNo = battle.turn;
+        battle.submitChoice('p1', { action: 'fight', move: turns[t][0] });
+        if (battle.turn === turnNo) {
+          battle.submitChoice('p2', { action: 'fight', move: turns[t][1] });
+        }
+        if (battle.forcedPending) battle.tick(battle.now);
+        drainInto(battle, events);
+        probeDuel(battle, at, t + 1);
+      }
+      const o = battle.outcome();
+      if (o) {
+        probes.push({
+          at, outcome: o.outcome, reason: o.reason,
+          winner: o.winners ? o.winners[0] : '', payDay: o.payDay || 0,
+        });
+      }
+    });
+    return battle;
+  };
+}
+
+const SPLASH = fx('splash', 0, 85);
+const fast = (moves, extra, o = {}) => ({
+  species: 'Alpha', maxHp: 400, hp: o.hp, level: o.level, atk: o.atk, spd: 90, baseSpd: 0,
+  types: o.types || [1], moves, status: o.status, confusion: o.confusion,
+  toxicCounter: o.toxicCounter, extra,
+});
+const slow = (moves, extra, o = {}) => ({
+  species: 'Beta', maxHp: o.maxHp === undefined ? 400 : o.maxHp, hp: o.hp, def: o.def, spd: 10,
+  baseSpd: 0, types: o.types || [1], moves: moves || [SPLASH], status: o.status,
+  confusion: o.confusion, toxicCounter: o.toxicCounter, extra,
+});
+
+const TAIL_CHART = [[100, 100, 100], [100, 50, 100], [100, 50, 50], [100, 0, 100]];
+const TAIL_TYPES = [1, 2];
+const tail = (ty) => fx('tap', 10, 0, { type: ty });
+const weak = (moves, extra) => ({
+  species: 'Alpha', maxHp: 400, level: 2, atk: 5, spd: 90, baseSpd: 0, types: [0], moves, extra,
+});
+const tailTarget = () => slow(undefined, undefined, { def: 200, types: TAIL_TYPES });
+scenario('g1_damage_tails', duels('g1dt', [
+  { seed: 7101, chart: TAIL_CHART, a: weak([tail(1)]), b: tailTarget() },
+  { seed: 7101, chart: TAIL_CHART, a: weak([tail(2)]), b: tailTarget() },
+  { seed: 7101, chart: TAIL_CHART, a: weak([tail(0)]), b: tailTarget() },
+  { seed: 7101, chart: TAIL_CHART, a: weak([tail(3)]), b: tailTarget() },
+  { seed: 7101, a: fast([fx('thump', 40, 0)]), b: slow(undefined, { substitute: 8 }),
+    turns: [[0, 0], [0, 0]] },
+]));
+
+const HOLD = { substitute: 200 };
+const BREAK = { substitute: 1 };
+const hurt = (moves, extra) => fast(moves, extra, { hp: 300 });
+const ZERO_PP = [fx('thump', 40, 0, { pp: 0 })];
+scenario('g1_always_happen', duels('g1ah', [
+  { seed: 7201, a: hurt([fx('leech', 40, 3)]), b: slow(undefined, HOLD) },
+  { seed: 7201, a: hurt([fx('leech', 40, 3)]), b: slow(undefined, BREAK) },
+  { seed: 7201, a: hurt([fx('ram', 40, 48)]), b: slow(undefined, HOLD) },
+  { seed: 7201, a: hurt([fx('ram', 40, 48)]), b: slow(undefined, BREAK) },
+  { seed: 7201, a: hurt(ZERO_PP), b: slow(undefined, HOLD) },
+  { seed: 7201, a: hurt(ZERO_PP), b: slow(undefined, BREAK) },
+  { seed: 7201, a: hurt([fx('beam', 60, 80)]), b: slow(undefined, HOLD), turns: [[0, 0], [0, 0]] },
+  { seed: 7201, a: hurt([fx('beam', 60, 80)]), b: slow(undefined, BREAK), turns: [[0, 0], [0, 0]] },
+  { seed: 7201, a: hurt([fx('blast', 60, 7)]), b: slow(undefined, HOLD) },
+  { seed: 7201, a: hurt([fx('blast', 60, 7)]), b: slow(undefined, BREAK) },
+  { seed: 7201, a: hurt([fx('RAGE', 20, 81)]), b: slow(undefined, HOLD) },
+  { seed: 7201, a: hurt([fx('RAGE', 20, 81)]), b: slow(undefined, BREAK) },
+  { seed: 7201, a: hurt([fx('leech', 40, 3)]),
+    b: slow([fx('RAGE', 20, 81)], { raging: true, rageMove: 1 }) },
+  { seed: 7201, a: hurt([fx('ram', 40, 48)], { substitute: 30 }), b: slow(undefined, HOLD) },
+  { seed: 7201, a: hurt([fx('blast', 60, 7)], { substitute: 30 }), b: slow(undefined, HOLD) },
+]));
+
+const payer = (o) => ({
+  species: 'Alpha', maxHp: 400, hp: o.hp, level: o.level, spd: 90, baseSpd: 0, types: [1],
+  moves: [fx('coin', 80, 16)],
+});
+const payee = (o) => ({
+  species: 'Beta', maxHp: 400, hp: o.hp === undefined ? 40 : o.hp, atk: o.atk, spd: 10,
+  baseSpd: 0, types: [1], moves: [fx('coin', o.power === undefined ? 10 : o.power, 16)],
+  extra: o.extra,
+});
+const TWO = [[0, 0], [0, 0], [0, 0], [0, 0]];
+scenario('g1_pay_day', duels('g1pd', [
+  { seed: 7401, mode: 'wild', a: payer({}), b: payee({}), turns: TWO },
+  { seed: 7401, mode: '1v1', a: payer({}), b: payee({}), turns: TWO },
+  { seed: 7401, mode: 'wild', a: payer({}), b: payee({ extra: { substitute: 1 } }), turns: TWO },
+  { seed: 7401, mode: 'wild', a: payer({ level: 140 }), b: payee({}), turns: TWO },
+  { seed: 7401, mode: 'wild', a: payer({ hp: 40 }), b: payee({ hp: 400, atk: 250, power: 120 }),
+    turns: TWO },
+]));
+
+const CTR = fx('COUNTER', 1, 0, { type: 1 });
+const counterer = (extra) => ({
+  species: 'Alpha', maxHp: 400, spd: 10, baseSpd: 0, types: [1], moves: [CTR], extra,
+});
+const striker = (moves, types) => ({
+  species: 'Beta', maxHp: 400, spd: 90, baseSpd: 0, types: types || [1], moves,
+});
+const THUMP = fx('thump', 40, 0);
+const GHOST_CHART = [[100, 100, 100], [100, 100, 0], [100, 100, 100]];
+const missing = () => Object.assign(fx('thump', 40, 0), { accuracy: 0 });
+scenario('g1_counter', duels('g1ct', [
+  { seed: 7501, a: counterer(), b: striker([THUMP]) },
+  { seed: 7501, a: counterer(), b: striker([fx('flame', 40, 0, { type: 2 })]) },
+  { seed: 7501, a: counterer(), b: striker([CTR]) },
+  { seed: 7501, a: counterer(), b: striker([missing()]) },
+  { seed: 7501, a: counterer({ substitute: 200 }), b: striker([THUMP]) },
+  { seed: 7501, chart: GHOST_CHART, a: counterer(), b: striker([THUMP], [2]) },
+  { seed: 7501, a: counterer(), b: striker([THUMP, fx('growl', 0, 18)]), turns: [[0, 0], [0, 1]] },
+  { seed: 7501, a: counterer(), b: striker([fx('chop', 40, 0, { type: 1 })]) },
+  { seed: 7501, typeIds: ['FIRE', 'FIGHTING', 'WATER', 'NORMAL'], a: counterer(),
+    b: striker([THUMP]) },
+]));
+
+scenario('g1_rage_thrash_pp', duels('g1rp', [
+  { seed: 7601, a: fast([fx('RAGE', 20, 81, { pp: 1 })]), b: slow([fx('thump', 10, 0)]),
+    turns: [[0, 0], [0, 0], [0, 0]] },
+  { seed: 7601, a: fast([fx('THRASH', 30, 27, { pp: 1 })]), b: slow(),
+    turns: [[0, 0], [0, 0], [0, 0], [0, 0]] },
+  { seed: 7601, a: fast([fx('RAGE', 20, 81)], { raging: true, rageMove: 1, stages: { atk: 6 } }),
+    b: slow([fx('thump', 10, 0)]) },
+]));
+
+const metro = () => fx('METRONOME', 0, 83);
+const FOUR = [[0, 0], [0, 0], [0, 0], [0, 0]];
+const poolOf = (m) => [m];
+scenario('g1_called_multiturn', duels('g1cm', [
+  { seed: 7701, pool: poolOf(fx('FLY', 90, 43)), a: fast([metro()]), b: slow(), turns: FOUR },
+  { seed: 7701, pool: poolOf(fx('DIG', 100, 39)), a: fast([metro()]), b: slow(), turns: FOUR },
+  { seed: 7701, pool: poolOf(fx('THRASH', 30, 27)), a: fast([metro()]), b: slow(), turns: FOUR },
+  { seed: 7701, pool: poolOf(fx('RAGE', 20, 81)), a: fast([metro()]),
+    b: slow([fx('thump', 10, 0)]), turns: FOUR },
+  { seed: 7701, pool: poolOf(fx('BIDE', 0, 26)), a: fast([metro()]),
+    b: slow([fx('thump', 10, 0)]), turns: FOUR },
+  { seed: 7701,
+    a: { species: 'Alpha', maxHp: 400, spd: 10, baseSpd: 0, types: [1], moves: [fx('MIRROR_MOVE', 0, 9)] },
+    b: { species: 'Beta', maxHp: 400, spd: 90, baseSpd: 0, types: [1], moves: [fx('FLY', 90, 43), SPLASH] },
+    turns: [[0, 0], [0, 0], [0, 1]] },
+]));
+
+const SEEDED = { leechSeed: { fromSlot: 0 } };
+const seeder = () => fast([SPLASH], undefined, { hp: 300 });
+scenario('g1_leech_toxic', duels('g1lt', [
+  { seed: 7801, a: seeder(), b: slow(undefined, SEEDED, { status: 'TOX', toxicCounter: 1 }),
+    turns: [[0, 0], [0, 0]] },
+  { seed: 7801, a: seeder(), b: slow(undefined, SEEDED, { status: 'PSN', hp: 20 }) },
+  { seed: 7801, a: seeder(), b: slow(undefined, SEEDED, { status: 'BRN', hp: 20 }) },
+  { seed: 7801, a: seeder(), b: slow(undefined, { leechSeed: { fromSlot: 0 }, substitute: 50 },
+    { status: 'PSN' }) },
+]));
+
+const dizzy = (extra, moves) => fast(moves || [SPLASH], extra, { confusion: 4 });
+scenario('g1_self_hit', duels('g1sh', [
+  { seed: 7309, a: dizzy({ substitute: 30 }), b: slow(undefined, { substitute: 10 }) },
+  { seed: 7309, a: dizzy({ substitute: 30 }), b: slow(undefined, { substitute: 5 }) },
+  { seed: 7309, a: dizzy({ substitute: 30 }), b: slow() },
+  { seed: 7309, a: dizzy(undefined), b: slow(undefined, { substitute: 10 }) },
+  { seed: 7309, a: dizzy({ charging: { moveIndex: 1, effect: 43, targetSlot: 3, moveId: 'FLY' },
+    invulnerable: true }, [fx('FLY', 90, 43)]), b: slow(), turns: [[0, 0], [0, 0]] },
+  { seed: 7309, a: dizzy({ thrashing: { turns: 1, moveIndex: 1 } }, [fx('THRASH', 30, 27)]),
+    b: slow(), turns: [[0, 0], [0, 0]] },
+  { seed: 7309, a: dizzy({ bide: { turns: 0, stored: 30, moveIndex: 1, targetSlot: 3 } },
+    [fx('BIDE', 0, 26)]), b: slow(), turns: [[0, 0], [0, 0]] },
+]));
+
+// ------------------------------------------------------------------
+// R1b (gen12-referee-gaps-fix wave 2): the Lua driver's `fights` scenarios,
+// literal for literal (every sheet is written out whole on both sides).
+// ------------------------------------------------------------------
+
+// After each row of a `fights` battle: the RNG state and wDamage, then every
+// monster of every seat with the state these rows move.
+function probeR1b(battle, at, turn) {
+  probes.push({ at, turn, rng: battle.rng.state(), last: battle.lastDamage });
+  // R1e's seat state: wPlayerMoveListIndex, wAILayer2Encouragement and the
+  // move struct COUNTER reads (power / type, -1 when nothing was loaded).
+  for (const fighter of battle.fighters) {
+    const struct = fighter.moveStruct;
+    probes.push({
+      at, turn, seat: fighter.slot,
+      li: fighter.moveListIndex || 0, ai: fighter.aiLayer2 || 0,
+      sp: struct ? struct.power : -1,
+      st: struct ? struct.type : -1,
+      // wAICount (K16, `_trainerAi`).
+      ac: fighter.aiCount,
+    });
+  }
+  for (const fighter of battle.fighters) {
+    fighter.mons.forEach((mon, i) => {
+      const st = mon.stages;
+      probes.push({
+        at, turn, slot: fighter.slot, mon: i + 1,
+        hp: mon.hp, maxHp: mon.maxHp, level: mon.level,
+        status: mon.status || '', tox: mon.toxicCounter || 0,
+        linger: mon.toxicLinger === true, conf: mon.confusion || 0,
+        moves: mon.moves.map((m) => `${m.id}:${m.pp}`).join(','),
+        types: mon.types.map(String).join(','),
+        transformed: mon.transformed === true, recharge: mon.mustRecharge === true,
+        invuln: mon.invulnerable === true, charging: !!mon.charging,
+        disable: mon.disable ? `${mon.disable.moveIndex}/${mon.disable.turns}` : '',
+        used: mon.lastUsedMove ? mon.lastUsedMove.id : '',
+        cur: `${mon.cur.atk}/${mon.cur.def}/${mon.cur.spd}/${mon.cur.spc}`,
+        party: `${mon.partyStats.atk}/${mon.partyStats.def}/${mon.partyStats.spd}/${mon.partyStats.spc}`,
+        stages: `${st.atk}/${st.def}/${st.spd}/${st.spc}/${st.acc}/${st.eva}`,
+        flags: (mon.mist ? 'm' : '') + (mon.xAccuracy ? 'x' : '')
+          + (mon.focusEnergy ? 'f' : '') + (mon.leechSeed ? 's' : '')
+          + (mon.reflect ? 'r' : '') + (mon.lightScreen ? 'l' : ''),
+        sub: mon.substitute || 0,
+        trapped: mon.trapped ? `${mon.trapped.turns}/${mon.trapped.damage}` : '',
+        trapping: mon.trapping ? String(mon.trapping.turns) : '',
+        thrash: mon.thrashing ? mon.thrashing.turns : -1,
+        bide: mon.bide ? `${mon.bide.turns}/${mon.bide.stored}` : '',
+      });
+    });
+  }
+}
+
+// One battle per entry (the Lua driver's `fights`): its seats in field order,
+// one row of choices per step (a number is a FIGHT slot), an optional K9
+// level-up (`lv`) handed over before the row, `probeR1b` after it, and the
+// outcome at the end.
+function fights(id, entries) {
+  return (events) => {
+    let battle = null;
+    entries.forEach((e, index) => {
+      const at = index + 1;
+      const sides = { a: [], b: [] };
+      for (const seat of e.seats) {
+        sides[seat.side].push({
+          playerId: seat.pid, name: seat.pid, mons: seat.mons,
+          bag: seat.bag, badges: seat.badges, aiMods: seat.aiMods,
+          aiClass: seat.aiClass,
+        });
+      }
+      battle = build({
+        id: `${id}${at}`, mode: e.mode || '1v1', seed: e.seed, choiceTimeout: 60,
+        reconnectGrace: 60, typeIds: e.typeIds, chart: e.chart,
+        chartOrder: e.chartOrder, metronomePool: e.pool, sides,
+      });
+      drainInto(battle, events);
+      e.turns.forEach((row, t) => {
+        if (battle.outcome()) return;
+        if (row.lv) {
+          const lv = row.lv;
+          probes.push({ at, turn: t + 1,
+            levelUp: battle.levelUp(lv[0], lv[1], lv[2], lv[3], lv[4]) });
+          drainInto(battle, events);
+        }
+        const turnNo = battle.turn;
+        const phase = battle.phase;
+        for (const seat of e.seats) {
+          let c = row[seat.pid];
+          if (c !== undefined && c !== null && battle.turn === turnNo && battle.phase === phase) {
+            if (c === 'auto') {
+              battle.autoPick(seat.pid);
+            } else {
+              if (typeof c === 'number') c = { action: 'fight', move: c };
+              if (!battle.submitChoice(seat.pid, c)) {
+                probes.push({ at, turn: t + 1, refused: seat.pid });
+              }
+            }
+          }
+        }
+        if (battle.forcedPending) battle.tick(battle.now);
+        drainInto(battle, events);
+        probeR1b(battle, at, t + 1);
+      });
+      const o = battle.outcome();
+      if (o) {
+        probes.push({
+          at, outcome: o.outcome, reason: o.reason,
+          winner: o.winners ? o.winners[0] : '', payDay: o.payDay || 0,
+        });
+      }
+    });
+    return battle;
+  };
+}
+
+// A move: 60 PP and accuracy 255 unless `o` says otherwise (`o.ppUps` is
+// contract K8's).
+function r1m(id, power, effect, o = {}) {
+  const m = {
+    id, pp: o.pp === undefined ? 60 : o.pp, power,
+    accuracy: o.accuracy === undefined ? 255 : o.accuracy,
+    type: o.type || 0, effect, chance: o.chance || 0,
+  };
+  if (o.highCrit) m.highCrit = true;
+  if (o.ppUps !== undefined) m.ppUps = o.ppUps;
+  if (o.maxPp !== undefined) m.maxPp = o.maxPp;
+  return m;
+}
+
+// A sheet: level 20, 400 HP, 40 across, type 1 and base Speed 0 (no crits)
+// unless `o` says otherwise; every other key of `o` is a raw sheet field
+// (status, stages, K7's base / dvs, a Substitute, ...).
+const R1S_SHORT = new Set(['level', 'maxHp', 'hp', 'atk', 'def', 'spd', 'spc', 'types', 'baseSpd']);
+function r1s(species, moves, o = {}) {
+  const out = {
+    species, level: o.level === undefined ? 20 : o.level, hp: o.hp,
+    maxHp: o.maxHp === undefined ? 400 : o.maxHp,
+    stats: {
+      atk: o.atk === undefined ? 40 : o.atk, def: o.def === undefined ? 40 : o.def,
+      spd: o.spd === undefined ? 40 : o.spd, spc: o.spc === undefined ? 40 : o.spc,
+    },
+    types: o.types || [1], baseSpd: o.baseSpd === undefined ? 0 : o.baseSpd, moves,
+  };
+  for (const [key, value] of Object.entries(o)) {
+    if (!R1S_SHORT.has(key)) out[key] = value;
+  }
+  return out;
+}
+
+// The 1v1 shape of a `fights` entry: Ann (p1) on side a, Bob (p2) on side b,
+// `o.aSeat` / `o.bSeat` their bag and badges, the rest of `o` the entry's.
+function r1duo(a, b, o) {
+  const aSeat = o.aSeat || {};
+  const bSeat = o.bSeat || {};
+  const e = {
+    seats: [
+      { pid: 'p1', side: 'a', mons: a, bag: aSeat.bag, badges: aSeat.badges },
+      { pid: 'p2', side: 'b', mons: b, bag: bSeat.bag, badges: bSeat.badges,
+        aiMods: bSeat.aiMods, aiClass: bSeat.aiClass },
+    ],
+  };
+  for (const [key, value] of Object.entries(o)) {
+    if (key !== 'aSeat' && key !== 'bSeat') e[key] = value;
+  }
+  return e;
+}
+
+// TRANSFORM (transform.asm) and the switch-out that undoes it:
+//   1 1v1: Alpha transforms into Beta -- Beta's moves at 5 PP each
+//     (`.copyPPLoop`), Beta's types -- then switches out and back in: its
+//     own moves (the PP it had), its own types (LoadBattleMonFromParty);
+//   2 wild: the wild Beta transforms into Alpha and takes Alpha's K7 base
+//     stats, DVs and base Speed with the species byte; Alpha's crits on it
+//     read GetEnemyMonStat -- a CalcStat over Alpha's base Defense and DVs at
+//     Beta's level 30, no stat exp -- and Beta's own crits Alpha's base Speed;
+//   3 the same without K7: the party stats, as before.
+scenario('g1_transform_restore', fights('g1tf', [
+  r1duo(
+    [
+      r1s('Alpha', [r1m('morph', 0, 57), r1m('tap', 10, 0)], { spd: 90, types: [1] }),
+      r1s('Gamma', [r1m('splash', 0, 85)], { spd: 90 }),
+    ],
+    [
+      r1s('Beta', [r1m('thump', 10, 0, { pp: 12 }), r1m('chop', 10, 0, { pp: 3 })],
+        { spd: 10, types: [2] }),
+    ],
+    {
+      seed: 8101,
+      turns: [
+        { p1: 0, p2: 0 },
+        { p1: { action: 'switch', slot: 1 }, p2: 0 },
+        { p1: { action: 'switch', slot: 0 }, p2: 0 },
+        { p1: 1, p2: 0 },
+      ],
+    }),
+  r1duo(
+    [
+      r1s('Alpha', [r1m('slash', 70, 0, { highCrit: true })],
+        {
+          spd: 90,
+          baseSpd: 255,
+          base: { hp: 60, atk: 80, def: 70, spd: 120, spc: 90 },
+          dvs: { atk: 12, def: 9, spd: 15, spc: 6 },
+        }),
+    ],
+    [
+      r1s('Beta', [r1m('morph', 0, 57)],
+        {
+          level: 30,
+          spd: 10,
+          base: { hp: 48, atk: 48, def: 48, spd: 48, spc: 48 },
+          dvs: { atk: 3, def: 4, spd: 5, spc: 6 },
+        }),
+    ],
+    { mode: 'wild', seed: 8102, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+  r1duo(
+    [r1s('Alpha', [r1m('slash', 70, 0, { highCrit: true })], { spd: 90, baseSpd: 255 })],
+    [r1s('Beta', [r1m('morph', 0, 57)], { level: 30, spd: 10 })],
+    { mode: 'wild', seed: 8102, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+]));
+
+// HazeEffect_ (move_effects/haze.asm): every stage and battle stat reset,
+// confusion, X Accuracy, Mist, Focus Energy, Leech Seed, Bad Poison, Reflect,
+// Light Screen and Disable gone on both battlers, and the TARGET's status
+// cured -- a sleeping or frozen target loses the move it has not used yet
+// (CANNOT_MOVE in its selected move):
+//   1 1v1: Alpha (badly poisoned, staged, behind Reflect) hazes a sleeping,
+//     confused, Misted, pumped, seeded, disabled Beta: Alpha is left plainly
+//     poisoned, Beta wakes and does not move;
+//   2 1v1: a frozen Beta is thawed and loses its move;
+//   3 coop_pvp: all four battlers -- Gamma's confusion and stages, Delta's
+//     Bad Poison and seed -- and only Beta, the target, is cured.
+scenario('g1_haze_full', fights('g1hz', [
+  r1duo(
+    [
+      r1s('Alpha', [r1m('haze', 0, 25)],
+        {
+          spd: 90,
+          status: 'TOX',
+          toxicCounter: 3,
+          stages: { atk: 2, def: -1, spd: 0, spc: 0, acc: 1, eva: 0 },
+          reflect: true,
+          focusEnergy: true,
+        }),
+    ],
+    [
+      r1s('Beta', [r1m('thump', 10, 0)],
+        {
+          spd: 10,
+          status: 'SLP',
+          statusTurns: 5,
+          confusion: 4,
+          mist: true,
+          focusEnergy: true,
+          xAccuracy: true,
+          leechSeed: { fromSlot: 0 },
+          disable: { moveIndex: 1, turns: 4 },
+          stages: { atk: -2, def: 3, spd: 0, spc: 0, acc: 0, eva: 2 },
+        }),
+    ],
+    { seed: 8201, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+  r1duo(
+    [r1s('Alpha', [r1m('haze', 0, 25)], { spd: 90 })],
+    [r1s('Beta', [r1m('thump', 10, 0)], { spd: 10, status: 'FRZ' })],
+    { seed: 8202, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+  {
+    mode: 'coop_pvp',
+    seed: 8203,
+    seats: [
+      { pid: 'a1', side: 'a', mons: [r1s('Alpha', [r1m('haze', 0, 25)], { spd: 90 })] },
+      {
+        pid: 'a2',
+        side: 'a',
+        mons: [
+          r1s('Gamma', [r1m('splash', 0, 85)],
+            {
+              spd: 80,
+              confusion: 3,
+              stages: { atk: 0, def: 0, spd: 4, spc: 0, acc: 0, eva: 0 },
+            }),
+        ],
+      },
+      {
+        pid: 'b1',
+        side: 'b',
+        mons: [r1s('Beta', [r1m('thump', 10, 0)], { spd: 10, status: 'PAR', mist: true })],
+      },
+      {
+        pid: 'b2',
+        side: 'b',
+        mons: [
+          r1s('Delta', [r1m('splash', 0, 85)],
+            {
+              spd: 5,
+              status: 'TOX',
+              toxicCounter: 2,
+              leechSeed: { fromSlot: 0 },
+              stages: { atk: -3, def: 0, spd: 0, spc: 0, acc: 0, eva: 0 },
+            }),
+        ],
+      },
+    ],
+    turns: [
+      {
+        a1: { action: 'fight', move: 0, target: 3 },
+        a2: { action: 'fight', move: 0, target: 3 },
+        b1: { action: 'fight', move: 0, target: 0 },
+        b2: { action: 'fight', move: 0, target: 0 },
+      },
+    ],
+  },
+]));
+
+// StatModifierDownEffect's primary branch (effects.asm :539-716), in its
+// order: the computer's extra 25% miss byte (outside a link battle), a
+// Substitute, then MoveHitTest -- Mist before its accuracy byte, X Accuracy
+// with none -- each "But it failed!", and a stage at -6 "Nothing happened!":
+//   1 wild: the wild Beta growls four times (the miss byte every turn);
+//   2 1v1: the same growls, no miss byte;
+//   3 wild: into Alpha's Mist -- no accuracy byte;
+//   4 1v1: Alpha growls at Beta's doll -- no accuracy byte;
+//   5 1v1: Alpha at -6 Attack; Alpha (X Accuracy) growls with no byte;
+//   6 1v1: a SWORDS DANCE at +6 says "Nothing happened!", and draws nothing.
+scenario('g1_stat_drop_primary', fights('g1sd', [
+  r1duo(
+    [r1s('Alpha', [r1m('splash', 0, 85)], { spd: 10 })],
+    [r1s('Beta', [r1m('growl', 0, 18)], { spd: 90 })],
+    {
+      mode: 'wild',
+      seed: 8301,
+      turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }, { p1: 0, p2: 0 }, { p1: 0, p2: 0 }],
+    }),
+  r1duo(
+    [r1s('Alpha', [r1m('splash', 0, 85)], { spd: 10 })],
+    [r1s('Beta', [r1m('growl', 0, 18)], { spd: 90 })],
+    {
+      seed: 8301,
+      turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }, { p1: 0, p2: 0 }, { p1: 0, p2: 0 }],
+    }),
+  r1duo(
+    [r1s('Alpha', [r1m('splash', 0, 85)], { spd: 10, mist: true })],
+    [r1s('Beta', [r1m('growl', 0, 18)], { spd: 90 })],
+    { mode: 'wild', seed: 8302, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+  r1duo(
+    [r1s('Alpha', [r1m('growl', 0, 18)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, substitute: 30 })],
+    { seed: 8303, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo(
+    [r1s('Alpha', [r1m('growl', 0, 18)], { spd: 90, xAccuracy: true })],
+    [
+      r1s('Beta', [r1m('growl', 0, 18)],
+        { spd: 10, stages: { atk: 0, def: 0, spd: 0, spc: 0, acc: 0, eva: 0 } }),
+    ],
+    { seed: 8304, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo(
+    [
+      r1s('Alpha', [r1m('dance', 0, 50)],
+        { spd: 90, stages: { atk: 6, def: 0, spd: 0, spc: 0, acc: 0, eva: 0 } }),
+    ],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { seed: 8305, turns: [{ p1: 0, p2: 0 }] }),
+]));
+
+// ClearHyperBeam (effects.asm :1181-1191), beyond the flinch
+// (g1_flinch_recharge): a freeze on the player's turn (`.freeze1`; the
+// computer's `.freeze2` leaves it) and a trap that starts -- before its hit
+// test, so even one that misses:
+//   1 wild: the wild Beta beams, Alpha (the player) freezes it: no recharge;
+//   2 wild: Alpha beams, the wild Beta freezes it: Alpha still recharges;
+//   3 1v1: the same, a link fight: both sides are the player, it is cleared;
+//   4 wild: Alpha beams, the wild Beta's Wrap misses: no recharge.
+scenario('g1_clear_recharge', fights('g1cr', [
+  r1duo(
+    [r1s('Alpha', [r1m('chill', 10, 35, { chance: 100 })], { spd: 10 })],
+    [r1s('Beta', [r1m('beam', 20, 80)], { spd: 90 })],
+    { mode: 'wild', seed: 8401, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+  r1duo(
+    [r1s('Alpha', [r1m('beam', 20, 80)], { spd: 90 })],
+    [r1s('Beta', [r1m('chill', 10, 35, { chance: 100 })], { spd: 10 })],
+    { mode: 'wild', seed: 8401, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+  r1duo(
+    [r1s('Alpha', [r1m('beam', 20, 80)], { spd: 90 })],
+    [r1s('Beta', [r1m('chill', 10, 35, { chance: 100 })], { spd: 10 })],
+    { seed: 8401, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+  r1duo(
+    [r1s('Alpha', [r1m('beam', 20, 80)], { spd: 90 })],
+    [r1s('Beta', [r1m('wrap', 10, 42, { accuracy: 0 })], { spd: 10 })],
+    { mode: 'wild', seed: 8402, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+]));
+
+// The computer's item and switch in its own slot of the order
+// (MainInBattleLoop -> TrainerAI at `.enemyMovesFirst` / after
+// ExecutePlayerMove), a coop_npc trainer on side b -- TrainerAI's (K16), on
+// class records whose roll always passes (`chance` 256):
+//   1 a slower Beta's SUPER POTION lands after Alpha's hit;
+//   2 a faster Beta switches to Delta before Alpha moves: the hit finds Delta;
+//   3 a slower Beta that Alpha knocks out never switches (the AI's turn is
+//     gone with it); its send-out (EnemySendOut, the referee's own) follows;
+//   4 the same Speed: the tie byte is drawn for the item as for a move.
+const POTION_AI = { uses: 2, chance: 256, item: 'SUPER_POTION' };
+const JUGGLER_AI = { uses: 3, chance: 256, switch: true };
+scenario('g1_computer_turn_slot', fights('g1ct', [
+  r1duo(
+    [r1s('Alpha', [r1m('tap', 20, 0)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, hp: 100 })],
+    {
+      mode: 'coop_npc',
+      seed: 8501,
+      bSeat: { aiClass: POTION_AI },
+      turns: [{ p1: 0, p2: 0 }],
+    }),
+  r1duo(
+    [r1s('Alpha', [r1m('tap', 20, 0)], { spd: 10 })],
+    [
+      r1s('Beta', [r1m('splash', 0, 85)], { spd: 90 }),
+      r1s('Delta', [r1m('splash', 0, 85)], { spd: 5 }),
+    ],
+    { mode: 'coop_npc', seed: 8502, bSeat: { aiClass: JUGGLER_AI }, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo(
+    [r1s('Alpha', [r1m('tap', 200, 0)], { spd: 90, atk: 200 })],
+    [
+      r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, hp: 5 }),
+      r1s('Delta', [r1m('splash', 0, 85)], { spd: 5 }),
+    ],
+    {
+      mode: 'coop_npc',
+      seed: 8503,
+      bSeat: { aiClass: JUGGLER_AI },
+      turns: [{ p1: 0, p2: 0 }, { p2: 'auto' }],
+    }),
+  r1duo(
+    [r1s('Alpha', [r1m('tap', 20, 0)], { spd: 40 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 40, hp: 100 })],
+    {
+      mode: 'coop_npc',
+      seed: 8504,
+      bSeat: { aiClass: POTION_AI },
+      turns: [{ p1: 0, p2: 0 }],
+    }),
+]));
+
+// Asleep or frozen, the move menu is skipped (MainInBattleLoop :308-311,
+// SelectEnemyMove :2946-2948): last turn's selection stands and the bracket
+// reads it.  Alpha (slow) taps on turn 1 and is put to sleep; on turn 2 its
+// QUICK ATTACK choice still moves in tap's bracket, after Beta.  MIRROR MOVE
+// then finds Alpha's used move zeroed by the fast-asleep turn.
+scenario('g1_asleep_selection', fights('g1as', [
+  r1duo(
+    [r1s('Alpha', [r1m('tap', 10, 0), r1m('QUICK_ATTACK', 10, 0)], { spd: 10 })],
+    [
+      r1s('Beta', [r1m('lull', 0, 32), r1m('thump', 10, 0), r1m('MIRROR_MOVE', 0, 9)],
+        { spd: 90 }),
+    ],
+    // (8606: SleepEffect's counter is R1c's `and SLP_MASK` redraw, and this
+    // seed sleeps Alpha past turn 3.)
+    { seed: 8606, turns: [{ p1: 0, p2: 0 }, { p1: 1, p2: 1 }, { p1: 1, p2: 2 }] }),
+]));
+
+// AnyMoveToSelect (core.asm :2713-2753) with a move disabled ORs the other
+// slots' raw PP bytes: a 0-PP move with no PP Ups leaves nothing -- STRUGGLE
+// -- even with the disabled move's PP full.
+scenario('g1_struggle_disabled', fights('g1sg', [
+  r1duo(
+    [
+      r1s('Alpha', [r1m('tap', 10, 0, { pp: 0 }), r1m('chop', 10, 0, { pp: 10 })],
+        { spd: 90, disable: { moveIndex: 2, turns: 5 } }),
+    ],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { seed: 8701, turns: [{ p1: 0, p2: 0 }, { p1: 1, p2: 0 }] }),
+]));
+
+// DisableEffect (effects.asm :1286-1367): its MoveHitTest, then a random
+// slot (`BattleRandom & 3`, redrawn until it holds a move -- and, when the
+// target is the player's, has a raw PP byte: PP Ups count), for 1..8 steps
+// of `.AnyMoveDisabledCheck`, each in the disabled monster's own turn:
+//   1 1v1: Beta's THUMP / CHOP / SLAM, disabled and worn off over six turns;
+//   2 1v1: a 0-PP move with PP Ups is pickable, a bare 0-PP one never is;
+//   3 wild: the player disables the wild Beta, whose PP is never read;
+//   4 1v1: accuracy 0 -- "But it failed!"; a doll does not stop it.
+scenario('g1_disable', fights('g1ds', [
+  r1duo(
+    [r1s('Alpha', [r1m('lock', 0, 86), r1m('splash', 0, 85)], { spd: 90 })],
+    [r1s('Beta', [r1m('thump', 10, 0), r1m('chop', 10, 0), r1m('slam', 10, 0)], { spd: 10 })],
+    {
+      seed: 8801,
+      turns: [
+        { p1: 0, p2: 0 },
+        { p1: 1, p2: 0 },
+        { p1: 1, p2: 0 },
+        { p1: 1, p2: 0 },
+        { p1: 1, p2: 0 },
+        { p1: 1, p2: 0 },
+      ],
+    }),
+  r1duo(
+    [r1s('Alpha', [r1m('lock', 0, 86)], { spd: 90 })],
+    [
+      r1s(
+        'Beta',
+        [
+          r1m('thump', 10, 0, { pp: 0, ppUps: 2 }),
+          r1m('chop', 10, 0, { pp: 0 }),
+          r1m('slam', 10, 0, { pp: 5 }),
+        ],
+        { spd: 10 }),
+    ],
+    { seed: 8802, turns: [{ p1: 0, p2: 2 }] }),
+  r1duo(
+    [r1s('Alpha', [r1m('lock', 0, 86)], { spd: 90 })],
+    [r1s('Beta', [r1m('thump', 10, 0, { pp: 0 }), r1m('chop', 10, 0, { pp: 0 })], { spd: 10 })],
+    { mode: 'wild', seed: 8803, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo(
+    [r1s('Alpha', [r1m('lock', 0, 86, { accuracy: 0 }), r1m('lock', 0, 86)], { spd: 90 })],
+    [r1s('Beta', [r1m('thump', 10, 0)], { spd: 10, substitute: 30 })],
+    { seed: 8804, turns: [{ p1: 0, p2: 0 }, { p1: 1, p2: 0 }] }),
+]));
+
+// PoisonEffect's primary branch (effects.asm :78-162): a doll, a status or a
+// Poison type turn it away before its MoveHitTest ("It didn't affect"), and
+// TOXIC -- the move, by its id -- badly poisons:
+//   1 a Poison-type Beta (typeIds names index 1): no byte drawn;
+//   2 a Normal-type Beta: poisoned;
+//   3 TOXIC: badly poisoned, the counter climbing;
+//   4 a doll: turned away.
+scenario('g1_poison_primary', fights('g1pp', [
+  r1duo(
+    [r1s('Alpha', [r1m('powder', 0, 66)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, types: [1] })],
+    { seed: 8901, typeIds: ['NORMAL', 'POISON'], turns: [{ p1: 0, p2: 0 }] }),
+  r1duo(
+    [r1s('Alpha', [r1m('powder', 0, 66)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, types: [0] })],
+    { seed: 8901, typeIds: ['NORMAL', 'POISON'], turns: [{ p1: 0, p2: 0 }] }),
+  r1duo(
+    [r1s('Alpha', [r1m('TOXIC', 0, 66)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, types: [0] })],
+    {
+      seed: 8902,
+      typeIds: ['NORMAL', 'POISON'],
+      turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }, { p1: 0, p2: 0 }],
+    }),
+  r1duo(
+    [r1s('Alpha', [r1m('powder', 0, 66)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, types: [0], substitute: 30 })],
+    { seed: 8903, typeIds: ['NORMAL', 'POISON'], turns: [{ p1: 0, p2: 0 }] }),
+]));
+
+// "Hit the enemy N times!" (_MultiHitText, the player's) and "Hit N
+// times!" (_HitXTimesText, the computer's), with the drawn count, once the
+// hits run out with the target standing; a knockout returns before it:
+//   1 1v1: Alpha's DOUBLE KICK;
+//   2 wild: the wild Beta's;
+//   3 1v1: a two-to-five move that knocks Beta out says nothing;
+//   4 1v1: a power-0 two-to-five move still hits (CalculateDamage's 2).
+scenario('g1_multihit_lines', fights('g1mh', [
+  r1duo(
+    [r1s('Alpha', [r1m('kicks', 20, 44)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { seed: 9001, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo(
+    [r1s('Alpha', [r1m('splash', 0, 85)], { spd: 10 })],
+    [r1s('Beta', [r1m('kicks', 20, 44)], { spd: 90 })],
+    { mode: 'wild', seed: 9001, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo(
+    [r1s('Alpha', [r1m('pelt', 40, 29)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, hp: 12 })],
+    { seed: 9002, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo(
+    [r1s('Alpha', [r1m('pelt', 0, 29)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { seed: 9003, turns: [{ p1: 0, p2: 0 }] }),
+]));
+
+// Contract K9, the rebuild experience.asm makes after a level-up in battle:
+//   1 wild: the fielded Alpha (burned, at +1 Attack, every badge) grows to
+//     level 21 with stated stats and max HP: the party stats, the HP step,
+//     then CalculateModifiedStats, the burn and the badges; the benched
+//     Gamma grows from its K7 sheet alone (no stats stated); a claim with a
+//     stat that went down, a level that did not go up, and side b's are
+//     refused;
+//   2 1v1: a link fight earns no experience -- refused.
+scenario('g1_level_up', fights('g1lu', [
+  r1duo(
+    [
+      r1s('Alpha', [r1m('tap', 10, 0)],
+        {
+          spd: 90,
+          atk: 60,
+          spc: 55,
+          maxHp: 60,
+          hp: 30,
+          status: 'BRN',
+          stages: { atk: 1, def: 0, spd: 0, spc: 0, acc: 0, eva: 0 },
+          def: 50,
+        }),
+      r1s('Gamma', [r1m('splash', 0, 85)],
+        {
+          level: 15,
+          atk: 22,
+          spd: 22,
+          spc: 28,
+          maxHp: 38,
+          base: { hp: 45, atk: 49, def: 49, spd: 45, spc: 65 },
+          dvs: { atk: 10, def: 8, spd: 12, spc: 14 },
+          def: 22,
+        }),
+    ],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    {
+      mode: 'wild',
+      seed: 9101,
+      aSeat: {
+        badges: { BOULDERBADGE: true, THUNDERBADGE: true, SOULBADGE: true, VOLCANOBADGE: true },
+      },
+      turns: [
+        { p1: 0, p2: 0, lv: ['p1', 1, 21, { atk: 63, def: 52, spd: 94, spc: 57 }, 63] },
+        { p1: 0, p2: 0, lv: ['p1', 2, 16, null, null] },
+        { p1: 0, p2: 0, lv: ['p1', 1, 22, { atk: 62, def: 53, spd: 95, spc: 58 }, 64] },
+        { p1: 0, p2: 0, lv: ['p1', 1, 21, { atk: 64, def: 53, spd: 95, spc: 58 }, 64] },
+        { p1: 0, p2: 0, lv: ['p2', 1, 21, { atk: 41, def: 41, spd: 41, spc: 41 }, 401] },
+      ],
+    }),
+  r1duo(
+    [r1s('Alpha', [r1m('tap', 10, 0)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    {
+      seed: 9102,
+      turns: [{ p1: 0, p2: 0, lv: ['p1', 1, 21, { atk: 42, def: 42, spd: 92, spc: 42 }, 402] }],
+    }),
+]));
+
+// JUMP KICK's crash is 1 HP (PrintMoveFailureText: wDamage is 0 by then) and
+// goes the self-hit's way past the crasher's own doll to the opposing one;
+// SetDamageEffects draw no crit, no roll and ignore the chart, and
+// `.specialDamage` reads the move id:
+//   1 a missed JUMP KICK: 1 HP;  2 behind its own doll: Beta's doll takes it;
+//   3 into a Ghost (chart 0): "doesn't affect", then the crash;
+//   4 SEISMIC TOSS (level 30) and SONICBOOM into a Ghost: 30, then 20;
+//   5 DRAGON RAGE, then SUPER FANG: 40, then half what is left;
+//   6 PSYWAVE (level 30): BattleRandom until it is in 1..44.
+scenario('g1_crash_and_set_damage', fights('g1cs', [
+  r1duo(
+    [r1s('Alpha', [r1m('leap', 70, 45, { accuracy: 0 })], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { seed: 9201, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo(
+    [r1s('Alpha', [r1m('leap', 70, 45, { accuracy: 0 })], { spd: 90, substitute: 40 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, substitute: 10 })],
+    { seed: 9201, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo(
+    [r1s('Alpha', [r1m('leap', 70, 45, { type: 1 })], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, types: [2] })],
+    {
+      seed: 9202,
+      chart: [[100, 100, 100], [100, 100, 0], [100, 100, 100]],
+      turns: [{ p1: 0, p2: 0 }],
+    }),
+  r1duo(
+    [
+      r1s('Alpha', [r1m('SEISMIC_TOSS', 1, 41, { type: 1 }), r1m('SONICBOOM', 1, 41)],
+        { level: 30, spd: 90 }),
+    ],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, types: [2] })],
+    {
+      seed: 9203,
+      chart: [[100, 100, 0], [100, 100, 0], [100, 100, 100]],
+      turns: [{ p1: 0, p2: 0 }, { p1: 1, p2: 0 }],
+    }),
+  r1duo(
+    [r1s('Alpha', [r1m('DRAGON_RAGE', 1, 41), r1m('fang', 1, 40)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { seed: 9204, turns: [{ p1: 0, p2: 0 }, { p1: 1, p2: 0 }] }),
+  r1duo(
+    [r1s('Alpha', [r1m('PSYWAVE', 1, 41)], { level: 30, spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { seed: 9205, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+]));
+
+// OneHitKOEffect_ fails only on a SLOWER user (`jr c`): a Speed tie lands;
+// a full paralysis (`.MonHurtItselfOrFullyParalysed`) drops a charge but not
+// INVULNERABLE:
+//   1 1v1, both at Speed 40: the OHKO lands;
+//   2 a paralysed Alpha in the air with FLY is fully paralysed on the release
+//     turn (seed 9309): no charge, still invulnerable -- Beta's thump fails --
+//     and turn 2 is Alpha's own choice, a fresh FLY.
+scenario('g1_ohko_paralysis', fights('g1op', [
+  r1duo(
+    [r1s('Alpha', [r1m('drill', 1, 38)], { spd: 40 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 40 })],
+    { seed: 9301, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo(
+    [
+      r1s('Alpha', [r1m('FLY', 90, 43)],
+        {
+          spd: 90,
+          status: 'PAR',
+          charging: { moveIndex: 1, effect: 43, targetSlot: 3, moveId: 'FLY' },
+          invulnerable: true,
+        }),
+    ],
+    [r1s('Beta', [r1m('thump', 10, 0)], { spd: 10 })],
+    { seed: 9309, turns: [{ p2: 0 }, { p1: 0, p2: 0 }] }),
+]));
+
+// TrappingEffect runs before the hit (SpecialEffectsCont): only MoveHitTest's
+// miss takes it back -- a doll that holds keeps the trap, an immunity leaves
+// it at 0 a turn -- and its counter is the two-to-five odds:
+//   1 Wrap into a 50-HP doll that holds: Beta held;
+//   2 Wrap, accuracy 0: no trap;
+//   3 Wrap into a Ghost (chart 0): "doesn't affect", Beta held at 0;
+//   4 Wrap breaking a 3-HP doll: Beta held all the same.
+scenario('g1_trap_start', fights('g1ts', [
+  r1duo(
+    [r1s('Alpha', [r1m('wrap', 15, 42)], { spd: 90 })],
+    [r1s('Beta', [r1m('thump', 10, 0)], { spd: 10, substitute: 50 })],
+    { seed: 9401, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }, { p1: 0, p2: 0 },
+      { p1: 0, p2: 0 }] }),
+  r1duo(
+    [r1s('Alpha', [r1m('wrap', 15, 42, { accuracy: 0 })], { spd: 90 })],
+    [r1s('Beta', [r1m('thump', 10, 0)], { spd: 10 })],
+    { seed: 9402, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+  r1duo(
+    [r1s('Alpha', [r1m('wrap', 15, 42)], { spd: 90 })],
+    [r1s('Beta', [r1m('thump', 10, 0)], { spd: 10, types: [2] })],
+    {
+      seed: 9403,
+      chart: [[100, 100, 0], [100, 100, 100], [100, 100, 100]],
+      turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }, { p1: 0, p2: 0 }, { p1: 0, p2: 0 }],
+    }),
+  r1duo(
+    [r1s('Alpha', [r1m('wrap', 15, 42)], { spd: 90 })],
+    [r1s('Beta', [r1m('thump', 10, 0)], { spd: 10, substitute: 3 })],
+    { seed: 9404, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+]));
+
+// MIRROR MOVE copies wEnemyUsedMove -- the last move the target printed a
+// "used" line for: after its METRONOME called THRASH it is THRASH, and
+// Alpha, mirroring, thrashes too (a MIRROR MOVE of METRONOME would have
+// called again).
+scenario('g1_mirror_used', fights('g1mu', [
+  r1duo(
+    [r1s('Alpha', [r1m('MIRROR_MOVE', 0, 9)], { spd: 10 })],
+    [r1s('Beta', [r1m('METRONOME', 0, 83)], { spd: 90 })],
+    { seed: 9501, pool: [r1m('THRASH', 30, 27)], turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+]));
+
+// EndOfBattle pays the Pay Day pile whenever wBattleResult is still 0: an
+// escape by TELEPORT / ROAR / WHIRLWIND -- either side's -- pays; the
+// player's RUN (TryRunningFromBattle writes 2) does not:
+//   1 wild: Alpha's PAY DAY, then the wild Beta teleports away;
+//   2 wild: Alpha's PAY DAY, then Alpha teleports;
+//   3 wild: Alpha's PAY DAY, then Alpha runs.
+scenario('g1_pay_day_escape', fights('g1pe', [
+  r1duo(
+    [r1s('Alpha', [r1m('coins', 20, 16)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85), r1m('warp', 0, 28)], { spd: 10 })],
+    { mode: 'wild', seed: 9601, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 1 }] }),
+  r1duo(
+    [r1s('Alpha', [r1m('coins', 20, 16), r1m('warp', 0, 28)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { mode: 'wild', seed: 9601, turns: [{ p1: 0, p2: 0 }, { p1: 1, p2: 0 }] }),
+  r1duo(
+    [r1s('Alpha', [r1m('coins', 20, 16)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { mode: 'wild', seed: 9601, turns: [{ p1: 0, p2: 0 }, { p1: { action: 'run' }, p2: 0 }] }),
+]));
+
+// A power-0 move whose routine never calls MoveHitTest draws no accuracy
+// byte and is not stopped by FLY: Beta (fast) is up on turns 1 and 3, where
+// Alpha's effect-less move goes ahead and its GROWL fails (MoveHitTest's
+// INVULNERABLE); SWORDS DANCE and HAZE draw nothing either.
+scenario('g1_no_hit_test', fights('g1nh', [
+  r1duo(
+    [
+      r1s(
+        'Alpha',
+        [r1m('wave', 0, 0), r1m('dance', 0, 50), r1m('haze', 0, 25), r1m('growl', 0, 18)],
+        { spd: 10 }),
+    ],
+    [r1s('Beta', [r1m('FLY', 90, 43)], { spd: 90 })],
+    {
+      seed: 9701,
+      turns: [{ p1: 0, p2: 0 }, { p1: 1, p2: 0 }, { p1: 3, p2: 0 }, { p1: 2, p2: 0 }],
+    }),
+]));
+
+// R1c (gen12-referee-gaps-fix wave 3): the Red cart differences waves 1-2
+// left open, each against pokered. The comments on each are the Lua
+// driver's (tests/drivers/battle_turn_parity.lua), not repeated here.
+scenario('g1_draw_order', fights('g1do', [
+  r1duo([r1s('Alpha', [r1m('tap', 10, 0, { accuracy: 0 })], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { seed: 9801, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('tap', 10, 0)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { seed: 9801, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('dream', 40, 8)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { seed: 9801, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('tap', 10, 0)], { spd: 90, status: 'SLP', statusTurns: 3 })],
+    [r1s('Beta', [r1m('tap', 10, 0)], { spd: 10, status: 'FRZ' })],
+    { seed: 9801, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90, confusion: 1 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { seed: 9801, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90, confusion: 3 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { seed: 9801, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('COUNTER', 1, 0, { type: 1 })], { spd: 10 })],
+    [r1s('Beta', [r1m('flame', 10, 0, { type: 2 })], { spd: 90 })],
+    { seed: 9801, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('drill', 1, 38)], { spd: 10 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 90 })],
+    { seed: 9801, turns: [{ p1: 0, p2: 0 }] }),
+]));
+
+scenario('g1_computer_pp', fights('g1cp', [
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90 })],
+    [r1s('Beta', [r1m('thump', 10, 0, { pp: 1 })], { spd: 10 })],
+    { mode: 'wild', seed: 9811, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90 })],
+    [r1s('Beta', [r1m('thump', 10, 0, { pp: 0 }), r1m('chop', 10, 0, { pp: 0 })], { spd: 10 })],
+    { mode: 'wild', seed: 9811, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90 })],
+    [r1s('Beta', [r1m('thump', 10, 0)], { spd: 10, disable: { moveIndex: 1, turns: 5 } })],
+    { mode: 'wild', seed: 9811, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90 })],
+    [r1s('Beta', [r1m('thump', 10, 0, { pp: 1 })], { spd: 10 })],
+    { seed: 9811, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+]));
+
+const DOLL50 = { spd: 10, substitute: 50 };
+scenario('g1_doll_status', fights('g1ds', [
+  r1duo([r1s('Alpha', [r1m('lull', 0, 32)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], DOLL50)], { seed: 9821, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('zap', 0, 67)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], DOLL50)], { seed: 9821, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('seed', 0, 84)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], DOLL50)], { seed: 9821, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('morph', 0, 57)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], DOLL50)], { seed: 9821, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('copy', 0, 82)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], DOLL50)],
+    { mode: 'wild', seed: 9821, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('daze', 0, 49)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], DOLL50)], { seed: 9821, turns: [{ p1: 0, p2: 0 }] }),
+]));
+
+const R1C_TYPES = ['NORMAL', 'FIGHTING', 'ELECTRIC', 'GROUND', 'GRASS'];
+scenario('g1_sleep_effect', fights('g1se', [
+  r1duo([r1s('Alpha', [r1m('lull', 0, 32, { accuracy: 0 })], { spd: 10 })],
+    [r1s('Beta', [r1m('beam', 20, 80)], { spd: 90, status: 'PSN' })],
+    { mode: 'wild', seed: 9831, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('lull', 0, 32)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, status: 'SLP', statusTurns: 5 })],
+    { seed: 9831, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('lull', 0, 32)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, status: 'PSN' })],
+    { seed: 9831, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('zap', 0, 67, { type: 2 })], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, types: [3] })],
+    { seed: 9831, typeIds: R1C_TYPES, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('seed', 0, 84)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, types: [4] })],
+    { seed: 9831, typeIds: R1C_TYPES, turns: [{ p1: 0, p2: 0 }] }),
+]));
+
+const mimicker = (spd) => r1s('Alpha', [r1m('copy', 0, 82, { pp: 10 }), r1m('tap', 10, 0)], { spd });
+const MIMIC_FOE = [r1m('thump', 10, 0), r1m('chop', 10, 0), r1m('slam', 10, 0)];
+scenario('g1_mimic', fights('g1mi', [
+  r1duo([mimicker(90), r1s('Gamma', [r1m('splash', 0, 85)], { spd: 90 })],
+    [r1s('Beta', MIMIC_FOE, { spd: 10 })],
+    { mode: 'wild', seed: 9841, turns: [
+      { p1: { action: 'fight', move: 0, mimic: 1 }, p2: 0 },
+      { p1: 0, p2: 0 },
+      { p1: { action: 'switch', slot: 1 }, p2: 0 },
+      { p1: { action: 'switch', slot: 0 }, p2: 0 },
+    ] }),
+  r1duo([mimicker(90)], [r1s('Beta', MIMIC_FOE, { spd: 10 })],
+    { mode: 'wild', seed: 9841, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('tap', 10, 0), r1m('chop', 10, 0)], { spd: 10 })],
+    [r1s('Beta', [r1m('copy', 0, 82)], { spd: 90 })],
+    { mode: 'wild', seed: 9841, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([mimicker(90)], [r1s('Beta', MIMIC_FOE, { spd: 10 })],
+    { seed: 9842, turns: [{ p1: { action: 'fight', move: 0, mimic: 1 }, p2: 0 }] }),
+]));
+
+scenario('g1_already_up', fights('g1au', [
+  r1duo([r1s('Alpha', [r1m('pump', 0, 47), r1m('fog', 0, 46), r1m('splash', 0, 85)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { seed: 9851, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }, { p1: 1, p2: 0 },
+      { p1: 1, p2: 0 }, { p1: 2, p2: 0 }] }),
+]));
+
+const SIX = () => [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }, { p1: 0, p2: 0 },
+  { p1: 0, p2: 0 }, { p1: 0, p2: 0 }, { p1: 0, p2: 0 }];
+scenario('g1_teleport', fights('g1tp', [
+  r1duo([r1s('Alpha', [r1m('TELEPORT', 0, 28)], { spd: 90, level: 60 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { mode: 'wild', seed: 9861, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('TELEPORT', 0, 28)], { spd: 90, level: 5 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, level: 90 })],
+    { mode: 'wild', seed: 9864, turns: SIX() }),
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 10, level: 90 })],
+    [r1s('Beta', [r1m('ROAR', 0, 28)], { spd: 90, level: 5 })],
+    { mode: 'wild', seed: 9864, turns: SIX() }),
+  r1duo([r1s('Alpha', [r1m('TELEPORT', 0, 28)], { spd: 10 })],
+    [r1s('Beta', [r1m('ROAR', 0, 28)], { spd: 90 })],
+    { mode: 'coop_npc', seed: 9863, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('WHIRLWIND', 0, 28)], { spd: 90, level: 50 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, level: 20 })],
+    { mode: 'wild', seed: 9864, turns: [{ p1: 0, p2: 0 }] }),
+]));
+
+scenario('g1_trap_turns', fights('g1tt', [
+  r1duo([r1s('Alpha', [r1m('wrap', 15, 42)], { spd: 90 })],
+    [r1s('Beta', [r1m('thump', 10, 0)], { spd: 10 })],
+    { seed: 9871, turns: [...SIX(), { p1: 0, p2: 0 }, { p1: 0, p2: 0 }, { p1: 0, p2: 0 },
+      { p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('wrap', 15, 42)], { spd: 10 })],
+    [r1s('Beta', [r1m('thump', 10, 0)], { spd: 90 })],
+    { seed: 9871, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('wrap', 15, 42)], { spd: 90 })],
+    [r1s('Beta', [r1m('thump', 10, 0)], { spd: 10, types: [2] })],
+    { seed: 9872, chart: [[100, 100, 0], [100, 100, 100], [100, 100, 100]],
+      turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('wrap', 15, 42)], { spd: 90 })],
+    [r1s('Beta', [r1m('thump', 10, 0)], { spd: 10, status: 'SLP', statusTurns: 4 }),
+      r1s('Delta', [r1m('thump', 10, 0)], { spd: 10 })],
+    { seed: 9873, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: { action: 'switch', slot: 1 } },
+      { p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90 })],
+    [r1s('Beta', [r1m('thump', 10, 0)], { spd: 10, status: 'SLP', statusTurns: 2,
+      mustRecharge: true })],
+    { seed: 9874, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }, { p1: 0, p2: 0 },
+      { p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('wrap', 40, 42)], { spd: 90, atk: 120 })],
+    [r1s('Beta', [r1m('thump', 10, 0)], { spd: 10, hp: 30 }),
+      r1s('Delta', [r1m('thump', 10, 0)], { spd: 10 })],
+    { seed: 9875, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }, { p2: { action: 'switch', slot: 1 } },
+      { p1: 0, p2: 0 }, { p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+]));
+
+scenario('g1_tie_actions', fights('g1ta', [
+  r1duo([r1s('Alpha', [r1m('tap', 10, 0)]), r1s('Gamma', [r1m('tap', 10, 0)])],
+    [r1s('Beta', [r1m('tap', 10, 0)])],
+    { seed: 9881, turns: [{ p1: { action: 'switch', slot: 1 }, p2: { action: 'item', item: 'restore' } }] }),
+  r1duo([r1s('Alpha', [r1m('tap', 10, 0)], { spd: 90 }), r1s('Gamma', [r1m('tap', 10, 0)], { spd: 90 })],
+    [r1s('Beta', [r1m('tap', 10, 0)], { spd: 10 })],
+    { seed: 9881, turns: [{ p1: { action: 'switch', slot: 1 }, p2: { action: 'item', item: 'restore' } }] }),
+  r1duo([r1s('Alpha', [r1m('beam', 20, 80)])],
+    [r1s('Beta', [r1m('tap', 10, 0)])],
+    { seed: 9882, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+]));
+
+scenario('g1_toxic_bench', fights('g1tb', [
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90, status: 'TOX', toxicCounter: 3 }),
+    r1s('Gamma', [r1m('splash', 0, 85)], { spd: 90 })],
+  [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+  { seed: 9891, turns: [{ p1: 0, p2: 0 }, { p1: { action: 'switch', slot: 1 }, p2: 0 },
+    { p1: { action: 'switch', slot: 0 }, p2: 0 }, { p1: 0, p2: 0 }] }),
+]));
+
+scenario('g1_pay_day_faint', fights('g1pf', [
+  r1duo([r1s('Alpha', [r1m('coins', 20, 16)], { spd: 90, hp: 5 }),
+    r1s('Gamma', [r1m('TELEPORT', 0, 28)], { spd: 90, level: 40 })],
+  [r1s('Beta', [r1m('slam', 60, 0)], { spd: 10, atk: 200 })],
+  { mode: 'wild', seed: 9901, turns: [{ p1: 0, p2: 0 }, { p1: { action: 'switch', slot: 1 } },
+    { p1: 0, p2: 0 }] }),
+]));
+
+// R1d (wave 4): the battle menu a player keeps through a lock-in
+// (MainInBattleLoop runs DisplayBattleMenu before it looks at STORING_ENERGY,
+// USING_TRAPPING_MOVE or the foe's trap; `_menuFight`), and the computer's
+// selection after the player's switch or item (`_reselectComputer`):
+//   1 1v1: the held Beta's FIGHT -- its slot index naming nothing -- is
+//     CANNOT_MOVE and Alpha's is the continuation; then Beta switches to
+//     Delta, the trap goes with it, and Alpha's slot runs WRAP fresh at Delta
+//     (the link glitch: used line, PP, a new counter);
+//   2 wild: Alpha's items each take a step off its trap's counter (UseBagItem);
+//     the turn the step reaches 0 the wild Beta is free, re-picks, and moves;
+//   3 wild: the wild Beta's trap is let go by Alpha's switch to Gamma, and
+//     SelectEnemyMove picks again -- SLAM, not WRAP run fresh;
+//   4 1v1: Alpha's BIDE says nothing past "used BIDE" (BideEffect, and the
+//     store turns' ExecutePlayerMoveDone); an item stalls it, the counter
+//     where it was, and a FIGHT naming no slot stores;
+//   5 1v1: a switch drops the Bide (SendOutMon clears the battle status), and
+//     the monster that comes back uses BIDE afresh;
+//   6 1v1: asleep, FIGHT opens no move menu, so a 0-PP slot is taken -- the
+//     gate stops the monster before the move matters.
+const XATK = () => ({ action: 'item', item: 'X_ATTACK' });
+scenario('g1_menu_lockin', fights('g1ml', [
+  r1duo([r1s('Alpha', [r1m('wrap', 15, 42)], { spd: 90 })],
+    [r1s('Beta', [r1m('thump', 10, 0)], { spd: 10 }),
+      r1s('Delta', [r1m('thump', 10, 0)], { spd: 10 })],
+    { seed: 9911, turns: [{ p1: 0, p2: 0 }, { p1: 3, p2: 3 },
+      { p1: 0, p2: { action: 'switch', slot: 1 } },
+      { p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('wrap', 15, 42)], { spd: 90 })],
+    [r1s('Beta', [r1m('thump', 10, 0)], { spd: 10 })],
+    { mode: 'wild', seed: 9912,
+      turns: [{ p1: 0, p2: 0 }, { p1: XATK(), p2: 0 }, { p1: XATK(), p2: 0 },
+        { p1: XATK(), p2: 0 }, { p1: XATK(), p2: 0 }, { p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('thump', 10, 0)], { spd: 10 }),
+    r1s('Gamma', [r1m('thump', 10, 0)], { spd: 10 })],
+  [r1s('Beta', [r1m('wrap', 15, 42), r1m('slam', 40, 0)], { spd: 90 })],
+  // (R1e: the re-pick is `.chooseRandomMove`'s; on this seed it lands on
+  // SLAM, the second slot.)
+  { mode: 'wild', seed: 9915,
+    turns: [{ p1: 0, p2: 0 }, { p1: { action: 'switch', slot: 1 }, p2: 0 },
+      { p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('BIDE', 0, 26)], { spd: 90 })],
+    [r1s('Beta', [r1m('thump', 10, 0)], { spd: 10 })],
+    { seed: 9914, turns: [{ p1: 0, p2: 0 }, { p1: XATK(), p2: 0 },
+      { p1: 2, p2: 0 }, { p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('BIDE', 0, 26)], { spd: 90 }),
+    r1s('Gamma', [r1m('thump', 10, 0)], { spd: 90 })],
+  [r1s('Beta', [r1m('thump', 10, 0)], { spd: 10 })],
+  { seed: 9915, turns: [{ p1: 0, p2: 0 }, { p1: { action: 'switch', slot: 1 }, p2: 0 },
+    { p1: { action: 'switch', slot: 0 }, p2: 0 }, { p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('thump', 10, 0)], { spd: 90 })],
+    [r1s('Beta', [r1m('thump', 10, 0, { pp: 0 }), r1m('tap', 10, 0)],
+      { spd: 10, status: 'SLP', statusTurns: 3 })],
+    { seed: 9916, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+]));
+
+// A charge's first turn is ChargeEffect alone (CheckIfPlayerNeedsToChargeUp
+// jumps there ahead of PlayerCanExecuteMove): its line, no used line, no PP;
+// the release is PlayerCanExecuteMove's used line and DecrementPP:
+//   1 FLY at 10 PP: "flew up high!", then "used FLY" with the PP spent;
+//   2 a paralysed SOLARBEAM user fully paralysed on its release turn: the
+//     charge is gone and no PP was ever spent;
+//   3 the computer's FLY: the same lines, its PP never spent.
+scenario('g1_charge_turn', fights('g1ct', [
+  r1duo([r1s('Alpha', [r1m('FLY', 90, 43, { pp: 10 })], { spd: 90 })],
+    [r1s('Beta', [r1m('tap', 10, 0)], { spd: 10 })],
+    { seed: 9921, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('SOLARBEAM', 120, 39, { pp: 10 })], { spd: 90, status: 'PAR' })],
+    [r1s('Beta', [r1m('tap', 10, 0)], { spd: 10 })],
+    { seed: 9927, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('tap', 10, 0)], { spd: 10 })],
+    [r1s('Beta', [r1m('FLY', 90, 43, { pp: 10 })], { spd: 90 })],
+    { mode: 'wild', seed: 9923, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+]));
+
+// `.ThrashingAboutCheck` writes THRASH into wPlayerMoveNum: a PETAL DANCE's
+// later turns animate as THRASH; its first is its own.
+scenario('g1_thrash_anim', fights('g1th', [
+  r1duo([r1s('Alpha', [r1m('PETAL_DANCE', 20, 27)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { seed: 9931, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }, { p1: 0, p2: 0 },
+      { p1: 0, p2: 0 }] }),
+]));
+
+// PrintCriticalOHKOText and DisplayEffectiveness come after the hit is
+// applied, each hit; the crit flag is cleared once printed:
+//   1 a two-hit move, super effective, critical: hit, "Critical hit!",
+//     "It's super effective!", hit, "It's super effective!";
+//   2 a super-effective knockout: the line, then the faint;
+//   3 a landed OHKO into a super-effective type: "One-hit KO!", the line,
+//     then the faint.
+const SE_CHART = () => [[100, 100, 200], [100, 100, 100], [100, 100, 100]];
+scenario('g1_hit_lines', fights('g1hl', [
+  r1duo([r1s('Alpha', [r1m('kick', 30, 44, { highCrit: true })], { spd: 90, baseSpd: 255 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, types: [2] })],
+    { seed: 9941, chart: SE_CHART(), turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('thump', 40, 0)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, hp: 5, types: [2] })],
+    { seed: 9942, chart: SE_CHART(), turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('drill', 1, 38)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, types: [2] })],
+    { seed: 9943, chart: SE_CHART(), turns: [{ p1: 0, p2: 0 }] }),
+]));
+
+// TryRunningFromBattle for a coop_wild runner (the referee rolls; solo's
+// `wild` is its client's):
+//   1 Ann at Speed 10 against the wild 100: odds 10 x 32 / 25 = 12, then +30
+//     an attempt, one byte each -- "Can't escape!" and the turn spent (the
+//     others still fight), until one gets away;
+//   2 Abe at least as fast: "Got away safely!", no byte;
+//   3 a wild Speed under 4: the divisor's 0, away with no byte;
+//   4 solo `wild`: no roll here at all.
+function coopRun(seed, annSpd, abeSpd, wildSpd, turns) {
+  return {
+    mode: 'coop_wild', seed, turns,
+    seats: [
+      { pid: 'a1', side: 'a', mons: [r1s('Alpha', [r1m('tap', 10, 0)], { spd: annSpd })] },
+      { pid: 'a2', side: 'a', mons: [r1s('Gamma', [r1m('tap', 10, 0)], { spd: abeSpd })] },
+      { pid: 'w', side: 'b', mons: [r1s('Beta', [r1m('tap', 10, 0)], { spd: wildSpd })] },
+    ],
+  };
+}
+const RUN = () => ({ action: 'run' });
+const RUN_ROW = () => ({ a1: RUN(), a2: 0, w: 0 });
+scenario('g1_coop_run', fights('g1cr', [
+  coopRun(9951, 10, 50, 100, [RUN_ROW(), RUN_ROW(), RUN_ROW(), RUN_ROW(), RUN_ROW(),
+    RUN_ROW(), RUN_ROW(), RUN_ROW()]),
+  coopRun(9952, 10, 200, 100, [{ a1: 0, a2: RUN(), w: 0 }]),
+  coopRun(9953, 1, 2, 3, [RUN_ROW()]),
+  r1duo([r1s('Alpha', [r1m('tap', 10, 0)], { spd: 10 })],
+    [r1s('Beta', [r1m('tap', 10, 0)], { spd: 100 })],
+    { mode: 'wild', seed: 9954, turns: [{ p1: RUN(), p2: 0 }] }),
+]));
+
+// HazeEffect_ writes CANNOT_MOVE over the selection of a target it woke or
+// thawed, and nothing but a move menu writes over it (`_selectsAnew`):
+//   1 wild: the frozen wild Beta still owes its HYPER BEAM recharge (the
+//     enemy side keeps it through a freeze); thawed by Alpha's HAZE, its
+//     forced recharge turns -- SelectEnemyMove keeps the selection -- are
+//     lost in silence, and it never recharges;
+//   2 wild: a frozen Beta with nothing forced picks afresh the turn after,
+//     and moves;
+//   3 1v1: a frozen, raging Beta (a player: Rage skips every menu) thawed
+//     by HAZE never moves again while it rages.
+const HAZER = () => [r1s('Alpha', [r1m('HAZE', 0, 25), r1m('splash', 0, 85)], { spd: 90 })];
+scenario('g1_haze_lock', fights('g1hz', [
+  r1duo(HAZER(),
+    [r1s('Beta', [r1m('tap', 10, 0)], { spd: 10, status: 'FRZ', mustRecharge: true })],
+    { mode: 'wild', seed: 9961, turns: [{ p1: 0, p2: 0 }, { p1: 1, p2: 0 }, { p1: 1, p2: 0 }] }),
+  r1duo(HAZER(),
+    [r1s('Beta', [r1m('tap', 10, 0)], { spd: 10, status: 'FRZ' })],
+    { mode: 'wild', seed: 9962, turns: [{ p1: 0, p2: 0 }, { p1: 1, p2: 0 }] }),
+  r1duo(HAZER(),
+    [r1s('Beta', [r1m('fury', 20, 81)], { spd: 10, status: 'FRZ', raging: true, rageMove: 1 })],
+    { seed: 9963, turns: [{ p1: 0, p2: 0 }, { p1: 1, p2: 0 }, { p1: 1, p2: 0 }] }),
+]));
+
+// The chart as the cart walks it (`chartOrder`): wDamageMultipliers is the
+// LAST TypeEffects row applied, and the rows apply in table order. Beta is
+// types 1 and 2; Alpha's type-0 THUMP meets the rows (0,1) and (0,2):
+//   1 (0,1) = 0 then (0,2) = 200: the damage is 0, the last row 200 --
+//     "Alpha's attack missed!";
+//   2 the same rows the other way round: "It doesn't affect Beta!";
+//   3 no order uploaded: any immunity, "doesn't affect" (as before);
+//   4 (0,1) = 200 then (0,2) = 50: the product is neutral, the last row 50
+//     -- "not very effective...", the odd damage doubled then halved, whole:
+//     8 after the roll;
+//   5 the other way round, on the same seed: "super effective!", the damage
+//     halved first, losing its odd point: 7 after the same roll;
+//   6 no order: the product, no line, the chart per defender type (8).
+function chartRun(seed, row, order) {
+  return r1duo([r1s('Alpha', [r1m('thump', 35, 0)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, types: [1, 2] })],
+    { seed, chart: [row, [100, 100, 100], [100, 100, 100]], chartOrder: order,
+      turns: [{ p1: 0, p2: 0 }] });
+}
+scenario('g1_chart_order', fights('g1co', [
+  chartRun(9971, [100, 0, 200], [0, 1, 0, 2]),
+  chartRun(9972, [100, 0, 200], [0, 2, 0, 1]),
+  chartRun(9973, [100, 0, 200], undefined),
+  chartRun(9974, [100, 200, 50], [0, 1, 0, 2]),
+  chartRun(9974, [100, 200, 50], [0, 2, 0, 1]),
+  chartRun(9974, [100, 200, 50], undefined),
+]));
+
+// ------------------------------------------------------------------
+// R1e (gen12-referee-gaps-fix wave 5): AttackSubstitute's line on every
+// hit, DecrementPP's wrap and IncrementMovePP, the trainer RUN refused at the
+// menu, COUNTER off the move struct, the status animations, the computer's
+// move choice, HealEffect_, Conversion and the item lines -- the Lua
+// driver's scenarios, literal for literal.
+// ------------------------------------------------------------------
+
+function autoRows(n, p1 = 0) {
+  const rows = [];
+  for (let i = 0; i < n; i += 1) rows.push({ p1, p2: 'auto' });
+  return rows;
+}
+
+scenario('g1_sub_lines', fights('g1sl', [
+  r1duo([r1s('Alpha', [r1m('kick', 30, 44)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, substitute: 10 })],
+    { seed: 9981, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('thump', 10, 0)], { spd: 90, confusion: 5, substitute: 50 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, substitute: 50 })],
+    { seed: 9982, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('smash', 250, 0)], { spd: 90, atk: 250, level: 70 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, def: 10, substitute: 100 })],
+    { seed: 9983, turns: [{ p1: 0, p2: 0 }] }),
+]));
+
+scenario('g1_pp_wrap', fights('g1pw', [
+  r1duo([r1s('Alpha', [r1m('wrap', 15, 42, { pp: 1, ppUps: 1 })], { spd: 90 })],
+    [r1s('Beta', [r1m('thump', 10, 0)], { spd: 10 }),
+      r1s('Delta', [r1m('thump', 10, 0)], { spd: 10 })],
+    { seed: 9991, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: { action: 'switch', slot: 1 } },
+      { p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('thump', 10, 0, { pp: 1 }), r1m('tap', 10, 0)], { spd: 90 })],
+    [r1s('Beta', [r1m('chill', 10, 5, { chance: 100 }),
+      r1m('QUICK_ATTACK', 10, 4, { type: 1 })], { spd: 10 })],
+    { seed: 9992, typeIds: FIRE_AXIS,
+      turns: [{ p1: 0, p2: 0 }, { p1: 1, p2: 1 }, { p1: 1, p2: 1 }] }),
+  r1duo([r1s('Alpha', [r1m('METRONOME', 0, 83)], { spd: 90, status: 'PAR' })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { seed: 9997, pool: [r1m('FLY', 90, 43)],
+      turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }, { p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('morph', 0, 57, { pp: 10 }), r1m('splash', 0, 85)], { spd: 90 }),
+    r1s('Gamma', [r1m('splash', 0, 85)], { spd: 90 })],
+    [r1s('Beta', [r1m('METRONOME', 0, 83)], { spd: 10 })],
+    { seed: 9994, pool: [r1m('tap', 10, 0)],
+      turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }, { p1: { action: 'switch', slot: 1 }, p2: 0 },
+        { p1: { action: 'switch', slot: 0 }, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90 })],
+    [r1s('Beta', [r1m('METRONOME', 0, 83)], { spd: 10 })],
+    { mode: 'wild', seed: 9995, pool: [r1m('tap', 10, 0)], turns: autoRows(2) }),
+]));
+
+scenario('g1_npc_run', fights('g1nr', [
+  r1duo([r1s('Alpha', [r1m('thump', 10, 0)], { spd: 90 })],
+    [r1s('Beta', [r1m('thump', 10, 0)], { spd: 10 })],
+    { mode: 'coop_npc', seed: 10001,
+      turns: [{ p1: { action: 'run' }, p2: 'auto' }, { p1: 0 }, { p1: 0, p2: 'auto' }] }),
+]));
+
+scenario('g1_counter_struct', fights('g1cs', [
+  r1duo([r1s('Alpha', [r1m('thump', 10, 0), r1m('COUNTER', 1, 0, { type: 1 })], { spd: 90 })],
+    [r1s('Beta', [r1m('thump', 10, 0)], { spd: 10 }),
+      r1s('Delta', [r1m('thump', 10, 0)], { spd: 10 })],
+    { seed: 10011, turns: [{ p1: 0, p2: 0 }, { p1: 1, p2: { action: 'switch', slot: 1 } }] }),
+  r1duo([r1s('Alpha', [r1m('thump', 10, 0), r1m('COUNTER', 1, 0, { type: 1 })], { spd: 10 })],
+    [r1s('Beta', [r1m('BIDE', 0, 26)], { spd: 90 })],
+    { seed: 10012, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }, { p1: 1, p2: 0 },
+      { p1: 1, p2: 0 }] }),
+  {
+    mode: 'coop_pvp',
+    seed: 10013,
+    seats: [
+      { pid: 'p1', side: 'a', mons: [r1s('Alpha', [r1m('wrap', 15, 42), r1m('splash', 0, 85)], { spd: 90 })] },
+      { pid: 'p3', side: 'a', mons: [r1s('Gamma', [r1m('thump', 10, 0),
+        r1m('COUNTER', 1, 0, { type: 1 })], { spd: 50 })] },
+      { pid: 'p2', side: 'b', mons: [r1s('Beta', [r1m('thump', 10, 0)], { spd: 70 })] },
+      { pid: 'p4', side: 'b', mons: [r1s('Delta', [r1m('splash', 0, 85)], { spd: 5 })] },
+    ],
+    turns: [
+      { p1: 1, p3: { action: 'fight', move: 0, target: 3 },
+        p2: { action: 'fight', move: 0, target: 1 }, p4: 0 },
+      { p1: { action: 'fight', move: 0, target: 3 }, p3: { action: 'fight', move: 1, target: 3 },
+        p2: { action: 'fight', move: 0, target: 1 }, p4: 0 },
+      { p1: 0, p3: { action: 'fight', move: 1, target: 3 }, p2: 0, p4: 0 },
+    ],
+  },
+  r1duo([r1s('Alpha', [r1m('COUNTER', 1, 0, { type: 1 }), r1m('thump', 10, 0)], { spd: 10, status: 'PAR' })],
+    [r1s('Beta', [r1m('thump', 10, 0), r1m('lull', 0, 32), r1m('karate', 50, 0, { type: 1 })],
+      { spd: 90, status: 'PAR' })],
+    { mode: 'coop_npc', seed: 10014, bSeat: { aiMods: [1] }, turns: autoRows(5) }),
+]));
+
+scenario('g1_status_anims', fights('g1sa', [
+  r1duo([r1s('Alpha', [r1m('thump', 10, 0)], { spd: 90, status: 'SLP', statusTurns: 3 })],
+    [r1s('Beta', [r1m('thump', 10, 0)], { spd: 10, status: 'SLP', statusTurns: 3 })],
+    { mode: 'wild', seed: 10021, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('thump', 10, 0)], { spd: 90, confusion: 4 })],
+    [r1s('Beta', [r1m('thump', 10, 0)], { spd: 10, confusion: 4, status: 'BRN' })],
+    { mode: 'wild', seed: 10022, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('thump', 10, 0)], { spd: 90, status: 'SLP', statusTurns: 3, confusion: 4 })],
+    [r1s('Beta', [r1m('thump', 10, 0)], { spd: 10, confusion: 4 })],
+    { seed: 10023, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+]));
+
+scenario('g1_cart_pick', fights('g1cp', [
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90 })],
+    [r1s('Beta', [r1m('thump', 10, 0)], { spd: 10 })],
+    { mode: 'wild', seed: 10031, turns: autoRows(3) }),
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90 })],
+    [r1s('Beta', [r1m('thump', 10, 0), r1m('chop', 10, 0), r1m('slam', 10, 0)],
+      { spd: 10, disable: { moveIndex: 2, turns: 6 } })],
+    { mode: 'wild', seed: 10032, turns: autoRows(4) }),
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90, status: 'PAR' })],
+    [r1s('Beta', [r1m('lull', 0, 32), r1m('thump', 10, 0), r1m('toxin', 0, 66), r1m('chop', 10, 0)],
+      { spd: 10 })],
+    { mode: 'coop_npc', seed: 10033, bSeat: { aiMods: [1] }, turns: autoRows(4) }),
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90, types: [1] })],
+    [r1s('Beta', [r1m('grow', 0, 10), r1m('zap', 10, 0, { type: 1 }), r1m('nip', 10, 0, { type: 0 }),
+      r1m('fang', 1, 40)], { spd: 10 })],
+    { mode: 'coop_npc', seed: 10034, bSeat: { aiMods: [1, 2, 3] },
+      chart: [[100, 50, 100], [100, 100, 100], [100, 100, 100]], turns: autoRows(4) }),
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90 })],
+    [r1s('Beta', [r1m('thump', 10, 0), r1m('chop', 10, 0)], { spd: 10 })],
+    { mode: 'coop_npc', seed: 10035, bSeat: { aiMods: [] }, turns: autoRows(3) }),
+  {
+    mode: 'coop_npc',
+    seed: 10036,
+    seats: [
+      { pid: 'p1', side: 'a', mons: [r1s('Alpha', [r1m('smash', 120, 0)], { spd: 90, atk: 120 })] },
+      { pid: 'p3', side: 'a', mons: [r1s('Gamma', [r1m('splash', 0, 85)], { spd: 80 })] },
+      { pid: 'n1', side: 'b', aiMods: [2],
+        mons: [r1s('Beta', [r1m('grow', 0, 10), r1m('thump', 10, 0)], { spd: 10, hp: 30 }),
+          r1s('Delta', [r1m('grow', 0, 10), r1m('thump', 10, 0)], { spd: 10 })] },
+      { pid: 'n2', side: 'b', aiMods: [2],
+        mons: [r1s('Kappa', [r1m('grow', 0, 10), r1m('thump', 10, 0)], { spd: 5 })] },
+    ],
+    turns: [
+      { p1: { action: 'fight', move: 0, target: 3 }, p3: 0, n1: 'auto', n2: 'auto' },
+      { n1: 'auto' },
+      { p1: { action: 'fight', move: 0, target: 3 }, p3: 0, n1: 'auto', n2: 'auto' },
+      { p1: { action: 'fight', move: 0, target: 4 }, p3: 0, n1: 'auto', n2: 'auto' },
+    ],
+  },
+]));
+
+scenario('g1_heal', fights('g1hl', [
+  r1duo([r1s('Alpha', [r1m('REST', 0, 56), r1m('thump', 10, 0)], { spd: 90, hp: 200, status: 'PSN' })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { seed: 10041, turns: [{ p1: 0, p2: 0 }, { p1: 1, p2: 0 }, { p1: 1, p2: 0 }, { p1: 1, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('RECOVER', 0, 56)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })], { seed: 10042, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('RECOVER', 0, 56)], { spd: 90, hp: 145 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })], { seed: 10043, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('RECOVER', 0, 56)], { spd: 90, hp: 144 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })], { seed: 10044, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('REST', 0, 56)], { spd: 90, hp: 100 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })], { seed: 10045, turns: [{ p1: 0, p2: 0 }] }),
+]));
+
+scenario('g1_item_lines', fights('g1il', [
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90, hp: 300, status: 'PSN' })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, status: 'SLP', statusTurns: 7 })],
+    { mode: 'wild', seed: 10051,
+      turns: [{ p1: { action: 'item', item: 'POTION' }, p2: 0 },
+        { p1: { action: 'item', item: 'ANTIDOTE' }, p2: 0 },
+        { p1: { action: 'item', item: 'X_ATTACK' }, p2: 0 },
+        { p1: { action: 'item', item: 'POKE_FLUTE' }, p2: 0 },
+        { p1: { action: 'item', item: 'POKE_BALL' }, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90, hp: 200, status: 'TOX', toxicCounter: 2,
+    confusion: 5 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { mode: 'wild', seed: 10052,
+      turns: [{ p1: { action: 'item', item: 'FULL_RESTORE' }, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('thump', 10, 0)], { spd: 90 })],
+    [r1s('Beta', [r1m('thump', 10, 0)], { spd: 10, hp: 100 })],
+    // K16: the trainer's POTION is TrainerAI's -- a class that heals below
+    // half (AICheckIfHPBelowFraction), once (`uses` 1), its roll always passing.
+    {
+      mode: 'coop_npc',
+      seed: 10053,
+      bSeat: { aiClass: { uses: 1, chance: 256, hpBelow: 2, item: 'POTION' } },
+      turns: autoRows(2),
+    }),
+]));
+
+scenario('g1_conversion', fights('g1cv', [
+  r1duo([r1s('Alpha', [r1m('convert', 0, 24)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, types: [2, 3] })],
+    { seed: 10061, turns: [{ p1: 0, p2: 0 }] }),
+]));
+
+// RP1 (gen12-referee-gaps-fix polish): GetMaxPP through DecrementPP's wrap,
+// ItemUsePPRestore's `.restorePP` against it, K8's PP Ups on every `moves`
+// row, and the cart's POKé in the item lines -- the Lua driver's g1_pp_max,
+// literal for literal (its comment has the seven entries).
+scenario('g1_pp_max', fights('g1pm', [
+  r1duo([r1s('Alpha', [r1m('thump', 10, 0, { pp: 63, maxPp: 35 })], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { seed: 10071,
+      turns: [{ p1: 0, p2: 0 },
+        { p1: { action: 'item', item: 'ETHER', move: 0 }, p2: 0 },
+        { p1: { action: 'item', item: 'ETHER', move: 0 }, p2: 0 },
+        { p1: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('thump', 10, 0, { pp: 1, ppUps: 1, maxPp: 18 }), r1m('tap', 10, 0)],
+    { spd: 90 })],
+    [r1s('Beta', [r1m('chill', 10, 5, { chance: 100 }), r1m('QUICK_ATTACK', 10, 4, { type: 1 })],
+      { spd: 10 })],
+    { seed: 9992, typeIds: FIRE_AXIS,
+      turns: [{ p1: 0, p2: 0 }, { p1: 1, p2: 1 },
+        { p1: { action: 'item', item: 'ETHER', move: 0 }, p2: 1 }] }),
+  r1duo([r1s('Alpha', [r1m('thump', 10, 0, { pp: 20, ppUps: 1, maxPp: 20 }),
+    r1m('tap', 10, 0, { pp: 15, maxPp: 15 })], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { seed: 10073,
+      turns: [{ p1: { action: 'item', item: 'MAX_ETHER', move: 0 }, p2: 0 },
+        { p1: { action: 'item', item: 'MAX_ETHER', move: 1 }, p2: 0 },
+        { p1: 0 },
+        { p1: { action: 'item', item: 'MAX_ELIXER' }, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { mode: 'wild', seed: 10074, turns: [{ p1: { action: 'item', item: 'POKE_DOLL' }, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { mode: 'wild', seed: 10075, turns: [{ p1: { action: 'item', item: 'POKE_FLUTE' }, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, catchRate: 0 })],
+    { mode: 'wild', seed: 10076, turns: [{ p1: { action: 'item', item: 'POKE_BALL' }, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, catchRate: 100 })],
+    { mode: 'wild', seed: 10077, turns: [{ p1: { action: 'item', item: 'POKE_BALL' }, p2: 0 }] }),
+]));
+
+// FX-R1 (the Red referee's review fixes) -- the driver's notes say which
+// pokered rule each fight pins: 1-2 the reflected evasion, 3 a switch-out
+// clears confusion, 4 GREAT / ULTRA BALL's Rand1 redraw, 5-7 the residual at
+// the end of each slot (a poison KO, a KO-er's skipped residual, an EXPLOSION
+// that ends the turn), 8 the computer's PSYWAVE [0, b), 9 an OHKO's wDamage
+// into a Substitute, 10 an ETHER on a TRANSFORMed monster, 11 ItemUseFailed's
+// refusals, 12-13 a mutual last-monster KO (a loss against the computer, a
+// draw in a link fight).
+scenario('g1_fx_r1', fights('g1fx', [
+  r1duo([r1s('Alpha', [r1m('jab', 10, 0, { accuracy: 100 })], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, stages: { eva: 6 } })],
+    { seed: 11001, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }, { p1: 0, p2: 0 },
+      { p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('jab', 10, 0, { accuracy: 100 })], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, stages: { eva: -6 } })],
+    { seed: 11002, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }, { p1: 0, p2: 0 },
+      { p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('growl', 0, 18)], { spd: 90 }),
+    r1s('Gamma', [r1m('growl', 0, 18)], { spd: 90 })],
+  [r1s('Beta', [r1m('sonic', 0, 49)], { spd: 10 })],
+  { seed: 11003, turns: [{ p1: 0, p2: 0 },
+    { p1: { action: 'switch', slot: 1 }, p2: 0 },
+    { p1: { action: 'switch', slot: 0 }, p2: 0 },
+    { p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, catchRate: 45 })],
+    { mode: 'wild', seed: 11004, aSeat: { bag: { GREAT_BALL: 4, ULTRA_BALL: 4 } },
+      turns: [{ p1: { action: 'item', item: 'GREAT_BALL' }, p2: 0 },
+        { p1: { action: 'item', item: 'ULTRA_BALL' }, p2: 0 },
+        { p1: { action: 'item', item: 'GREAT_BALL' }, p2: 0 },
+        { p1: { action: 'item', item: 'ULTRA_BALL' }, p2: 0 },
+        { p1: { action: 'item', item: 'GREAT_BALL' }, p2: 0 },
+        { p1: { action: 'item', item: 'ULTRA_BALL' }, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('growl', 0, 18)], { spd: 90, hp: 5, status: 'PSN' })],
+    [r1s('Beta', [r1m('growl', 0, 18)], { spd: 10 })],
+    { seed: 11005, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('slam', 120, 0)], { spd: 90, atk: 300, status: 'PSN' })],
+    [r1s('Beta', [r1m('growl', 0, 18)], { spd: 10, hp: 5 }),
+      r1s('Delta', [r1m('growl', 0, 18)], { spd: 10 })],
+    { seed: 11006, turns: [{ p1: 0, p2: 0 }, { p2: { action: 'switch', slot: 1 } },
+      { p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('blast', 170, 7)], { spd: 90, atk: 10 }),
+    r1s('Gamma', [r1m('growl', 0, 18)], { spd: 90 })],
+  [r1s('Beta', [r1m('thump', 40, 0)],
+    { spd: 10, def: 300, status: 'SLP', statusTurns: 3 })],
+  { seed: 11007, turns: [{ p1: 0, p2: 0 }, { p1: { action: 'switch', slot: 1 } },
+    { p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90, maxHp: 300 })],
+    [r1s('Beta', [r1m('PSYWAVE', 1, 41)], { spd: 10, level: 2 })],
+    { mode: 'wild', seed: 11008,
+      turns: [{ p1: 0, p2: 'auto' }, { p1: 0, p2: 'auto' }, { p1: 0, p2: 'auto' },
+        { p1: 0, p2: 'auto' }, { p1: 0, p2: 'auto' }, { p1: 0, p2: 'auto' }] }),
+  r1duo([r1s('Alpha', [r1m('drill', 1, 38, { type: 1 })], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, hp: 30, substitute: 50 })],
+    { seed: 11009, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('morph', 0, 57, { pp: 5, maxPp: 5 })], { spd: 90 })],
+    [r1s('Beta', [r1m('thump', 10, 0, { pp: 12 }), r1m('chop', 10, 0, { pp: 3 })],
+      { spd: 10 })],
+    { seed: 11010, aSeat: { bag: { ETHER: 2 } },
+      turns: [{ p1: 0, p2: 0 }, { p1: { action: 'item', item: 'ETHER', move: 0 }, p2: 0 },
+        { p1: 1, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('tap', 10, 0)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { seed: 11011, aSeat: { bag: { POTION: 1, ANTIDOTE: 1, POKE_DOLL: 1 } },
+      turns: [{ p1: { action: 'item', item: 'POTION', slot: 0 }, p2: 0 },
+        { p1: { action: 'item', item: 'ANTIDOTE', slot: 0 } },
+        { p1: { action: 'item', item: 'POKE_DOLL' } },
+        { p1: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('blast', 170, 7)], { spd: 90, atk: 200, hp: 40 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, hp: 20 })],
+    { mode: 'wild', seed: 11012, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('blast', 170, 7)], { spd: 90, atk: 200, hp: 40 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, hp: 20 })],
+    { seed: 11013, turns: [{ p1: 0, p2: 0 }] }),
+]));
+
+// Contracts K17-K20 (docs/plans/gen12-referee-remaining-gaps.md), one fight
+// each -- the Lua driver's g1_marks_faints, line for line:
+//   1 the used line both ways: <USER> marked ^a / ^b, a break after it;
+//   2 a drain KO: SuckedHealthText (<TARGET> marked) before the faint;
+//   3 a recoil that takes the user while the target rages: the recoil line,
+//     the target's RAGE, then the user's faint (HandlePlayerMonFainted
+//     after ExecutePlayerMoveDone);
+//   4 a wild EXPLOSION that takes both: the player's faint first;
+//   5 a Leech Seed sap: ABSORB on the seeder's seat before the HP moves;
+//   6 a released FLY that misses: STATUS_AFFECTED_ANIM before the miss line;
+//   7 the trainer blocks a ball (TOSS_ANIM first), then an X item
+//     (XSTATITEM_ANIM between the use line and the rose line);
+//   8 a damaging move whose effect a KO skips (`.executeOtherEffects` is
+//     past `ret z`).
+scenario('g1_marks_faints', fights('g1mf', [
+  r1duo([r1s('Alpha', [r1m('thump', 10, 0)], { spd: 90 })],
+    [r1s('Beta', [r1m('thump', 10, 0)], { spd: 10 })],
+    { seed: 12001, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('suck', 80, 3)], { spd: 90, atk: 200, hp: 100 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, hp: 1 })],
+    { seed: 12002, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('crash', 80, 48)], { spd: 90, atk: 200, hp: 1 })],
+    [r1s('Beta', [r1m('fury', 20, 81)], { spd: 10, raging: true, rageMove: 1 })],
+    { seed: 12003, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 10, hp: 1 }),
+    r1s('Gamma', [r1m('splash', 0, 85)], { spd: 10 })],
+  [r1s('Beta', [r1m('boom', 170, 7)], { spd: 90, atk: 200 })],
+  { mode: 'wild', seed: 12004, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90, hp: 100 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, leechSeed: { fromSlot: 0 } })],
+    { seed: 12005, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('FLY', 90, 43, { accuracy: 0 })], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { seed: 12006, turns: [{ p1: 0, p2: 0 }, { p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { seed: 12007, aSeat: { bag: { POKE_BALL: 1, X_ATTACK: 1 } },
+      turns: [{ p1: { action: 'item', item: 'POKE_BALL' }, p2: 0 },
+        { p1: { action: 'item', item: 'X_ATTACK' }, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('snarl', 80, 18)], { spd: 90, atk: 200 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, hp: 1 })],
+    { seed: 12008, turns: [{ p1: 0, p2: 0 }] }),
+]));
+
+// H1 (K16, docs/plans/gen12-referee-remaining-gaps.md wave 2): TrainerAI in
+// the computer trainer's slot, its `Random` byte drawn while wAICount is not
+// 0, on each class family's record shape (the engine's `ai_classes`):
+//   1 GenericAI (no record): a byte every turn, never an action;
+//   2 MistyAI's shape (25 percent + 1, X DEFEND, one use): its own rolls, the
+//     use spent, then no byte at all;
+//   3 AgathaAI's (8 percent switch first, 50 percent + 1 SUPER POTION below
+//     a quarter), a fainted party member walked past by EnemySendOut;
+//   4 BrockAI's: a paralysed Beta's FULL HEAL, the Speed left quartered;
+//   5 CooltrainerFAI's (no roll): HYPER POTION below a tenth, then the switch
+//     below a fifth;
+//   6 JugglerAI's against a hard hitter: switches, and the send-out after a
+//     knockout in party order (EnemySendOut, `p2: 'auto'`);
+//   7 a faster trainer's FULL RESTORE before Alpha's move, its Leech Seed
+//     residual after it;
+//   8 an item spent past a recharge: the recharge is still owed;
+//   9 a 2v2 trainer: one record, each seat its own copy and wAICount;
+//  10 a wild monster and a link foe that carry a record: no TrainerAI;
+//  11 a solo trainer's seat, driven as SoloBattle drives it (one seat with
+//     the whole party, its `aiMods` and `aiClass`, no bag, `autoPick` every
+//     turn and every send-out): the layers at `.selectEnemyMove`, TrainerAI
+//     in the slot, EnemySendOut's replacements.
+const quadAuto = () => ({ p1: 0, p3: 0, p2: 'auto', p4: 'auto' });
+scenario('g1_trainer_ai', fights('g1ai', [
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { mode: 'coop_npc', seed: 13001, turns: autoRows(3) }),
+  r1duo([r1s('Alpha', [r1m('tap', 10, 0)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { mode: 'coop_npc', seed: 13002,
+      bSeat: { aiClass: { uses: 1, chance: 64, item: 'X_DEFEND' } }, turns: autoRows(8) }),
+  r1duo([r1s('Alpha', [r1m('tap', 20, 0)], { spd: 90, atk: 60 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, hp: 60 }),
+      r1s('Zeta', [r1m('splash', 0, 85)], { spd: 10, hp: 0 }),
+      r1s('Delta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { mode: 'coop_npc', seed: 13027,
+      bSeat: { aiClass: { uses: 2, switchChance: 20, chance: 128, item: 'SUPER_POTION',
+        hpBelow: 4 } },
+      turns: autoRows(10) }),
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 80, status: 'PAR' })],
+    { mode: 'coop_npc', seed: 13004,
+      bSeat: { aiClass: { uses: 5, onStatus: true, item: 'FULL_HEAL' } }, turns: autoRows(2) }),
+  r1duo([r1s('Alpha', [r1m('tap', 10, 0)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, hp: 39 }),
+      r1s('Delta', [r1m('splash', 0, 85)], { spd: 10, hp: 60 })],
+    { mode: 'coop_npc', seed: 13005,
+      bSeat: { aiClass: { uses: 1, item: 'HYPER_POTION', hpBelow: 10, switchBelow: 5 } },
+      turns: autoRows(3) }),
+  r1duo([r1s('Alpha', [r1m('slam', 120, 0)], { spd: 90, atk: 200 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 }),
+      r1s('Gamma', [r1m('splash', 0, 85)], { spd: 10 }),
+      r1s('Delta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { mode: 'coop_npc', seed: 13006,
+      bSeat: { aiClass: { uses: 3, chance: 64, switch: true } }, turns: autoRows(12) }),
+  r1duo([r1s('Alpha', [r1m('tap', 10, 0)], { spd: 10 })],
+    [r1s('Beta', [r1m('splash', 0, 85)],
+      { spd: 90, hp: 50, status: 'TOX', toxicCounter: 2, leechSeed: { fromSlot: 0 } })],
+    { mode: 'coop_npc', seed: 13007,
+      bSeat: { aiClass: { uses: 1, chance: 256, hpBelow: 5, item: 'FULL_RESTORE' } },
+      turns: autoRows(2) }),
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, hp: 100, mustRecharge: true })],
+    { mode: 'coop_npc', seed: 13008,
+      bSeat: { aiClass: { uses: 2, chance: 256, item: 'SUPER_POTION' } }, turns: autoRows(3) }),
+  {
+    mode: 'coop_npc',
+    seed: 13009,
+    seats: [
+      { pid: 'p1', side: 'a', mons: [r1s('Alpha', [r1m('tap', 10, 0)], { spd: 90 })] },
+      { pid: 'p3', side: 'a', mons: [r1s('Gamma', [r1m('tap', 10, 0)], { spd: 80 })] },
+      { pid: 'p2', side: 'b', aiClass: { uses: 1, chance: 128, item: 'X_ATTACK' },
+        mons: [r1s('Beta', [r1m('thump', 10, 0)], { spd: 10 })] },
+      { pid: 'p4', side: 'b', aiClass: { uses: 1, chance: 128, item: 'X_ATTACK' },
+        mons: [r1s('Delta', [r1m('thump', 10, 0)], { spd: 5 })] },
+    ],
+    turns: [quadAuto(), quadAuto(), quadAuto(), quadAuto()],
+  },
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { mode: 'wild', seed: 13010,
+      bSeat: { aiClass: { uses: 3, chance: 256, item: 'X_ATTACK' } }, turns: autoRows(2) }),
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { seed: 13011,
+      bSeat: { aiClass: { uses: 3, chance: 256, item: 'X_ATTACK' } },
+      turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('slam', 60, 0), r1m('growl', 0, 18)], { spd: 50, atk: 120, types: [0] })],
+    [r1s('Beta', [r1m('thump', 20, 0), r1m('lull', 0, 32), r1m('chop', 20, 1, { type: 1 }),
+      r1m('grow', 0, 10)], { spd: 40, hp: 120 }),
+    r1s('Kappa', [r1m('thump', 20, 0), r1m('grow', 0, 10)], { spd: 60 }),
+    r1s('Delta', [r1m('chop', 20, 0, { type: 1 })], { spd: 30 })],
+    { mode: 'coop_npc', seed: 13012, chart: [[100, 100], [200, 100]],
+      bSeat: { aiMods: [1, 2, 3],
+        aiClass: { uses: 2, chance: 128, item: 'SUPER_POTION', hpBelow: 4 } },
+      turns: autoRows(16) }),
+]));
+
+// K20's completion and K22's audit: the animations the cart plays, the ones
+// it does not, and `quiet`:
+//   1 a ball at a trainer: TOSS_ANIM, then BLOCKBALL_ANIM (TossBallAnimation
+//     `.BlockBall`), then the lines;
+//   2-4 ChargeEffect's own on the charge turn: XSTATITEM_ANIM (SOLARBEAM),
+//     FLY's TELEPORT (quiet), DIG's SLIDE_DOWN_ANIM -- the setup beat -- and
+//     the move's on the release;
+//   5 BideEffect's XSTATITEM_ANIM on its first turn, and an unleash of 0
+//     with no animation (wMoveMissed);
+//   6 a move that missed plays nothing (HandleIfPlayerMoveMissed) ...
+//   7 ... but a missed EXPLOSION does;
+//   8 an immunity plays nothing;
+//   9 a GROWL that lands plays, one at -6 ("Nothing happened!") does not;
+//  10 a sleep move turned away by a status plays nothing;
+//  11 MIRROR MOVE plays no animation of its own, the copied move its;
+//  12 the seeder's ABSORB and a trap's later hits are quiet;
+//  13 RemoveFaintedPlayerMon zeroes the player's fallen monster's status,
+//     FaintEnemyPokemon leaves the computer's.
+const twoRows = () => [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }];
+scenario('g1_k22_anims', fights('g1ka', [
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { mode: 'coop_npc', seed: 14001, aSeat: { bag: { POKE_BALL: 1 } },
+      turns: [{ p1: { action: 'item', item: 'POKE_BALL' }, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('SOLARBEAM', 120, 39)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { mode: 'wild', seed: 14002, turns: twoRows() }),
+  r1duo([r1s('Alpha', [r1m('FLY', 90, 43)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { mode: 'wild', seed: 14003, turns: twoRows() }),
+  r1duo([r1s('Alpha', [r1m('DIG', 100, 39)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { mode: 'wild', seed: 14004, turns: twoRows() }),
+  r1duo([r1s('Alpha', [r1m('BIDE', 0, 26)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { mode: 'wild', seed: 14005, turns: [...twoRows(), ...twoRows()] }),
+  r1duo([r1s('Alpha', [r1m('jab', 40, 0, { accuracy: 0 })], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { mode: 'wild', seed: 14006, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('blast', 170, 7, { accuracy: 0 })], { spd: 90 }),
+    r1s('Gamma', [r1m('splash', 0, 85)], { spd: 90 })],
+  [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+  { mode: 'wild', seed: 14007, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('jab', 40, 0)], { spd: 90, types: [0] })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, types: [0] })],
+    { mode: 'wild', seed: 14008, chart: [[0]], turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('growl', 0, 18)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, stages: { atk: -5 } })],
+    { mode: 'wild', seed: 14009, turns: twoRows() }),
+  r1duo([r1s('Alpha', [r1m('lull', 0, 32)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, status: 'PSN' })],
+    { mode: 'wild', seed: 14010, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('mirror', 0, 9)], { spd: 5 })],
+    [r1s('Beta', [r1m('jab', 10, 0)], { spd: 10 })],
+    { mode: 'wild', seed: 14011, turns: [{ p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('wrap', 15, 42)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10, leechSeed: { fromSlot: 0 } })],
+    { mode: 'wild', seed: 14012, turns: twoRows() }),
+  r1duo([r1s('Alpha', [r1m('slam', 120, 0)], { spd: 90, atk: 200, hp: 1, status: 'PSN' }),
+    r1s('Gamma', [r1m('splash', 0, 85)], { spd: 90 })],
+  [r1s('Beta', [r1m('slam', 120, 0)], { spd: 10, atk: 200, hp: 1, status: 'BRN' }),
+    r1s('Delta', [r1m('splash', 0, 85)], { spd: 10 })],
+  { mode: 'coop_npc', seed: 14013, turns: [{ p1: 0, p2: 'auto' }] }),
+  r1duo([r1s('Alpha', [r1m('splash', 0, 85)], { spd: 90, hp: 1, status: 'BRN' }),
+    r1s('Gamma', [r1m('splash', 0, 85)], { spd: 90 })],
+  [r1s('Beta', [r1m('slam', 120, 0)], { spd: 10, atk: 200 })],
+  { mode: 'wild', seed: 14014, turns: [{ p1: 0, p2: 0 }] }),
+]));
+
+// H1b: the animations a multi-hit move, a thrash's first turn and a
+// side-effect status play (pokered core.asm `jp nz, GetPlayerAnimationType`,
+// effects.asm ThrashPetalDanceEffect / PoisonEffect /
+// FreezeBurnParalyzeEffect):
+//   1 DOUBLE KICK: the move's animation before each of its two hits;
+//   2 a two-to-five move: one per hit, the count's own;
+//   3 the same at power 0 (CalculateDamage's `.skipbp`: a hit like any other);
+//   4 THRASH's first turn: SHRINKING_SQUARE_ANIM behind the used line and
+//     ahead of the move's animation, and its later turns none;
+//   5 a THRASH that misses: the square all the same, no move animation;
+//   6 wild: the player's poison side effect shakes the enemy's HUD, the wild
+//     monster's shakes the screen;
+//   7 wild: the player's burn shakes the enemy's HUD, the wild monster's
+//     shakes nothing;
+//   8 a link fight: both sides are the player -- each side's burn shakes the
+//     other's HUD;
+//   9 TWINEEDLE's poison is PoisonEffect's side effect too.
+const oneRow = () => [{ p1: 0, p2: 0 }];
+scenario('g1_h1b_anims', fights('g1hb', [
+  r1duo([r1s('Alpha', [r1m('kicks', 20, 44)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { mode: 'wild', seed: 15001, turns: oneRow() }),
+  r1duo([r1s('Alpha', [r1m('barrage', 15, 29)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { mode: 'wild', seed: 15002, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('pebbles', 0, 29)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { mode: 'wild', seed: 15003, turns: oneRow() }),
+  r1duo([r1s('Alpha', [r1m('THRASH', 30, 27)], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { mode: 'wild', seed: 15004, turns: [{ p1: 0, p2: 0 }, { p1: 0, p2: 0 }] }),
+  r1duo([r1s('Alpha', [r1m('THRASH', 30, 27, { accuracy: 0 })], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { mode: 'wild', seed: 15005, turns: oneRow() }),
+  r1duo([r1s('Alpha', [r1m('sting', 10, 2, { chance: 100 })], { spd: 90 })],
+    [r1s('Beta', [r1m('sting', 10, 2, { chance: 100 })], { spd: 10 })],
+    { mode: 'wild', seed: 15006, turns: oneRow() }),
+  r1duo([r1s('Alpha', [r1m('ember', 10, 4, { chance: 100, type: 2 })], { spd: 90 })],
+    [r1s('Beta', [r1m('ember', 10, 4, { chance: 100, type: 2 })], { spd: 10 })],
+    { mode: 'wild', seed: 15007, turns: oneRow() }),
+  r1duo([r1s('Alpha', [r1m('ember', 10, 4, { chance: 100, type: 2 })], { spd: 90 })],
+    [r1s('Beta', [r1m('ember', 10, 4, { chance: 100, type: 2 })], { spd: 10 })],
+    { seed: 15008, turns: oneRow() }),
+  r1duo([r1s('Alpha', [r1m('needle', 10, 77, { chance: 100 })], { spd: 90 })],
+    [r1s('Beta', [r1m('splash', 0, 85)], { spd: 10 })],
+    { mode: 'wild', seed: 15009, turns: oneRow() }),
+]));
 
 // ------------------------------------------------------------------
 // running both halves
@@ -955,6 +4063,8 @@ function slimOutcome(out) {
       maxHp: out.caught.maxHp,
     };
   }
+  // K11: the Pay Day pile a won fight against the computer reports.
+  if (out.payDay) slim.payDay = out.payDay;
   return slim;
 }
 
@@ -962,6 +4072,7 @@ function runJs() {
   return SCENARIOS.map(({ name, run }) => {
     const events = [];
     batches = [];
+    probes = [];
     const battle = run(events);
     return canonical({
       name,
@@ -969,17 +4080,33 @@ function runJs() {
       batches,
       outcome: slimOutcome(battle.outcome()),
       snapshot: snapshotDigest(battle),
+      probes: probes.length > 0 ? probes : undefined,
     });
   });
 }
 
 function runLua() {
-  const luajit = spawnSync('luajit', [DRIVER, ROOT], { encoding: 'utf8' });
+  // The driver's stream is past spawnSync's 1 MiB default buffer (R1e's
+  // scenarios and seat probes): an overflow is ENOBUFS, read as "no luajit".
+  const luajit = spawnSync('luajit', [DRIVER, ROOT],
+    { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
   if (luajit.error || luajit.status !== 0) return null;
   return JSON.parse(luajit.stdout);
 }
 
-const jsRuns = runJs();
+// The streams exactly as the twin emitted them -- a `msg` keeps its marks
+// (`^a` / `^b`, contract K17) and its breaks (`\n`, K18) -- for the parity
+// tests, which hold them to the Lua byte for byte.
+const jsRunsRaw = runJs();
+// ...and as every claim below reads them: a line without its marks, each break
+// a space (W's plainBattleLine, the client's own reader) -- K17's "every test
+// that matches text reads the line
+// without its marks", which keeps the claims' sentences the cart's words. The
+// sections that pin the marks and breaks themselves read `jsRunsRaw`.
+const readable = (event) => (event.t === 'msg' && typeof event.text === 'string'
+  ? { ...event, text: plainBattleLine(event.text) } : event);
+const readAll = (list) => list.map(readable);
+const jsRuns = jsRunsRaw.map((run) => ({ ...run, events: readAll(run.events) }));
 const luaRuns = runLua();
 const fixture = fs.existsSync(FIXTURE)
   ? JSON.parse(fs.readFileSync(FIXTURE, 'utf8'))
@@ -990,7 +4117,7 @@ const byName = (runs) => new Map(runs.map((entry) => [entry.name, entry]));
 // ------------------------------------------------------------------
 
 test('the parity scenarios are all present on both sides', () => {
-  assert.ok(jsRuns.length >= 21, 'the JS half built every scenario');
+  assert.ok(jsRunsRaw.length >= 21, 'the JS half built every scenario');
   assert.ok(
     luaRuns || fixture,
     'neither luajit nor tests/fixtures/battle_turn_parity.json is available -- '
@@ -1005,7 +4132,7 @@ test('JS matches the Lua turn machine, event for event', async (t) => {
     return;
   }
   const lua = byName(luaRuns);
-  for (const run of jsRuns) {
+  for (const run of jsRunsRaw) {
     await t.test(run.name, () => {
       const twin = lua.get(run.name);
       assert.ok(twin, `${run.name}: the Lua driver did not produce this scenario`);
@@ -1034,6 +4161,10 @@ test('JS matches the Lua turn machine, event for event', async (t) => {
         `${run.name}: snapshot digest differs -- an rngState mismatch means the `
         + 'two runtimes drew a different number of bytes',
       );
+      assert.deepStrictEqual(
+        run.probes, twin.probes,
+        `${run.name}: the stored battle stats differ under the same stream`,
+      );
     });
   }
 });
@@ -1044,7 +4175,7 @@ test('JS matches the committed Lua fixture', async (t) => {
     return;
   }
   const pinned = byName(fixture);
-  for (const run of jsRuns) {
+  for (const run of jsRunsRaw) {
     await t.test(run.name, () => {
       const twin = pinned.get(run.name);
       assert.ok(twin, `${run.name}: not in the fixture -- regenerate it`);
@@ -1052,6 +4183,7 @@ test('JS matches the committed Lua fixture', async (t) => {
       assert.deepStrictEqual(run.batches, twin.batches, `${run.name}: drain points differ`);
       assert.deepStrictEqual(run.outcome, twin.outcome, `${run.name}: outcome differs`);
       assert.deepStrictEqual(run.snapshot, twin.snapshot, `${run.name}: snapshot differs`);
+      assert.deepStrictEqual(run.probes, twin.probes, `${run.name}: probes differ`);
     });
   }
 });
@@ -1089,6 +4221,9 @@ test('the KO fight ends, and names who won', () => {
 });
 
 test('coop_npc RUN refuses without finishing the fight', () => {
+  // R1e: TryRunningFromBattle's `.trainerBattle` leaves the turn unspent and
+  // BattleMenu_RunWasSelected asks again -- the choice is refused, the seat
+  // still owes, and the refusal line is the client's own.
   const battle = build({
     id: 'npc-run', mode: 'coop_npc', seed: 5, choiceTimeout: 60, reconnectGrace: 60,
     sides: {
@@ -1101,21 +4236,28 @@ test('coop_npc RUN refuses without finishing the fight', () => {
   battle.drainEvents();
   const turnBefore = battle.snapshot().turn;
   const hpBefore = battle.snapshot().field.find((f) => f.playerId === 'p1').hp;
-  battle.submitChoice('p1', { action: 'run' });
+  assert.strictEqual(battle.submitChoice('p1', { action: 'run' }), false,
+    'coop_npc RUN is refused at the menu');
   battle.submitChoice('p2', { action: 'fight', move: 0 });
   const events = battle.drainEvents();
   assert.strictEqual(battle.outcome(), null, 'the gym is not forfeited');
   assert.ok(
-    events.some((event) => event.t === 'msg'
+    !events.some((event) => event.t === 'msg'
       && event.text === "No! There's no running from a trainer battle!"),
-    'the trainer refusal is in the turn stream, Wire-safe',
+    'the refusal line is the client\'s, not the referee\'s',
   );
   assert.ok(!events.some((event) => event.t === 'over'), 'with no over event');
   assert.ok(!events.some((event) => event.t === 'run'), 'and no run event');
-  assert.strictEqual(battle.snapshot().turn, turnBefore + 1, 'the turn was still spent');
+  assert.strictEqual(battle.snapshot().turn, turnBefore, 'the turn is not spent');
+  assert.strictEqual(battle.byId.get('p1').choice, null, '...and the runner still owes');
+  assert.strictEqual(battle.snapshot().field.find((f) => f.playerId === 'p1').hp, hpBefore,
+    'so the foe has not attacked yet');
+  assert.ok(battle.submitChoice('p1', { action: 'fight', move: 0 }), 'the re-asked FIGHT is taken');
+  battle.drainEvents();
+  assert.strictEqual(battle.snapshot().turn, turnBefore + 1, 'and the turn resolves');
   assert.ok(
     battle.snapshot().field.find((f) => f.playerId === 'p1').hp < hpBefore,
-    'so the foe still got its attack',
+    'with the foe\'s attack in it',
   );
 });
 
@@ -1204,23 +4346,24 @@ test('every sentence about a move prints its name, and falls back to the id', ()
   const said = run.events.filter((event) => event.t === 'msg').map((event) => event.text);
 
   // The line the whole field exists for. Before PROTOCOL 26 this read
-  // "Alpha used slow_swipe" -- the id, in the one place a player reads the
+  // "Alpha used slow_swipe!" -- the id, in the one place a player reads the
   // fight.
-  assert.ok(said.includes('Alpha used SLOW SWIPE'), 'an attack prints the display name');
+  assert.ok(said.includes('Alpha used SLOW SWIPE!'), 'an attack prints the display name');
 
-  // Every other sentence that names a move, all four of them, because they are
-  // four separate call sites and each one used to spell the id.
-  assert.ok(said.includes('THUMP HIT was disabled'), 'Disable landing names the move');
-  assert.ok(said.includes('THUMP HIT is disabled'), 'and so does the refusal it causes');
-  assert.ok(said.includes('THUMP HIT is no longer disabled'), 'and so does it wearing off');
-  assert.ok(said.includes('Alpha learned THUMP HIT'), 'Mimic names what it copied');
-  assert.ok(said.includes('Alpha used THUMP HIT'),
+  // Every other sentence that names a move, all three of them, because they
+  // are separate call sites and each one used to spell the id. (Disable
+  // wearing off names the monster -- the cart's DisabledNoMoreText, R1b.)
+  assert.ok(said.includes("Beta's THUMP HIT was disabled!"), 'Disable landing names the move');
+  assert.ok(said.includes("Beta's THUMP HIT is disabled!"), 'and so does the refusal it causes');
+  assert.ok(said.includes("Beta's disabled no more!"), 'and it wearing off names the monster');
+  assert.ok(said.includes('Alpha learned THUMP HIT!'), 'Mimic names what it copied');
+  assert.ok(said.includes('Alpha used THUMP HIT!'),
     'and the copy keeps the name -- a copy that dropped it would revert to the '
     + 'slug on every turn afterwards');
 
   // The fallback is not a defensive branch: a protocol-25 client uploads moves
   // with no name at all, and half the fights on a mixed hub narrate under this.
-  assert.ok(said.includes('Beta used nudge'), 'a move with no name is narrated under its id');
+  assert.ok(said.includes('Beta used nudge!'), 'a move with no name is narrated under its id');
 
   // The id has to keep travelling on `anim` regardless -- that is what a client
   // looks the move animation and the move-menu label up by, and a referee that
@@ -1276,8 +4419,9 @@ test('a switch-out-alive participant is paid alongside its replacement, mon 0 th
 test('a self-KO is neither paid nor counted -- the exploder drops out before the divisor is taken', () => {
   const run = byName(jsRuns).get('explode_double_ko');
   const kinds = run.events.map((event) => event.t);
-  // Both faints land -- the wild mon's, then a1's own -- before the one exp
-  // event the knockout funds, and that event is the only one this action pays.
+  // Both faints land -- a1's own, then the wild mon's: the player's first,
+  // once the move is over (K19's `_reapKo`) -- before the one exp event the
+  // knockout funds, and that event is the only one this action pays.
   const faintIdx = [];
   kinds.forEach((t, i) => { if (t === 'faint') faintIdx.push(i); });
   assert.strictEqual(faintIdx.length, 2,
@@ -1354,13 +4498,14 @@ test('the tie-break pair really straddles the threshold', () => {
   assert.strictEqual(firstAttacker('tie_high'), 'b', 'byte 128 reverses the group');
 });
 
-test('residuals tick in field order, not speed order', () => {
+test("residuals tick at the end of each battler's own slot", () => {
   const hurt = byName(jsRuns).get('residual_both').events
     .filter((event) => event.t === 'damage' && event.status)
     .map((event) => event.status);
   assert.deepStrictEqual(
-    hurt, ['BRN', 'PSN'],
-    "side a's burn ticks before side b's poison even though side b moved first",
+    hurt, ['PSN', 'BRN'],
+    "side b moved first, so its poison ticks right after its move and before side a's"
+    + ' burn (HandlePoisonBurnLeechSeed after each Execute*Move, FX-R1)',
   );
 });
 
@@ -1372,17 +4517,24 @@ test('a switch resolves before an item, and neither spends a roll', () => {
   assert.deepStrictEqual(
     run.events.map((event) => event.t),
     ['send', 'send', 'team', 'team', 'turn', 'chose', 'chose',
-     'switch', 'send', 'item', 'msg', 'msg', 'turn'],
+     'switch', 'send', 'item', 'msg', 'turn'],
   );
-  // 'restore' is an unknown id: announce + "But it failed", still no RNG draw.
-  assert.strictEqual(run.snapshot.rngState, 13, 'the seed is untouched');
+  // 'restore' is an unknown id: ItemUseNoEffect's line alone (R1e: the
+  // party menu's items print no "used" line), and neither the
+  // switch nor the item draws. Both seats still meet MainInBattleLoop's
+  // compare at one Speed (40 and 40), so the tie byte is the turn's one draw
+  // (R1c: the cart compares on a switch or an item turn too).
+  const { Rng } = require('./lib/battle');
+  const once = Rng.create(13);
+  once.byte();
+  assert.strictEqual(run.snapshot.rngState, once.state(), 'the tie byte is the only draw');
 });
 
 test('sleep with no counter costs exactly the turn it wakes on', () => {
   const run = byName(jsRuns).get('sleep_default');
   const cleared = run.events.find((event) => event.t === 'status');
   assert.ok(cleared, 'the sleeper woke');
-  assert.strictEqual(cleared.text, 'Alpha woke up');
+  assert.strictEqual(cleared.text, 'Alpha woke up!');
   assert.strictEqual(cleared.status, undefined, 'a status event with no status means cleared');
   assert.ok(
     run.events.findIndex((event) => event.t === 'anim' && event.side === 'a')
@@ -1838,7 +4990,9 @@ test('a wedged resolve aborts on the wall-clock ceiling', () => {
 const wildBattle = (mode, id, bBag) => {
   const sideA = [{
     playerId: 'p1', name: 'Ann', bag: { POTION: 1 },
-    mons: [mn({ species: 'Alpha', maxHp: 200, spd: 90, moves: [mv('thump', 40, 255, 0)] })],
+    // Hurt, so the POTION has HP to restore: one at full HP is the cart's
+    // ItemUseNoEffect, refused before it is filed (FX-R1).
+    mons: [mn({ species: 'Alpha', maxHp: 200, hp: 100, spd: 90, moves: [mv('thump', 40, 255, 0)] })],
   }];
   if (mode === 'coop_wild') {
     sideA.push({
@@ -1869,8 +5023,8 @@ for (const mode of ['wild', 'coop_wild']) {
     assert.strictEqual(battle.tick(11), true, "the wild seat's turn resolves");
     const items = battle.drainEvents().filter((event) => event.t === 'item');
     assert.deepStrictEqual(items, [], 'no item event came off the wild seat');
-    assert.strictEqual(battle.byId.get('wild').bag.POTION, 2, 'and it spent none of it');
-    assert.strictEqual(battle.byId.get('wild').bag.FULL_HEAL, 1, 'cure untouched too');
+    // K16: the computer keeps no bag at all, so there is nothing to spend.
+    assert.strictEqual(battle.byId.get('wild').bag, null, 'the wild seat keeps no bag');
     assert.strictEqual(battle.byId.get('wild').mons[0].status, 'poison', 'still poisoned');
   });
 
@@ -1888,3 +5042,2008 @@ for (const mode of ['wild', 'coop_wild']) {
     );
   });
 }
+
+// ------------------------------------------------------------------
+// badges: against the computer only
+// ------------------------------------------------------------------
+
+// Twin of tests/battle_sim_turn.lua's 23, same sheets and seed, so the numbers
+// are the same numbers. The cart boosts the player's monster and only outside a
+// link battle (pokered's ApplyBadgeStatBoosts, "return if link battle"), so the
+// referee keeps an uploaded set on side a of wild / coop_wild / coop_npc and
+// drops it in 1v1, coop_pvp and on side b. Three halves: a PvP fight with
+// badges is the unbadged fight, damage and turn order alike; the same seats
+// against the computer are boosted, so the gate is the mode and not a removal;
+// and side b's upload is ignored even there.
+
+const ALL_BADGES = {
+  BOULDERBADGE: true, THUNDERBADGE: true, SOULBADGE: true, VOLCANOBADGE: true,
+};
+
+// One exchange: Ann (side a) and Bob (side b) each swing once. `a` / `b`
+// override the stats and carry each seat's upload; `a.seed` / `a.confusion`
+// set up a confused Ann on a chosen seed (the self-hit test below).
+const exchange = (mode, a, b) => {
+  const thump = (power) => ({
+    id: 'thump', pp: 20, power, accuracy: 255, type: 0, effect: 0, chance: 0,
+  });
+  const ann = {
+    species: 'Alpha', level: 20, hp: 200, maxHp: 200,
+    stats: { atk: a.atk || 88, def: a.def || 40, spd: a.spd || 40, spc: 40 },
+    moves: [thump(50)],
+  };
+  if (a.confusion) ann.confusion = a.confusion;
+  const battle = build({
+    id: 'b1', mode, seed: a.seed || 777001, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', badges: a.badges, mons: [ann] }],
+      b: [{ playerId: 'p2', name: 'Bob', badges: b.badges, mons: [{
+        species: 'Beta', level: 20, hp: 200, maxHp: 200,
+        stats: { atk: b.atk || 40, def: 80, spd: b.spd || 40, spc: 40 },
+        moves: [thump(b.power || 1)],
+      }] }],
+    },
+  });
+  battle.submitChoice('p1', { action: 'fight', move: 0 });
+  battle.submitChoice('p2', { action: 'fight', move: 0 });
+  return canonical(battle.drainEvents());
+};
+const hitOn = (events, slot) => {
+  const hit = events.find((event) => event.t === 'damage' && event.slot === slot);
+  return hit ? hit.amount : null;
+};
+const firstHit = (events) => {
+  const hit = events.find((event) => event.t === 'damage');
+  return hit ? hit.slot : null;
+};
+
+// Damage: BOULDERBADGE on Ann's physical hit. Speed: Ann at 40 against Bob at
+// 42, so SOULBADGE (40 -> 45) is exactly what decides who swings first.
+const HIT = { badges: { BOULDERBADGE: true } };
+const FAST = { badges: { SOULBADGE: true }, spd: 40 };
+const FOE = { spd: 42 };
+
+test('the Gen 1 boost is x9/8, held at MAX_STAT_VALUE', () => {
+  // Twin of the cap lines in tests/battle_sim_turn.lua's 23: pokered's
+  // .applyBoostToStat holds the boosted word at 999 (the engine's port:
+  // src/battle/Damage.lua:44-54).
+  const { Effects } = require('./lib/battle');
+  assert.strictEqual(Effects.MAX_STAT_VALUE, 999, 'the cap is MAX_STAT_VALUE, 999');
+  assert.strictEqual(Effects.badgeBoost(64, 'atk', { BOULDERBADGE: true }), 72, 'floor(64 * 9 / 8)');
+  assert.strictEqual(Effects.badgeBoost(887, 'atk', { BOULDERBADGE: true }), 997,
+    '887 boosts to 997, under the cap');
+  assert.strictEqual(Effects.badgeBoost(888, 'atk', { BOULDERBADGE: true }), 999,
+    '888 boosts to exactly 999');
+  assert.strictEqual(Effects.badgeBoost(950, 'atk', { BOULDERBADGE: true }), 999,
+    '950 would boost to 1068 and is held at 999');
+});
+
+test('badges count in the three fights against the computer, on side a', () => {
+  assert.deepStrictEqual(Object.keys(Turn.BADGE_MODES).sort(),
+    ['coop_npc', 'coop_wild', 'wild'], 'and in no other mode');
+  assert.strictEqual(Turn.BADGE_SIDE, 'a', "and only on the player's side of them");
+});
+
+for (const mode of ['1v1', 'coop_pvp']) {
+  test(`${mode}: a link battle ignores every uploaded badge`, () => {
+    const bare = exchange(mode, {}, {});
+    // 18 since K12 (the damage roll reads the RNG's high bits); 17 before.
+    assert.strictEqual(hitOn(bare, 3), 18, 'the unbadged attack lands for 18');
+    assert.strictEqual(hitOn(exchange(mode, HIT, {}), 3), 18,
+      'BOULDERBADGE does not raise the damage');
+    // One seat at a time: both at once would cancel here (each attack is
+    // boosted by the same ninth its target's defence is) and prove nothing.
+    assert.deepStrictEqual(exchange(mode, { badges: ALL_BADGES }, {}), bare,
+      'side a uploading every badge fights the unbadged fight');
+    assert.deepStrictEqual(exchange(mode, {}, { badges: ALL_BADGES }), bare,
+      'so does side b uploading every badge');
+    assert.strictEqual(firstHit(exchange(mode, { spd: 40 }, FOE)), 0,
+      'unbadged, Bob (42) outspeeds Ann (40)');
+    assert.strictEqual(firstHit(exchange(mode, FAST, FOE)), 0,
+      'SOULBADGE does not let Ann overtake him');
+  });
+}
+
+for (const mode of ['coop_npc', 'wild']) {
+  test(`${mode}: side a's badges still boost against the computer`, () => {
+    assert.strictEqual(hitOn(exchange(mode, {}, {}), 3), 18, 'unbadged, the same 18');
+    // 88 -> floor(88 * 9 / 8) = 99 Attack; BattleSim reaches the same 20
+    // (18 / 20 since K12's high-bits damage roll; 17 / 19 before).
+    assert.strictEqual(hitOn(exchange(mode, HIT, {}), 3), 20,
+      "BOULDERBADGE raises side a's physical damage to 20");
+    assert.strictEqual(firstHit(exchange(mode, { spd: 40 }, FOE)), 0,
+      'unbadged, the foe (42) still goes first');
+    assert.strictEqual(firstHit(exchange(mode, FAST, FOE)), 3,
+      'SOULBADGE (40 -> 45) puts side a in front');
+  });
+}
+
+test("coop_npc: side b's upload is ignored against the computer too", () => {
+  // Each of these would have changed the fight had it counted: THUNDERBADGE
+  // would cut Ann's hit, BOULDERBADGE would raise Bob's, and SOULBADGE
+  // (37 -> 41) would put Bob ahead of Ann's 40.
+  const bare = exchange('coop_npc', {}, { power: 30 });
+  const hostile = exchange('coop_npc', {}, { badges: ALL_BADGES, power: 30 });
+  assert.strictEqual(hitOn(hostile, 3), hitOn(bare, 3), "side b's THUNDERBADGE is ignored");
+  assert.strictEqual(hitOn(hostile, 0), hitOn(bare, 0), "side b's BOULDERBADGE is ignored");
+  assert.deepStrictEqual(hostile, bare, "side b's upload changes nothing at all");
+  assert.strictEqual(firstHit(exchange('coop_npc', {}, { badges: ALL_BADGES, spd: 37 })), 3,
+    "side b's SOULBADGE does not overtake side a");
+});
+
+test("the confusion self-hit reads side a's badge-boosted stats, in computer fights only", () => {
+  // Twin of (d) in tests/battle_sim_turn.lua's 23: pokered's
+  // HandleSelfConfusionDamage takes wBattleMon's Attack and Defense, which
+  // ApplyBadgeStatBoosts raised, and the engine port's computeDamage(user, user)
+  // boosts both ends (src/battle/BattleState.lua:4187). Attack 160 and Defense
+  // 9 keep the two boosts from cancelling: 160 -> 180 and 9 -> 10 move the
+  // 40-power hit from 144 to 146.
+  const selfHit = (events) => {
+    let hurt = false;
+    for (const event of events) {
+      if (event.t === 'msg' && typeof event.text === 'string'
+          && event.text.includes('hurt itself')) {
+        hurt = true;
+      } else if (hurt && event.t === 'damage') {
+        return event.amount;
+      }
+    }
+    return null;
+  };
+  let confusedSeed = null;
+  for (let seed = 1; seed <= 200; seed += 1) {
+    if (selfHit(exchange('coop_npc', { seed, atk: 160, def: 9, confusion: 3 }, {})) !== null) {
+      confusedSeed = seed;
+      break;
+    }
+  }
+  assert.ok(confusedSeed !== null, 'found a seed where a confused Ann hits herself');
+  const confused = (mode, badges) => selfHit(exchange(mode,
+    { seed: confusedSeed, atk: 160, def: 9, confusion: 3, badges }, {}));
+  const PAIR = { BOULDERBADGE: true, THUNDERBADGE: true };
+  assert.strictEqual(confused('coop_npc'), 144, "coop_npc: unbadged, Ann's self-hit is 144");
+  assert.strictEqual(confused('coop_npc', PAIR), 146,
+    'coop_npc: BOULDERBADGE + THUNDERBADGE (180 / 10) make it 146');
+  assert.strictEqual(confused('coop_npc', { BOULDERBADGE: true }), 162,
+    'coop_npc: BOULDERBADGE alone (180 / 9) raises it to 162');
+  assert.strictEqual(confused('coop_npc', { THUNDERBADGE: true }), 130,
+    'coop_npc: THUNDERBADGE alone (160 / 10) cuts it to 130');
+  assert.strictEqual(confused('1v1'), 144, '1v1: the same unbadged 144');
+  assert.strictEqual(confused('1v1', PAIR), 144,
+    '1v1: the pair reaches no self-hit in a link battle');
+});
+
+// ------------------------------------------------------------------
+// Gen 1 stored battle stats, stated as claims (twin of tests/battle_sim_turn.lua
+// section 25; the arithmetic is worked there beside each assertion)
+// ------------------------------------------------------------------
+
+const jsRun = (name) => jsRuns.find((entry) => entry.name === name);
+const probeAt = (name, at, slot) => {
+  const row = (jsRun(name).probes || []).find((p) => p.at === at && p.slot === slot);
+  return row ? `${row.atk}/${row.def}/${row.spd}/${row.spc}` : null;
+};
+const damagesOn = (name, slot) => jsRun(name).events
+  .filter((event) => event.t === 'damage' && event.slot === slot)
+  .map((event) => event.amount);
+const saidIn = (name, text) => jsRun(name).events
+  .some((event) => event.t === 'msg' && event.text === text);
+
+test('the switch-in seed is party -> penalty -> badges, and a raise re-runs every badge', () => {
+  assert.strictEqual(probeAt('g1_stack_up', 0, 0), '112/90/67/56', 'x9/8 on all four');
+  assert.strictEqual(probeAt('g1_stack_up', 0, 3), '40/40/20/40', 'the foe quartered, never boosted');
+  assert.strictEqual(probeAt('g1_stack_up', 1, 0), '225/101/75/63',
+    'ATTACK_UP2: 100 x 2 = 200, then every badge again');
+  assert.strictEqual(probeAt('g1_stack_up', 1, 3), '40/40/5/40', 're-penalty: 20 quartered to 5');
+  assert.strictEqual(probeAt('g1_stack_up', 2, 0), '253/113/84/70',
+    'an accuracy raise compounds the badges again');
+  assert.strictEqual(probeAt('g1_stack_up', 2, 3), '40/40/1/40', '...and floors the foe at 1');
+});
+
+test("the enemy's drops on the player re-run the badges, then re-penalise the target", () => {
+  assert.strictEqual(probeAt('g1_stack_down', 0, 0), '56/90/67/56', 'burned seed: 50 -> 56');
+  assert.strictEqual(probeAt('g1_stack_down', 1, 0), '37/101/75/63', 'Growl: 66 -> 74 -> 37');
+  assert.strictEqual(probeAt('g1_stack_down', 2, 0), '20/113/84/37', 'a side-effect Special drop');
+  assert.strictEqual(probeAt('g1_stack_down', 3, 0), '11/127/94/41', 'an accuracy drop');
+  const fell = jsRun('g1_stack_down').events.find((event) => event.t === 'stat');
+  assert.strictEqual(fell.amount, undefined, 'a stage below 0 rides no (unsigned) amount');
+});
+
+test('an X item and Rage are the player\'s raises; the re-penalty finds the foe', () => {
+  assert.strictEqual(probeAt('g1_rage_xitem', 1, 0), '126/101/101/63', 'X SPEED: 90 -> 101');
+  assert.strictEqual(probeAt('g1_rage_xitem', 1, 3), '20/40/50/40', 'the battler opposite: 40 -> 20');
+  assert.strictEqual(probeAt('g1_rage_xitem', 2, 0), '168/113/113/70', 'a Rage build: 150 -> 168');
+  assert.strictEqual(probeAt('g1_rage_xitem', 2, 3), '10/40/50/40', 'the attacker: 20 -> 10');
+  assert.strictEqual(probeAt('g1_rage_xitem', 3, 0), '225/127/127/78', 'a second build');
+});
+
+test('a switch-in and Haze reset the stored stats', () => {
+  assert.strictEqual(probeAt('g1_resets', 3, 0), '112/90/67/56', 'back in: party -> badges, stages 0');
+  assert.strictEqual(probeAt('g1_resets', 5, 0), '100/80/60/50', 'Haze: the unmodified stats');
+  assert.strictEqual(probeAt('g1_resets', 5, 3), '40/40/80/40', "Haze lifts the foe's paralysis");
+});
+
+test('the 999 and 1 walls fail, winding the stage back one step', () => {
+  const stages = (at, slot) => {
+    const row = jsRun('g1_walls').probes.find((p) => p.at === at && p.slot === slot);
+    return [row.sAtk, row.sDef];
+  };
+  assert.strictEqual(probeAt('g1_walls', 1, 0), '999/40/90/40', '500 x 2 = 1000 is stored as 999');
+  assert.deepStrictEqual(stages(2, 0), [3, 0], 'a +2 on 999 fails and nets +1');
+  assert.deepStrictEqual(stages(3, 3), [0, 0], 'a -1 on a Defense of 1 fails, wound back');
+  assert.deepStrictEqual(stages(4, 3), [0, -1], 'a -2 on it nets -1');
+  assert.ok(saidIn('g1_walls', 'Nothing happened!'), 'and says so');
+});
+
+test('a crit reads both party stats; Transform never copies them', () => {
+  const [crit] = damagesOn('g1_crit_party', 3);
+  assert.ok(crit >= 34 && crit <= 40,
+    `the crit is the party 100 vs 100 band 34..40, not the raised 225 into a Reflect (${crit})`);
+  const onBob = damagesOn('g1_transform_crit', 3);
+  assert.ok(onBob.length > 0 && onBob[0] <= 13,
+    'the transformed crit swings with its own 30 Attack, not the copied 200');
+});
+
+test('screens double the defence before the 8-bit scaling, and stack with nothing', () => {
+  const onAnn = damagesOn('g1_screens', 0);
+  assert.ok(onAnn[0] >= 66 && onAnn[0] <= 78, '512 x2 = 1024 wraps to a 0 byte: divides as 1');
+  assert.strictEqual(onAnn[1], 20, 'a fixed-damage move is not halved');
+  assert.ok(onAnn[2] <= 3, 'after Haze, the unscreened 512 is a 3 at most');
+  assert.ok(saidIn('g1_screens', 'But, it failed!'), 'a second Reflect fails');
+  const after = jsRun('g1_screens').probes.find((p) => p.at === 3 && p.slot === 0);
+  assert.strictEqual(after.reflect || after.lightScreen, false, 'Haze takes both screens down');
+});
+
+test('the 997 cap, the Explosion order and the self-hit\'s borrowed Reflect', () => {
+  const [capped] = damagesOn('g1_cap', 0);
+  assert.ok(capped >= 850 && capped <= 999, `4200 is held to 999 before the roll (${capped})`);
+  const [blast] = damagesOn('g1_explode_order', 0);
+  assert.ok(blast >= 44 && blast <= 52, 'the defence halves after the scaling: base 52');
+  const selfHits = damagesOn('g1_self_hit_reflect', 0);
+  assert.ok(selfHits.length > 0 && selfHits.every((d) => d === 73),
+    "160 into the opponent's-Reflect-doubled 9 is 73");
+  assert.ok(damagesOn('g1_opposite_reflect', 0).every((d) => d === 73),
+    'seat 0 faces the Reflect');
+  assert.ok(damagesOn('g1_opposite_reflect', 1).every((d) => d === 144),
+    'seat 1 faces a foe with none: 144');
+  assert.ok(!saidIn('g1_flinch_reset', 'Alpha flinched!'), 'a stale flinch dies at turn open');
+});
+
+// The rest are battles of their own: what a cure, a vitamin and a faint do to
+// the stored stats.
+const g1Battle = (o) => build({
+  id: 'g1u', mode: o.mode || 'wild', seed: o.seed || 6201, choiceTimeout: 60, reconnectGrace: 60,
+  sides: {
+    a: [{ playerId: 'p1', name: 'Ann', badges: o.aBadges, bag: o.aBag, mons: o.a }],
+    b: [{ playerId: 'p2', name: 'Bob', bag: o.bBag, mons: o.b, aiClass: o.bAiClass }],
+  },
+});
+const g1Mon = (o) => mn({ species: 'Alpha', maxHp: 300, atk: 100, def: 80, spd: 60, spc: 50,
+  baseSpd: 0, moves: [fx('splash', 0, 85)], ...o });
+const g1Foe = (o) => mn({ species: 'Beta', baseSpd: 0, moves: [fx('splash', 0, 85)], ...o });
+const g1Active = (battle, playerId) => {
+  const fighter = battle.byId.get(playerId);
+  return fighter.mons[fighter.active - 1];
+};
+
+test("a player's cure reloads the party stats; a Full Restore that heals, or the computer's, does not", () => {
+  const cured = (item, hp, side) => {
+    const battle = g1Battle({
+      mode: side === 'b' ? 'coop_npc' : 'wild', aBadges: allBadges(),
+      aBag: { [item]: 1 },
+      // The computer's cure is TrainerAI's (K16): BrockAI's FULL HEAL.
+      bAiClass: side === 'b' ? { uses: 5, onStatus: true, item } : undefined,
+      a: [g1Mon({ status: side === 'b' ? undefined : 'PAR', hp })],
+      b: [g1Foe({ spd: 80, status: side === 'b' ? 'PAR' : undefined })],
+    });
+    if (side === 'b') {
+      battle.submitChoice('p1', { action: 'fight', move: 0 });
+      battle.submitChoice('p2', { action: 'fight', move: 0 });
+      return g1Active(battle, 'p2');
+    }
+    battle.submitChoice('p1', { action: 'item', item });
+    battle.submitChoice('p2', { action: 'fight', move: 0 });
+    return g1Active(battle, 'p1');
+  };
+  const healed = cured('PARLYZ_HEAL');
+  assert.strictEqual(healed.status, null);
+  assert.strictEqual(`${healed.cur.atk}/${healed.cur.spd}`, '100/60',
+    'ItemUseMedicine copies the party stats: penalty and badges gone');
+  assert.strictEqual(cured('FULL_RESTORE', 100).cur.spd, 16,
+    'a Full Restore that also heals keeps the stored 15 -> 16');
+  assert.strictEqual(cured('FULL_RESTORE').cur.spd, 60, 'at full HP it is a Full Heal');
+  const npc = cured('FULL_HEAL', undefined, 'b');
+  assert.strictEqual(npc.status, null);
+  assert.strictEqual(npc.cur.spd, 20, 'AICureStatus leaves the quartered Speed');
+});
+
+test('a vitamin rebuilds the fielded battle stats; a faint and a switch reload them', () => {
+  const vit = g1Battle({
+    aBadges: allBadges(), aBag: { PROTEIN: 1 },
+    a: [g1Mon({ level: 100 })], b: [g1Foe({})],
+  });
+  vit.submitChoice('p1', { action: 'item', item: 'PROTEIN' });
+  vit.submitChoice('p2', { action: 'fight', move: 0 });
+  const alpha = g1Active(vit, 'p1');
+  assert.strictEqual(alpha.partyStats.atk, 112, 'PROTEIN at level 100 is +12');
+  assert.strictEqual(alpha.cur.atk, 126, '112 through the badge: 126');
+
+  const fell = g1Battle({
+    mode: '1v1',
+    a: [g1Mon({ hp: 1, moves: [fx('sharpen', 0, 50)] }), g1Mon({ species: 'Gamma' })],
+    b: [g1Foe({ atk: 200, spd: 10, moves: [fx('thump', 40, 0)] })],
+  });
+  fell.submitChoice('p1', { action: 'fight', move: 0 });
+  fell.submitChoice('p2', { action: 'fight', move: 0 });
+  const fallen = fell.byId.get('p1').mons[0];
+  assert.strictEqual(fallen.hp, 0);
+  assert.strictEqual(fallen.stages.atk, 0, 'a faint zeroes the stages');
+  assert.strictEqual(fallen.cur.atk, 100, '...and reloads the battle stats');
+
+  const mimic = g1Battle({
+    mode: '1v1',
+    a: [g1Mon({ atk: 30, spd: 90, moves: [fx('mimicry', 0, 57)] }), g1Mon({ species: 'Gamma' })],
+    b: [g1Foe({ atk: 200 })],
+  });
+  mimic.submitChoice('p1', { action: 'fight', move: 0 });
+  mimic.submitChoice('p2', { action: 'fight', move: 0 });
+  const ditto = g1Active(mimic, 'p1');
+  assert.deepStrictEqual([ditto.cur.atk, ditto.stats.atk, ditto.partyStats.atk], [200, 200, 30],
+    'Transform copies battle and unmodified stats, never the party struct');
+  mimic.submitChoice('p1', { action: 'switch', slot: 1 });
+  mimic.submitChoice('p2', { action: 'fight', move: 0 });
+  mimic.submitChoice('p1', { action: 'switch', slot: 0 });
+  mimic.submitChoice('p2', { action: 'fight', move: 0 });
+  assert.strictEqual(g1Active(mimic, 'p1').stats.atk, 30, 'switched back in, its own stats return');
+});
+
+// ------------------------------------------------------------------
+// Gen 1 priority, obedience, the called-move path and the flinch-reset skip,
+// stated as claims (twin of tests/battle_sim_turn.lua section 26, where the
+// cart's arithmetic for every script is worked beside it)
+// ------------------------------------------------------------------
+
+const { Rng: G1bRng } = require('./lib/battle');
+
+// The battle's generator, handed the BattleRandom bytes CheckForDisobedience
+// reads, in order, then a seeded generator for everything after.
+const g1bScript = (battle, bytes) => {
+  const fallback = G1bRng.create(99);
+  let used = 0;
+  battle.rng = {
+    byte() {
+      used += 1;
+      if (used <= bytes.length) return bytes[used - 1];
+      return fallback.byte();
+    },
+    nextInt: (lo, hi) => fallback.nextInt(lo, hi),
+    damageRoll: () => fallback.damageRoll(),
+    next: () => fallback.next(),
+    state: () => fallback.state(),
+  };
+};
+
+// A sheet names its moves (PROTOCOL 26); an id with an underscore gets the
+// display name a client sends, as the Lua twin's do.
+const g1bMove = (id, power, effect, o = {}) => {
+  const out = { id, pp: o.pp === undefined ? 20 : o.pp, power, accuracy: 255, type: 0,
+    effect, chance: o.chance === undefined ? 0 : o.chance };
+  if (id.includes('_')) out.name = id.replace(/_/g, ' ');
+  return out;
+};
+const g1bMon = (o) => {
+  const out = {
+    species: o.species || 'Alpha', level: o.level === undefined ? 20 : o.level, hp: o.hp,
+    maxHp: o.maxHp === undefined ? 60 : o.maxHp, status: o.status,
+    stats: { atk: o.atk || 40, def: o.def || 40, spd: o.spd || 40, spc: o.spc || 40 },
+    moves: o.moves || [g1bMove('thump', 40, 0)],
+  };
+  if (o.confusion) out.confusion = o.confusion;
+  if (o.baseSpd !== undefined) out.baseSpd = o.baseSpd;
+  if (o.traded) out.traded = true;
+  Object.assign(out, o.extra || {});
+  return out;
+};
+const g1bArena = (o) => {
+  const battle = build({
+    id: 'b1', mode: o.mode || 'wild', seed: o.seed || 6401, metronomePool: o.pool,
+    choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', badges: o.badges, mons: o.a.map(g1bMon) }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: o.b.map(g1bMon) }],
+    },
+  });
+  battle.drainEvents();
+  return battle;
+};
+const g1bStep = (battle, a, b) => {
+  battle.submitChoice('p1', a);
+  battle.submitChoice('p2', b);
+  return readAll(battle.drainEvents());
+};
+const g1bUse = (i) => ({ action: 'fight', move: i });
+const g1bSaid = (events, text) => events.some((e) => e.t === 'msg' && e.text === text);
+const g1bOrder = (events) => events.filter((e) => e.t === 'anim')
+  .map((e) => `${e.slot}:${e.text}`).join(' ');
+const g1bHits = (events, slot) => events.filter((e) => e.t === 'damage' && e.slot === slot)
+  .map((e) => e.amount);
+const g1bActive = (battle, playerId) => {
+  const fighter = battle.byId.get(playerId);
+  return fighter.mons[fighter.active - 1];
+};
+const g1bSplash = () => g1bMove('splash', 0, 85);
+// The traded level-100 monster every obedience case starts from: faster than
+// Bob, so its rolls are the turn's first draws.
+const g1bRogue = (o = {}) => ({
+  species: 'Alpha', level: 100, maxHp: 999, atk: 30, def: 60, spd: 90, traded: true, baseSpd: 0,
+  moves: [g1bMove('thump', 10, 0), g1bMove('chop', 10, 0), g1bSplash()], ...o,
+});
+const g1bBob = (o = {}) => ({
+  species: 'Beta', maxHp: 999, spd: 30, baseSpd: 0, moves: [g1bSplash()], ...o,
+});
+
+test('Gen 1 priority: Quick Attack first, Counter last, Metronome and Struggle at 0', () => {
+  for (const mode of ['1v1', 'wild']) {
+    const kit = () => [g1bMove('QUICK_ATTACK', 10, 0), g1bMove('thump', 10, 0),
+      g1bMove('COUNTER', 10, 0)];
+    const battle = g1bArena({ mode,
+      a: [{ species: 'Alpha', maxHp: 400, spd: 30, baseSpd: 0, moves: kit() }],
+      b: [{ species: 'Beta', maxHp: 400, spd: 90, baseSpd: 0, moves: kit() }] });
+    assert.strictEqual(g1bOrder(g1bStep(battle, g1bUse(0), g1bUse(1))), '0:QUICK_ATTACK 3:thump',
+      `${mode}: the slower Quick Attack moves first`);
+    assert.strictEqual(g1bOrder(g1bStep(battle, g1bUse(0), g1bUse(0))),
+      '3:QUICK_ATTACK 0:QUICK_ATTACK', `${mode}: Quick Attack on both sides is Speed's`);
+    assert.strictEqual(g1bOrder(g1bStep(battle, g1bUse(1), g1bUse(2))), '0:thump 3:COUNTER',
+      `${mode}: the faster Counter moves last`);
+    // Both COUNTERs miss (each target selected COUNTER, HandleCounterMove)
+    // and a move that missed plays no animation (HandleIfPlayerMoveMissed,
+    // K22's audit), so who went first is read off the used lines.
+    const both = g1bStep(battle, g1bUse(2), g1bUse(2));
+    const used = [];
+    for (const event of both) {
+      const m = event.t === 'msg' ? /^(\w+) used (.*)!$/.exec(event.text) : null;
+      if (m) used.push(`${m[1]}:${m[2]}`);
+    }
+    assert.strictEqual(used.join(' '), 'Beta:COUNTER Alpha:COUNTER',
+      `${mode}: Counter on both sides is Speed's`);
+    assert.strictEqual(g1bOrder(both), '', `${mode}: ...and neither missed COUNTER is animated`);
+  }
+  const metro = g1bArena({ pool: [g1bMove('QUICK_ATTACK', 10, 0)],
+    a: [{ species: 'Alpha', maxHp: 400, spd: 30, baseSpd: 0, moves: [g1bMove('metronome', 0, 83)] }],
+    b: [{ species: 'Beta', maxHp: 400, spd: 90, baseSpd: 0, moves: [g1bMove('thump', 10, 0)] }] });
+  assert.strictEqual(g1bOrder(g1bStep(metro, g1bUse(0), g1bUse(0))),
+    '3:thump 0:metronome 0:QUICK_ATTACK', "a called Quick Attack moves at Metronome's bracket");
+  const spent = g1bArena({
+    a: [{ species: 'Alpha', maxHp: 400, spd: 30, baseSpd: 0,
+      moves: [g1bMove('QUICK_ATTACK', 10, 0, { pp: 0 })] }],
+    b: [{ species: 'Beta', maxHp: 400, spd: 90, baseSpd: 0, moves: [g1bMove('thump', 10, 0)] }] });
+  assert.strictEqual(g1bOrder(g1bStep(spent, g1bUse(0), g1bUse(0))), '3:thump 0:STRUGGLE',
+    'Struggle off an empty Quick Attack slot has no priority');
+  for (let seed = 1; seed <= 40; seed += 1) {
+    const tied = g1bArena({ mode: '1v1', seed,
+      a: [{ species: 'Alpha', maxHp: 400, spd: 50, baseSpd: 0, moves: [g1bMove('thump', 10, 0)] }],
+      b: [{ species: 'Beta', maxHp: 400, spd: 50, baseSpd: 0,
+        moves: [g1bMove('QUICK_ATTACK', 10, 0)] }] });
+    assert.strictEqual(g1bOrder(g1bStep(tied, g1bUse(0), g1bUse(0))), '3:QUICK_ATTACK 0:thump',
+      `seed ${seed}: different brackets never share a tie byte`);
+  }
+});
+
+test('Gen 1 obedience: who never rolls plays out exactly as untraded', () => {
+  const same = (label, o) => {
+    const run = (traded) => {
+      const a = o.a.map((opts, i) => (i === 0 && o.side !== 'b' ? { ...opts, traded } : { ...opts }));
+      const b = o.b.map((opts, i) => (i === 0 && o.side === 'b' ? { ...opts, traded } : { ...opts }));
+      const battle = g1bArena({ mode: o.mode, badges: o.badges, seed: 6402, a, b });
+      const events = g1bStep(battle, g1bUse(0), g1bUse(0));
+      return JSON.stringify(events) + '#' + battle.rng.state();
+    };
+    assert.strictEqual(run(true), run(false), label);
+  };
+  same('level 10 under no badge', { a: [g1bRogue({ level: 10 })], b: [g1bBob()] });
+  same("CASCADEBADGE's cap 30", { badges: { CASCADEBADGE: true }, a: [g1bRogue({ level: 30 })], b: [g1bBob()] });
+  same("EARTHBADGE's cap 101", { badges: { EARTHBADGE: true }, a: [g1bRogue()], b: [g1bBob()] });
+  same('a link fight', { mode: '1v1', a: [g1bRogue()], b: [g1bBob()] });
+  same('coop_pvp', { mode: 'coop_pvp', a: [g1bRogue()], b: [g1bBob()] });
+  same('side b', { side: 'b', a: [g1bRogue({ traded: false })], b: [g1bBob({ level: 100 })] });
+  same("a thrash's continuation",
+    { a: [g1bRogue({ extra: { thrashing: { turns: 2, moveIndex: 1 } } })], b: [g1bBob()] });
+  same("a Rage's continuation", { a: [g1bRogue({ moves: [g1bMove('fury', 10, 81)],
+    extra: { raging: true, rageMove: 1 } })], b: [g1bBob()] });
+  same("a charge's release", { a: [g1bRogue({ moves: [g1bMove('glow', 10, 39)],
+    extra: { charging: { moveIndex: 1, effect: 39, targetSlot: 3 } } })], b: [g1bBob()] });
+  same("a Bide's release", { a: [g1bRogue({ moves: [g1bMove('bide', 0, 26)],
+    extra: { bide: { turns: 0, stored: 5, moveIndex: 1, targetSlot: 3 } } })], b: [g1bBob()] });
+});
+
+test('Gen 1 obedience: the R1 pass and the move used instead', () => {
+  const pass = g1bArena({ a: [g1bRogue()], b: [g1bBob()] });
+  g1bScript(pass, [0x20]);
+  assert.ok(g1bSaid(g1bStep(pass, g1bUse(0), g1bUse(0)), 'Alpha used thump!'), 'an R1 pass');
+  assert.strictEqual(g1bActive(pass, 'p1').moves[0].pp, 19);
+
+  const battle = g1bArena({ a: [g1bRogue()], b: [g1bBob()] });
+  g1bScript(battle, [0x05, 0x02, 0x00, 0x01]);
+  const events = g1bStep(battle, g1bUse(0), g1bUse(0));
+  assert.ok(g1bSaid(events, 'Alpha used instead, chop!'), '"used instead,"');
+  assert.strictEqual(g1bOrder(events), '0:chop 3:splash');
+  const alpha = g1bActive(battle, 'p1');
+  assert.deepStrictEqual([alpha.moves[0].pp, alpha.moves[1].pp, alpha.lastMoveIndex], [19, 20, 2],
+    'the chosen slot pays; the move used is the last move');
+
+  const quick = g1bArena({ a: [g1bRogue({ spd: 10,
+    moves: [g1bMove('QUICK_ATTACK', 10, 0), g1bMove('thump', 10, 0)] })], b: [g1bBob()] });
+  g1bScript(quick, [0x05, 0x02, 0x01]);
+  assert.strictEqual(g1bOrder(g1bStep(quick, g1bUse(0), g1bUse(0))), '0:thump 3:splash',
+    "the chosen Quick Attack's bracket moves the move used instead");
+});
+
+test('Gen 1 obedience: every .useRandomMove refusal loafs without a draw', () => {
+  const refused = (label, moves, extra) => {
+    const battle = g1bArena({ a: [g1bRogue({ moves, extra })], b: [g1bBob()] });
+    g1bScript(battle, [0x05, 0x02, 0x02]);
+    const events = g1bStep(battle, g1bUse(0), g1bUse(0));
+    assert.ok(g1bSaid(events, 'Alpha turned away!'), `${label}: loafs`);
+    assert.strictEqual(g1bOrder(events), '3:splash', `${label}: uses nothing`);
+    assert.strictEqual(g1bActive(battle, 'p1').moves[0].pp, moves[0].pp, `${label}: spends nothing`);
+  };
+  refused('one move known', [g1bMove('thump', 10, 0)]);
+  refused('a move disabled', [g1bMove('thump', 10, 0), g1bMove('chop', 10, 0)],
+    { disable: { moveIndex: 2, turns: 3 } });
+  refused('Struggle', [g1bMove('thump', 10, 0, { pp: 0 }), g1bMove('chop', 10, 0, { pp: 0 })]);
+  refused('no PP outside the chosen slot', [g1bMove('thump', 10, 0), g1bMove('chop', 10, 0, { pp: 0 })]);
+});
+
+test('Gen 1 obedience: the nap overwrites the status and keeps the stored penalty', () => {
+  const par = g1bArena({ a: [g1bRogue({ spd: 200, status: 'PAR' })], b: [g1bBob()] });
+  assert.strictEqual(g1bActive(par, 'p1').cur.spd, 50);
+  g1bScript(par, [200, 0x05, 50, 0x24, 0x18]);
+  const events = g1bStep(par, g1bUse(0), g1bUse(0));
+  assert.ok(g1bSaid(events, 'Alpha began to nap!'));
+  const napped = events.find((e) => e.t === 'status' && e.slot === 0);
+  assert.strictEqual(napped && napped.status, 'SLP');
+  const alpha = g1bActive(par, 'p1');
+  assert.deepStrictEqual([alpha.status, alpha.statusTurns, alpha.cur.spd], ['sleep', 3, 50]);
+
+  const brn = g1bArena({ a: [g1bRogue({ status: 'BRN' })], b: [g1bBob()] });
+  g1bScript(brn, [0x05, 50, 0x24, 0x18]);
+  g1bStep(brn, g1bUse(0), g1bUse(0));
+  assert.deepStrictEqual([g1bActive(brn, 'p1').status, g1bActive(brn, 'p1').cur.atk], ['sleep', 15]);
+  assert.ok(g1bSaid(g1bStep(brn, g1bUse(0), g1bUse(0)), 'Alpha is fast asleep!'));
+});
+
+test("Gen 1 obedience: won't obey + the self-hit, and the four loaf lines", () => {
+  const selfHit = (reflect) => {
+    const battle = g1bArena({ a: [g1bRogue()],
+      b: [g1bBob({ extra: reflect ? { reflect: true } : undefined })] });
+    g1bScript(battle, [0x05, 50, 0xA5]);
+    const events = g1bStep(battle, g1bUse(0), g1bUse(0));
+    assert.ok(g1bSaid(events, "Alpha won't obey!") && g1bSaid(events, 'It hurt itself in its confusion!'));
+    return g1bHits(events, 0)[0];
+  };
+  assert.strictEqual(selfHit(true), 10, "the foe's Reflect doubles the self-hit's Defense");
+  assert.strictEqual(selfHit(false), 18);
+  for (const [b, line] of [[0x00, 'Alpha is loafing around.'], [0x05, "Alpha won't obey!"],
+    [0xFE, 'Alpha turned away!'], [0x0B, 'Alpha ignored orders!']]) {
+    const battle = g1bArena({ a: [g1bRogue()], b: [g1bBob()] });
+    g1bScript(battle, [0x05, 50, 0x4B, b]);
+    const events = g1bStep(battle, g1bUse(0), g1bUse(0));
+    assert.ok(g1bSaid(events, line), line);
+    assert.strictEqual(g1bHits(events, 0).length, 0, `${line}: nobody is hurt`);
+  }
+});
+
+test('Gen 1 obedience: a Metronome instead keeps the flag, a Mirror Move clears it', () => {
+  const metro = g1bArena({ pool: [g1bMove('chop', 10, 0)],
+    a: [g1bRogue({ moves: [g1bMove('thump', 10, 0), g1bMove('metronome', 0, 83)] })], b: [g1bBob()] });
+  g1bScript(metro, [0x05, 0x02, 0x01]);
+  const events = g1bStep(metro, g1bUse(0), g1bUse(0));
+  assert.ok(g1bSaid(events, 'Alpha used instead, metronome!') && g1bSaid(events, 'Alpha used instead, chop!'));
+  assert.strictEqual(g1bActive(metro, 'p1').moves[0].pp, 19);
+
+  const mirror = g1bArena({
+    a: [g1bRogue({ moves: [g1bMove('thump', 10, 0), g1bMove('mirror', 0, 9)] })], b: [g1bBob()] });
+  g1bScript(mirror, [0x20]);
+  g1bStep(mirror, g1bUse(0), g1bUse(0));
+  g1bScript(mirror, [0x05, 0x02, 0x01]);
+  const copied = g1bStep(mirror, g1bUse(0), g1bUse(0));
+  assert.ok(g1bSaid(copied, 'Alpha used instead, mirror!') && g1bSaid(copied, 'Alpha used splash!'));
+});
+
+test('Gen 1 called moves: no Struggle recoil off the last PP, and no second gate', () => {
+  const metro = g1bArena({ pool: [g1bMove('thump', 10, 0)],
+    a: [{ species: 'Alpha', maxHp: 400, spd: 90, baseSpd: 0, moves: [g1bMove('metronome', 0, 83, { pp: 1 })] }],
+    b: [g1bBob()] });
+  let events = g1bStep(metro, g1bUse(0), g1bUse(0));
+  assert.ok(g1bSaid(events, 'Alpha used thump!') && !g1bSaid(events, "Alpha's hit with recoil!"),
+    'a Metronome on its last PP takes no recoil');
+  events = g1bStep(metro, g1bUse(0), g1bUse(0));
+  assert.ok(g1bSaid(events, 'Alpha used STRUGGLE!') && g1bSaid(events, "Alpha's hit with recoil!"),
+    'the Struggle after it does');
+
+  const mirror = g1bArena({
+    a: [{ species: 'Alpha', maxHp: 400, spd: 10, baseSpd: 0, moves: [g1bMove('mirror', 0, 9, { pp: 1 })] }],
+    b: [g1bBob({ moves: [g1bMove('thump', 10, 0)] })] });
+  events = g1bStep(mirror, g1bUse(0), g1bUse(0));
+  assert.ok(g1bSaid(events, 'Alpha used thump!') && !g1bSaid(events, "Alpha's hit with recoil!"),
+    'a Mirror Move on its last PP takes no recoil');
+
+  const dizzy = g1bArena({ pool: [g1bMove('thump', 10, 0)],
+    a: [{ species: 'Alpha', maxHp: 400, spd: 90, baseSpd: 0, confusion: 6,
+      moves: [g1bMove('metronome', 0, 83)] }], b: [g1bBob()] });
+  // (R1e: a confusion byte below 128 is the one that keeps its head.)
+  g1bScript(dizzy, [100]);
+  assert.ok(g1bSaid(g1bStep(dizzy, g1bUse(0), g1bUse(0)), 'Alpha used thump!'));
+  assert.strictEqual(g1bActive(dizzy, 'p1').confusion, 5, 'the call runs no second confusion gate');
+});
+
+test('Gen 1 flinch-reset skip: the player\'s raging or recharging monster keeps its flinch', () => {
+  const rage = (mode, side) => {
+    const fast = { species: side === 'b' ? 'Beta' : 'Alpha', maxHp: 400, spd: 90, baseSpd: 0,
+      moves: [g1bMove('fury', 20, 81)] };
+    const slow = { species: side === 'b' ? 'Alpha' : 'Beta', maxHp: 400, spd: 30, baseSpd: 0,
+      moves: [g1bMove('stomp', 10, 31, { chance: 100 })] };
+    const battle = g1bArena({ mode, a: [side === 'b' ? slow : fast], b: [side === 'b' ? fast : slow] });
+    g1bStep(battle, g1bUse(0), g1bUse(0));
+    return g1bStep(battle, g1bUse(0), g1bUse(0));
+  };
+  assert.ok(g1bSaid(rage('wild'), 'Alpha flinched!'), "the player's raging monster keeps it");
+  // The owner's rule (R1b): both sides of a link fight are "the player".
+  assert.ok(g1bSaid(rage('1v1'), 'Alpha flinched!'), 'a link fight keeps it too');
+  assert.ok(!g1bSaid(rage('wild', 'b'), 'Beta flinched!'), "the computer's raging monster is reset");
+
+  const beam = g1bArena({
+    a: [{ species: 'Alpha', maxHp: 400, spd: 90, baseSpd: 0, moves: [g1bMove('beam', 20, 80)] }],
+    b: [g1bBob({ maxHp: 400, moves: [g1bMove('stomp', 10, 31, { chance: 100 })] })] });
+  // A flinch that lands runs ClearHyperBeam on its target (R1b): the beam
+  // user is not recharging at the open, so the reset takes the flinch and
+  // the beam fires again.
+  g1bStep(beam, g1bUse(0), g1bUse(0));
+  assert.strictEqual(g1bActive(beam, 'p1').mustRecharge, false, 'the flinch cleared the recharge');
+  assert.strictEqual(g1bActive(beam, 'p1').flinch, false, '...so the open reset the flinch');
+  assert.ok(g1bSaid(g1bStep(beam, g1bUse(0), g1bUse(0)), 'Alpha used beam!'), '...and it fires again');
+
+  const coop = build({ id: 'b1', mode: 'coop_wild', seed: 6403, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [
+        { playerId: 'a1', name: 'Ann', mons: [g1bMon({ species: 'Alpha', maxHp: 400, spd: 90,
+          baseSpd: 0, moves: [g1bMove('fury', 20, 81)] })] },
+        { playerId: 'a2', name: 'Abe', mons: [g1bMon({ species: 'Gamma', maxHp: 400, spd: 80,
+          baseSpd: 0, moves: [g1bMove('thump', 10, 0)] })] },
+      ],
+      b: [{ playerId: 'w', name: 'Wild', mons: [g1bMon({ species: 'Beta', maxHp: 900, spd: 30,
+        baseSpd: 0, moves: [g1bMove('stomp', 10, 31, { chance: 100 })] })] }],
+    } });
+  coop.drainEvents();
+  const round = (target) => {
+    coop.submitChoice('a1', { action: 'fight', move: 0, target: 3 });
+    coop.submitChoice('a2', { action: 'fight', move: 0, target: 3 });
+    coop.submitChoice('w', { action: 'fight', move: 0, target });
+    return readAll(coop.drainEvents());
+  };
+  round(0);
+  assert.ok(g1bSaid(round(1), 'Alpha flinched!'), 'co-op: the raging seat keeps its flinch');
+  const third = round(1);
+  assert.ok(!g1bSaid(third, 'Gamma flinched!') && g1bSaid(third, 'Gamma used thump!'),
+    "co-op: the partner's flinch is reset");
+});
+
+test('Gen 1 badgeRules and traded: the player against the computer; true or absent', () => {
+  const rules = (mode) => {
+    const sides = mode === 'coop_wild' ? {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [g1bMon({})] }, { playerId: 'p3', name: 'Abe', mons: [g1bMon({})] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [g1bMon({ species: 'Beta' })] }],
+    } : {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [g1bMon({})] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [g1bMon({ species: 'Beta' })] }],
+    };
+    const battle = build({ id: 'b1', mode, seed: 1, sides });
+    return `${battle.byId.get('p1').badgeRules}/${battle.byId.get('p2').badgeRules}`;
+  };
+  assert.strictEqual(rules('wild'), 'true/null');
+  assert.strictEqual(rules('coop_wild'), 'true/null');
+  assert.strictEqual(rules('coop_npc'), 'true/null');
+  assert.strictEqual(rules('1v1'), 'null/null');
+  assert.strictEqual(rules('coop_pvp'), 'null/null');
+  const traded = (value) => {
+    const battle = build({ id: 'b1', mode: '1v1', seed: 1, sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [g1bMon({ extra: { traded: value } })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [g1bMon({ species: 'Beta' })] }] } });
+    return g1bActive(battle, 'p1').traded;
+  };
+  assert.strictEqual(traded(true), true);
+  assert.strictEqual(traded(false), undefined);
+  assert.strictEqual(traded('yes'), undefined);
+});
+
+// ------------------------------------------------------------------
+// The Gen 1 review fixes (FX1), stated as claims (twin of
+// tests/battle_sim_turn.lua section 27, where the arithmetic is worked)
+// ------------------------------------------------------------------
+
+const stageAt = (name, at, slot) => {
+  const row = (jsRun(name).probes || []).find((p) => p.at === at && p.slot === slot);
+  return row ? row.sAtk : null;
+};
+const eventsOf = (name, kind) => jsRun(name).events.filter((event) => event.t === kind);
+
+test('a Leech Seed tick that knocks the seeded monster out still heals the seeder', () => {
+  const faint = eventsOf('g1_leech_ko', 'faint');
+  assert.deepStrictEqual(faint.map((e) => `${e.slot}:${e.text}`), ['3:Beta'], 'the seeded monster falls');
+  assert.deepStrictEqual(eventsOf('g1_leech_ko', 'drain').map((e) => `${e.slot}:${e.amount}:${e.hp}`),
+    ['0:6:56'], 'the whole 1/16 of 100, though only 3 HP came off');
+  assert.strictEqual(jsRun('g1_leech_ko').outcome.outcome, 'win');
+});
+
+test("Rage builds from no poison, Leech Seed or confusion self-hit", () => {
+  assert.ok(saidIn('g1_rage_quiet', 'It hurt itself in its confusion!'), 'the seed does reach a self-hit');
+  for (const at of [1, 2, 3]) {
+    assert.strictEqual(stageAt('g1_rage_quiet', at, 0), 0, `turn ${at}: no build`);
+    assert.strictEqual(probeAt('g1_rage_quiet', at, 0), '112/90/101/56', `turn ${at}: the switch-in stats`);
+  }
+  assert.ok(!saidIn('g1_rage_quiet', "Alpha's ATTACK rose!"));
+});
+
+test('the hit that knocks a raging monster out builds nothing and re-penalises nobody', () => {
+  assert.ok(!saidIn('g1_rage_lethal', "Alpha's ATTACK rose!"));
+  assert.strictEqual(probeAt('g1_rage_lethal', 0, 3), '100/40/10/40', 'the burned attacker: 200 -> 100');
+  assert.strictEqual(probeAt('g1_rage_lethal', 1, 3), '100/40/10/40', 'not halved again to 50');
+});
+
+test('a Substitute that soaks the hit still builds, once per hit', () => {
+  // The build follows the hit: each `stat` comes right after its `damage`.
+  const order = (name) => jsRun(name).events
+    .filter((e) => e.slot === 0 && (e.t === 'damage' || e.t === 'stat')).map((e) => e.t);
+  const alphaHp = (name) => jsRun(name).events
+    .filter((e) => e.t === 'damage' && e.slot === 0).map((e) => e.hp);
+  // A 5-HP doll: the first hit breaks it and ends the double kick.
+  assert.ok(saidIn('g1_rage_sub', "Alpha's SUBSTITUTE broke!"));
+  assert.strictEqual(stageAt('g1_rage_sub', 1, 0), 1, 'one hit, one build: +1');
+  assert.strictEqual(probeAt('g1_rage_sub', 1, 0), '60/40/90/40', '40 x 150 / 100');
+  assert.deepStrictEqual(alphaHp('g1_rage_sub'), [400], 'the doll took it; no second hit');
+  assert.deepStrictEqual(order('g1_rage_sub'), ['damage', 'stat']);
+  // A 12-HP doll: soaked by the first, broken by the second -- both build.
+  assert.ok(saidIn('g1_rage_sub_late', "Alpha's SUBSTITUTE broke!"));
+  assert.strictEqual(stageAt('g1_rage_sub_late', 1, 0), 2, 'the soaked hit and the breaking one: +2');
+  assert.strictEqual(probeAt('g1_rage_sub_late', 1, 0), '80/40/90/40', '40 x 200 / 100');
+  assert.deepStrictEqual(alphaHp('g1_rage_sub_late'), [400, 400], 'both on the doll');
+  assert.deepStrictEqual(order('g1_rage_sub_late'), ['damage', 'stat', 'damage', 'stat']);
+});
+
+test('a missed Disable and a missed Explosion both build the target', () => {
+  assert.strictEqual(stageAt('g1_rage_misses', 1, 0), 1, 'the Disable missed and the target built');
+  assert.strictEqual(stageAt('g1_rage_misses', 2, 0), 2, 'the Explosion missed and the target built');
+  // The Disable's miss is DisableEffect's "But it failed!" (R1b); the
+  // Explosion's is the attack's.
+  assert.strictEqual(jsRun('g1_rage_misses').events.filter((e) => e.t === 'msg' && e.text === "Beta's attack missed!").length, 1);
+  assert.strictEqual(jsRun('g1_rage_misses').events.filter((e) => e.t === 'msg' && e.text === 'But, it failed!').length, 1);
+  assert.strictEqual(jsRun('g1_rage_misses').outcome.winners[0], 'p1', 'the exploder still went down');
+});
+
+test("a trap's later ticks build the trapped monster and re-penalise the trapper", () => {
+  assert.deepStrictEqual([1, 2, 3, 4].map((at) => stageAt('g1_rage_trap', at, 0)), [1, 2, 3, 4]);
+  assert.deepStrictEqual([1, 2, 3, 4].map((at) => probeAt('g1_rage_trap', at, 4)),
+    ['50/40/10/40', '25/40/10/40', '12/40/10/40', '6/40/10/40'], 'Delta, the trapper, halved each time');
+  assert.deepStrictEqual([1, 2, 3, 4].map((at) => probeAt('g1_rage_trap', at, 3)),
+    ['100/40/20/40', '100/40/20/40', '100/40/20/40', '100/40/20/40'], 'Beta, standing opposite, never');
+});
+
+test('a Bide aimed at field slot 0 is released at slot 0', () => {
+  const released = jsRun('g1_bide_slot0').events.filter((e) => e.t === 'damage' && e.side === 'a');
+  // `.BideCheck` stores wDamage (R1b): Alpha's 5 a turn, three stores on
+  // this seed's counter, 2 x 15 on the fourth turn.
+  assert.deepStrictEqual(released.map((e) => `${e.slot}:${e.amount}`), ['0:30']);
+});
+
+test('a side-effect drop at -6 is silent; a primary at -6 says so', () => {
+  // CantLowerAnymore's NothingHappenedText (R1b).
+  const lines = jsRun('g1_side_min').events.filter((e) => e.t === 'msg' && e.text === 'Nothing happened!');
+  assert.strictEqual(lines.length, 1, 'once, for the primary on turn 2');
+  const texts = jsRun('g1_side_min').events.filter((e) => e.t === 'msg').map((e) => e.text);
+  assert.ok(texts.indexOf('Nothing happened!') > texts.indexOf('Alpha used goo!'));
+});
+
+// ------------------------------------------------------------------
+// Gen 1 side-effect odds (FX4), stated as claims (twin of
+// tests/battle_sim_turn.lua section 28, where the bytes are forced and the
+// draws counted)
+// ------------------------------------------------------------------
+
+// Battle `at` of a sideTurns scenario: its RNG state, the target's (slot 3)
+// or the user's (slot 0) probe row, and what was said in it.
+const rngOf = (name, at) => jsRun(name).probes.find((p) => p.at === at && p.slot === undefined).rng;
+const seatOf = (name, at, slot) => jsRun(name).probes.find((p) => p.at === at && p.slot === slot);
+const saidAt = (name, at, text) => {
+  const battle = jsRun(name).events.find((e) => e.t === 'msg').battle.replace(/1$/, String(at));
+  return jsRun(name).events.some((e) => e.battle === battle && e.t === 'msg' && e.text === text);
+};
+// The `damage` events the target (slot 3) took in battle `at`, as "amount:hp"
+// -- a doll's hit leaves hp where it was.
+const hitsAt = (name, at) => {
+  const battle = jsRun(name).events.find((e) => e.t === 'msg').battle.replace(/1$/, String(at));
+  return jsRun(name).events
+    .filter((e) => e.battle === battle && e.t === 'damage' && e.slot === 3)
+    .map((e) => `${e.amount}:${e.hp}`);
+};
+
+test("Red's side effects fire at chance 0: below each routine's threshold, not at it", () => {
+  for (const [name, landed] of [
+    ['g1_odds_poison1', 'poison'], ['g1_odds_poison2', 'poison'], ['g1_odds_twineedle', 'poison'],
+    ['g1_odds_burn1', 'burn'], ['g1_odds_freeze1', 'freeze'], ['g1_odds_paralyze2', 'paralysis'],
+  ]) {
+    assert.strictEqual(seatOf(name, 1, 3).status, landed, `${name}: threshold - 1 lands`);
+    assert.strictEqual(seatOf(name, 2, 3).status, '', `${name}: the threshold does not`);
+  }
+  for (const name of ['g1_odds_flinch1', 'g1_odds_flinch2']) {
+    assert.ok(saidAt(name, 1, 'Beta flinched!'), `${name}: threshold - 1 flinches`);
+    assert.ok(!saidAt(name, 2, 'Beta flinched!'), `${name}: the threshold does not`);
+  }
+  assert.strictEqual(seatOf('g1_odds_drop', 1, 3).sSpc, -1, '84 < 85 drops the Special');
+  assert.strictEqual(seatOf('g1_odds_drop', 2, 3).sSpc, 0, '85 does not');
+  assert.ok(seatOf('g1_odds_confuse', 1, 3).confusion > 0, '24 < 25 confuses');
+  assert.strictEqual(seatOf('g1_odds_confuse', 2, 3).confusion, 0, '25 does not (no + 1 here)');
+});
+
+test("the computer's side-effect drop draws its extra miss first", () => {
+  assert.strictEqual(seatOf('g1_odds_computer_drop', 1, 0).sSpd, 0, 'the miss byte 63 stops it');
+  assert.strictEqual(seatOf('g1_odds_computer_drop', 2, 0).sSpd, -1, '64 passes and 84 lands');
+});
+
+test('an explicit chance overrides the cart odds; a chance on no side routine draws nothing', () => {
+  assert.deepStrictEqual([1, 2, 3].map((at) => seatOf('g1_side_precedence', at, 3).status),
+    ['', 'burn', ''], 'byte 50: the cart 26 misses, 20% (51) lands, 19% (48) misses');
+  assert.strictEqual(rngOf('g1_side_precedence', 1), rngOf('g1_side_precedence', 2), 'one draw either way');
+  assert.strictEqual(rngOf('g1_side_precedence', 4), rngOf('g1_side_precedence', 5),
+    'effect 0 at chance 100 draws no more than effect 0 at chance 0');
+  assert.notStrictEqual(rngOf('g1_side_precedence', 1), rngOf('g1_side_precedence', 5));
+});
+
+test('each side-effect routine draws only where the cart does', () => {
+  const g = 'g1_side_gates';
+  const plain = rngOf(g, 1);
+  for (const [at, why] of [
+    [2, 'a burn into a poisoned target'], [3, 'a burn into a target of its own type'],
+    [4, 'a poison into a Poison-type target'], [6, 'a burn into a Substitute'],
+    [7, 'a flinch into a Substitute'], [8, 'a poison into a Substitute'],
+    [9, 'a drop into a Substitute'], [11, 'a burn whose hit broke the Substitute'],
+    [12, 'a Twineedle whose first hit broke the Substitute'], [13, 'a Fire thaw'],
+  ]) {
+    assert.strictEqual(rngOf(g, at), plain, `${why} draws nothing`);
+  }
+  assert.strictEqual(seatOf(g, 2, 3).status, 'poison', 'the poisoned target stays poisoned');
+  assert.strictEqual(seatOf(g, 3, 3).status, '', 'and the same-type one unburned');
+  assert.notStrictEqual(rngOf(g, 5), plain, 'without typeIds no type is POISON: it draws');
+  assert.strictEqual(seatOf(g, 5, 3).status, 'poison');
+  assert.notStrictEqual(rngOf(g, 10), plain, 'confusion draws through a Substitute');
+  assert.ok(seatOf(g, 10, 3).confusion > 0, '...and confuses the monster behind it');
+  assert.ok(saidAt(g, 11, "Beta's SUBSTITUTE broke!") && seatOf(g, 11, 3).status === '');
+  assert.ok(saidAt(g, 12, "Beta's SUBSTITUTE broke!") && seatOf(g, 12, 3).status === '');
+  assert.deepStrictEqual(hitsAt(g, 12), ['3:400'], 'the Twineedle ends at the hit that broke the doll');
+  assert.ok(saidAt(g, 13, 'Fire defrosted Beta!'), 'a Fire move thaws a frozen target');
+  assert.strictEqual(seatOf(g, 13, 3).status, '');
+  assert.strictEqual(seatOf(g, 14, 3).sSpc, -1, 'Mist does not stop a side-effect drop');
+  assert.ok(!saidAt(g, 14, 'But, it failed!'));
+  assert.strictEqual(rngOf(g, 15), rngOf(g, 16), 'a knockout draws no side byte');
+  assert.strictEqual(seatOf(g, 16, 3), undefined, 'the target is down');
+});
+
+test('a multi-hit move ends at a Substitute its first hit broke, and goes on past a later break', () => {
+  const g = 'g1_multi_sub';
+  // Two-to-five on seed 29011, 9 a hit: the count bytes after hit 1 are 182
+  // (2, so TwoToFiveAttacksEffect draws again) and 151 (3): five hits.
+  assert.deepStrictEqual(hitsAt(g, 1), ['9:391', '9:382', '9:373', '9:364', '9:355'], 'no doll: five hits');
+  assert.deepStrictEqual(hitsAt(g, 2), ['9:400'], 'a 5-HP doll: the first hit breaks it, and the move ends');
+  assert.ok(saidAt(g, 2, "Beta's SUBSTITUTE broke!"));
+  assert.notStrictEqual(rngOf(g, 2), rngOf(g, 1), '...and no count byte is drawn after a first-hit break');
+  assert.strictEqual(rngOf(g, 3), rngOf(g, 1), 'a doll that holds hit 1: the count is drawn as with none');
+  assert.deepStrictEqual(hitsAt(g, 3), ['9:400', '9:400', '9:391', '9:382', '9:373'],
+    'a 15-HP doll: broken by the second hit, and hits 3 to 5 land on Beta');
+  assert.ok(saidAt(g, 3, "Beta's SUBSTITUTE broke!"));
+  // DOUBLE KICK (8 a hit since K12's high-bits damage roll; 9 before).
+  assert.deepStrictEqual(hitsAt(g, 4), ['8:392', '8:384'], 'no doll: two hits');
+  assert.deepStrictEqual(hitsAt(g, 5), ['8:400'], 'a 5-HP doll: the second hit is never thrown');
+  assert.deepStrictEqual(hitsAt(g, 6), ['8:400', '8:400'], 'a 15-HP doll: both hits, both on it');
+  assert.ok(saidAt(g, 5, "Beta's SUBSTITUTE broke!") && saidAt(g, 6, "Beta's SUBSTITUTE broke!"));
+  // TWINEEDLE, on a seed whose side byte (51) poisons (9 a hit since K12; 8 before).
+  assert.deepStrictEqual(hitsAt(g, 7), ['9:391', '9:382', '25:357'], 'no doll: two hits, then the tick');
+  assert.strictEqual(seatOf(g, 7, 3).status, 'poison');
+  assert.deepStrictEqual(hitsAt(g, 8), ['9:400'], 'a 5-HP doll: one hit');
+  assert.deepStrictEqual(hitsAt(g, 9), ['9:400', '9:400'], 'a 15-HP doll: two hits, both on it');
+  for (const at of [8, 9]) {
+    assert.ok(saidAt(g, at, "Beta's SUBSTITUTE broke!"));
+    assert.strictEqual(seatOf(g, at, 3).status, '', `battle ${at}: no poison`);
+    assert.strictEqual(rngOf(g, at), rngOf(g, 10), `battle ${at}: no side byte, a plain hit's stream`);
+  }
+  assert.notStrictEqual(rngOf(g, 7), rngOf(g, 10), 'the poison that landed drew its byte');
+  // AttackSubstitute's `sub [hl]` / `ret nc`: a hit for exactly the doll's HP
+  // leaves it standing at 0, and only the next hit breaks it.
+  assert.deepStrictEqual(hitsAt(g, 11), ['9:400', '9:400', '9:391', '9:382', '9:373'],
+    'a 9-HP doll hit for 9 stands at 0; hit 2 breaks it, hits 3-5 land');
+  assert.strictEqual(rngOf(g, 11), rngOf(g, 1), '...the count drawn, as the doll held hit 1');
+  assert.ok(saidAt(g, 11, "Beta's SUBSTITUTE broke!"));
+  assert.deepStrictEqual(hitsAt(g, 12), ['8:400', '8:400'], 'DOUBLE KICK: an 8-HP doll hit for 8 stands, hit 2 breaks it');
+  assert.ok(saidAt(g, 12, "Beta's SUBSTITUTE broke!"));
+});
+
+// ------------------------------------------------------------------
+// R1a: the Lua driver's `duels` scenarios, asserted on the JS half (the parity
+// tests above hold the Lua half to the same stream).
+// ------------------------------------------------------------------
+
+const duelEvents = (name, at) => {
+  const id = jsRun(name).events[0].battle.replace(/1$/, String(at));
+  return jsRun(name).events.filter((e) => e.battle === id);
+};
+const duelTexts = (name, at) => duelEvents(name, at).filter((e) => e.t === 'msg').map((e) => e.text);
+const duelSaid = (name, at, text) => duelTexts(name, at).includes(text);
+const duelRow = (name, at, turn) => jsRun(name).probes
+  .find((p) => p.at === at && p.turn === turn && p.rng !== undefined);
+const duelSeat = (name, at, turn, slot) => jsRun(name).probes
+  .find((p) => p.at === at && p.turn === turn && p.slot === slot && p.mon === 1);
+const duelEnd = (name, at) => jsRun(name).probes.find((p) => p.at === at && p.outcome !== undefined);
+// "slot:amount:hp" for every damage event, in order.
+const duelHits = (name, at) => duelEvents(name, at).filter((e) => e.t === 'damage')
+  .map((e) => `${e.slot}:${e.amount}:${e.hp}`);
+
+test('Red damage tails: no roll at 0 or 1, a 0.25x zero misses, an exact-HP doll stands at 0', () => {
+  const g = 'g1_damage_tails';
+  // A base-2 hit (level 2, Attack 5, Defense 200).
+  assert.deepStrictEqual(duelHits(g, 1), ['3:1:399'], '0.5x: 1 damage, as RandomizeDamage leaves it');
+  assert.ok(duelSaid(g, 2, "Alpha's attack missed!") && duelHits(g, 2).length === 0,
+    '0.25x: 0 is a miss (AdjustDamageForMoveType sets wMoveMissed)');
+  assert.ok(duelSaid(g, 4, "It doesn't affect Beta!"));
+  assert.strictEqual(duelRow(g, 1, 1).rng, duelRow(g, 2, 1).rng, 'the 1 and the 0 draw no roll');
+  assert.strictEqual(duelRow(g, 4, 1).rng, duelRow(g, 1, 1).rng, 'nor does an immunity');
+  assert.notStrictEqual(duelRow(g, 3, 1).rng, duelRow(g, 1, 1).rng, 'a 2 and up rolls');
+  assert.strictEqual(duelRow(g, 2, 1).last, 0, 'the miss zeroes wDamage');
+  // Battle 5: an 8-HP doll hit for 8 (R1c's draw order moved the roll).
+  assert.deepStrictEqual([duelSeat(g, 5, 1, 3).sub, duelSeat(g, 5, 1, 3).zero], [0, true],
+    'the doll stands at 0 HP (AttackSubstitute `sub [hl]` / `ret nc`)');
+  assert.strictEqual(duelTexts(g, 5).filter((t) => t === "Beta's SUBSTITUTE broke!").length, 1);
+  assert.strictEqual(duelSeat(g, 5, 2, 3).zero, false, 'turn 2: the next hit breaks it');
+  assert.strictEqual(duelSeat(g, 5, 2, 3).hp, 400, '...and Beta is untouched by either');
+});
+
+test('AlwaysHappenSideEffects: a doll that holds still drains, recoils, recharges; one that breaks cancels', () => {
+  const g = 'g1_always_happen';
+  const alpha = (at, turn = 1) => duelSeat(g, at, turn, 0);
+  assert.deepStrictEqual(duelHits(g, 1), ['3:8:400'], 'the drain move hits the 200-HP doll for 8');
+  assert.strictEqual(alpha(1).hp, 304, 'and still heals half of it (DrainHPEffect_ halves wDamage)');
+  assert.strictEqual(duelRow(g, 1, 1).last, 4, '...which it halved in place');
+  assert.strictEqual(alpha(2).hp, 300, 'a doll the drain broke: no heal');
+  assert.strictEqual(alpha(3).hp, 298, 'recoil off a holding doll: a quarter of 9');
+  assert.strictEqual(alpha(4).hp, 300, 'recoil after a break: none');
+  assert.ok(duelSaid(g, 5, 'Alpha used STRUGGLE!'));
+  assert.strictEqual(alpha(5).hp, 295, "STRUGGLE's recoil is HALF of 11 (RecoilEffect_ `cp STRUGGLE`)");
+  assert.strictEqual(alpha(6).hp, 300, '...and none after a break');
+  assert.ok(duelSaid(g, 7, 'Alpha must recharge!'), 'HYPER BEAM into a holding doll still recharges');
+  assert.strictEqual(duelTexts(g, 8).filter((t) => t === 'Alpha used beam!').length, 2,
+    'one that broke the doll: no recharge, Alpha fires again on turn 2');
+  assert.strictEqual(duelEnd(g, 9).winner, 'p2', 'EXPLOSION into a holding doll: Alpha goes down');
+  assert.strictEqual(duelEnd(g, 10), undefined, 'EXPLOSION that broke the doll: Alpha lives');
+  assert.strictEqual(alpha(10).hp, 300);
+  assert.strictEqual(alpha(11).raging, true, 'RAGE into a holding doll starts raging');
+  assert.strictEqual(alpha(12).raging, false, 'RAGE that broke the doll never starts');
+  const t13 = duelEvents(g, 13).map((e) => (e.t === 'msg' ? e.text : e.t));
+  assert.ok(t13.indexOf('drain') < t13.indexOf("Beta's RAGE is building!"),
+    'the drain (AlwaysHappen) comes before the target Rage build');
+  assert.strictEqual(alpha(14).hp, 298, 'recoil comes off the HP behind the user\'s own doll');
+  assert.strictEqual(alpha(14).sub, 30, '...never the doll');
+  assert.strictEqual(duelEnd(g, 15).winner, 'p2', 'EXPLOSION behind its own doll still faints the user');
+});
+
+test('Pay Day: the whole pile on a won fight against the computer, nothing in a link fight', () => {
+  const g = 'g1_pay_day';
+  assert.deepStrictEqual([duelEnd(g, 1).winner, duelEnd(g, 1).payDay], ['p1', 200],
+    "3 x 40 of Alpha's and 2 x 40 of the computer's");
+  assert.strictEqual(duelEnd(g, 2).payDay, 0, '1v1 pays nothing');
+  assert.strictEqual(duelRow(g, 3, 1).payA, 0, 'a use that broke a doll scatters nothing');
+  assert.strictEqual(duelEnd(g, 3).payDay, 240);
+  assert.strictEqual(duelEnd(g, 4).payDay, 24, 'level 140: 280 wraps the 8-bit `add a` to 24');
+  assert.deepStrictEqual([duelEnd(g, 5).winner, duelEnd(g, 5).payDay], ['p2', 0],
+    "the computer's win pays nothing");
+});
+
+test('COUNTER: twice wDamage against a Normal or Fighting move, else a miss', () => {
+  const g = 'g1_counter';
+  assert.deepStrictEqual(duelHits(g, 1), ['0:8:392', '3:16:384'], 'twice the thump');
+  assert.ok(duelSaid(g, 2, "Alpha's attack missed!"), 'a Fire hit is not countered');
+  assert.notStrictEqual(duelRow(g, 2, 1).rng, duelRow(g, 1, 1).rng, '...with no hit test drawn');
+  assert.ok(duelSaid(g, 3, "Beta's attack missed!") && duelSaid(g, 3, "Alpha's attack missed!"), 'COUNTER against COUNTER');
+  assert.ok(duelSaid(g, 4, "Alpha's attack missed!"), 'a missed thump leaves wDamage at 0');
+  assert.deepStrictEqual(duelHits(g, 5), ['0:8:400', '3:16:384'], 'the hit on the doll counts whole');
+  assert.deepStrictEqual(duelHits(g, 6), ['0:8:392', '3:16:384'], 'untyped: it reaches a Ghost');
+  assert.strictEqual(duelRow(g, 7, 2).last, 16, 'turn 2: wDamage still holds the counter');
+  assert.ok(duelTexts(g, 7).slice(-1)[0] === "Alpha's attack missed!", '...but a 0-power move is not countered');
+  assert.deepStrictEqual(duelHits(g, 8), ['0:12:388', '3:24:376'], 'a Fighting hit is countered');
+  assert.ok(duelSaid(g, 9, "Alpha's attack missed!"), 'typeIds decides which index is NORMAL');
+});
+
+test('RAGE and THRASH spend PP once; RAGE at 0 PP stays RAGE; the build line per build', () => {
+  const g = 'g1_rage_thrash_pp';
+  assert.deepStrictEqual([1, 2, 3].map((t) => duelSeat(g, 1, t, 0).pp), ['0', '0', '0']);
+  assert.strictEqual(duelTexts(g, 1).filter((t) => t === 'Alpha used RAGE!').length, 3,
+    'RAGE every turn at 0 PP, never STRUGGLE');
+  assert.ok(!duelSaid(g, 1, 'Alpha used STRUGGLE!'));
+  assert.strictEqual(duelTexts(g, 1).filter((t) => t === "Alpha's RAGE is building!").length, 3);
+  const t1 = duelTexts(g, 1);
+  assert.strictEqual(t1[t1.indexOf("Alpha's RAGE is building!") + 1], "Alpha's ATTACK rose!");
+  assert.deepStrictEqual([1, 2, 3].map((t) => duelSeat(g, 2, t, 0).pp), ['0', '0', '0'],
+    'THRASH pays on its first turn only');
+  // ThrashPetalDanceEffect's counter is the turns AFTER the first (R1b):
+  // 3 on this seed, so it thrashes on turns 1-4 and turn 4's step confuses.
+  assert.strictEqual(duelSeat(g, 2, 3, 0).thrash, true, '...still thrashing on turn 3');
+  assert.strictEqual(duelSeat(g, 2, 4, 0).conf > 0, true, '...and confuses at its end');
+  assert.ok(!duelSaid(g, 3, "Alpha's RAGE is building!"), 'at +6 HandleBuildingRage says nothing');
+  assert.strictEqual(duelSeat(g, 3, 1, 0).pp, '60', 'a raging RAGE spends no PP');
+});
+
+test('METRONOME / MIRROR MOVE: a called multi-turn move is the one replayed', () => {
+  const g = 'g1_called_multiturn';
+  for (const [at, id] of [[1, 'FLY'], [2, 'DIG']]) {
+    assert.strictEqual(duelSeat(g, at, 1, 0).invuln, true, `${id}: up on turn 1`);
+    // The charge turn is ChargeEffect alone -- no used line (R1d); the
+    // release is PlayerCanExecuteMove's, and DecrementPP pays METRONOME's slot
+    // (wPlayerMoveListIndex) a second time -- but the call gave one back
+    // (R1e: ReloadMoveData's IncrementMovePP, which ChargeEffect never spends
+    // again), so the charge turn ends where it began and the call costs one.
+    assert.deepStrictEqual(duelTexts(g, at).slice(0, 6).filter((t) => t.startsWith('Alpha used')),
+      ['Alpha used METRONOME!', `Alpha used ${id}!`], `${id} lands on turn 2`);
+    assert.strictEqual(duelSeat(g, at, 1, 0).pp, '60', 'METRONOME spent at the call and refunded');
+    assert.strictEqual(duelSeat(g, at, 2, 0).pp, '59', '...and spent again at the release');
+  }
+  // 1 + the counter (3 on this seed): ThrashPetalDanceEffect counts the turns
+  // after the first (R1b).
+  // The continuation turns print "thrashing about!" and no used line (R1c:
+  // `.ThrashingAboutCheck` jumps past PlayerCanExecuteMove).
+  assert.strictEqual(duelTexts(g, 3).filter((t) => t === 'Alpha used THRASH!').length, 1);
+  assert.strictEqual(duelTexts(g, 3).filter((t) => t === "Alpha's thrashing about!").length, 3);
+  assert.strictEqual(duelTexts(g, 3).filter((t) => t === 'Alpha used METRONOME!').length, 1);
+  assert.strictEqual(duelTexts(g, 4).filter((t) => t === 'Alpha used RAGE!').length, 4,
+    'a called RAGE rages on as RAGE');
+  assert.strictEqual(duelTexts(g, 4).filter((t) => t === 'Alpha used METRONOME!').length, 1);
+  assert.ok(duelSaid(g, 5, 'Alpha unleashed energy!'));
+  // `.UnleashEnergy` prints no used-move line (R1b): the animation names it.
+  const e5 = duelEvents(g, 5);
+  const at5 = e5.findIndex((e) => e.t === 'msg' && e.text === 'Alpha unleashed energy!');
+  assert.deepStrictEqual([e5[at5 + 1].t, e5[at5 + 1].text], ['anim', 'BIDE'],
+    'the called BIDE unleashes as BIDE, not METRONOME');
+  const t6 = duelTexts(g, 6);
+  assert.strictEqual(t6.filter((t) => t === 'Alpha used MIRROR_MOVE!').length, 2);
+  assert.strictEqual(t6[t6.length - 1], 'Alpha used FLY!', 'turn 3: the mirrored FLY, not MIRROR MOVE');
+  assert.strictEqual(duelSeat(g, 6, 3, 3).hp, 381, '...and it lands');
+  // R1e: turn 2's copy is refunded (ReloadMoveData's IncrementMovePP) and
+  // the FLY it starts never spends it again; turn 1's failed copy reloads
+  // nothing, so its PP stays spent.
+  assert.strictEqual(duelSeat(g, 6, 3, 0).pp, '58',
+    'MIRROR MOVE spent on turn 1, spent and refunded on turn 2, and by the mirrored FLY\'s release');
+});
+
+test('LEECH SEED: times the toxic counter, and a poison or burn knockout still feeds', () => {
+  const g = 'g1_leech_toxic';
+  assert.deepStrictEqual(duelHits(g, 1).filter((h) => h.startsWith('3:')),
+    ['3:25:375', '3:50:325', '3:75:250', '3:100:150'], 'toxic x1, seed x2, toxic x3, seed x4');
+  assert.strictEqual(duelSeat(g, 1, 1, 0).hp, 350, 'the seeder gets the seed x2');
+  assert.strictEqual(duelSeat(g, 1, 2, 3).tox, 5, 'the counter climbs twice a turn');
+  for (const at of [2, 3]) {
+    assert.strictEqual(duelSeat(g, at, 1, 3).hp, 0, `battle ${at}: the tick knocks Beta out`);
+    assert.strictEqual(duelSeat(g, at, 1, 0).hp, 325, '...and Alpha is still fed 25');
+  }
+  assert.deepStrictEqual([duelSeat(g, 4, 1, 3).hp, duelSeat(g, 4, 1, 3).sub], [350, 50],
+    'both ticks pass the doll');
+});
+
+test('a confusion self-hit behind a doll hits the opposing doll, and clears BattleStatus1', () => {
+  const g = 'g1_self_hit';
+  const seat = (at, turn, slot) => duelSeat(g, at, turn, slot);
+  assert.deepStrictEqual([seat(1, 1, 0).hp, seat(1, 1, 0).sub], [400, 30], 'Alpha and its doll untouched');
+  assert.deepStrictEqual([seat(1, 1, 3).sub, seat(1, 1, 3).zero], [0, true], "Beta's 10 doll takes the 10, at 0");
+  assert.ok(duelSaid(g, 2, "Beta's SUBSTITUTE broke!"), 'a 5 doll breaks');
+  assert.deepStrictEqual(duelHits(g, 3), [], 'no doll across: nothing moves');
+  assert.strictEqual(seat(3, 1, 0).hp, 400);
+  assert.deepStrictEqual([seat(4, 1, 0).hp, seat(4, 1, 3).sub], [390, 10], 'no own doll: Alpha takes it');
+  assert.deepStrictEqual([seat(5, 1, 0).charging, seat(5, 1, 0).invuln], [false, false],
+    'the charge and the vanish are gone');
+  // R1e's seed (7309): turn 2's confusion byte keeps Alpha's head, and its
+  // FIGHT is a fresh FLY -- the charge line, not a release.
+  assert.ok(duelSaid(g, 5, 'Alpha flew up high!') && !duelSaid(g, 5, 'Alpha used FLY!'),
+    'turn 2 is no forced release: FLY starts afresh');
+  assert.ok(!duelHits(g, 5).some((h) => h.startsWith('3:')), '...no FLY lands on Beta');
+  assert.strictEqual(seat(6, 1, 0).thrash, false, 'the thrash is gone');
+  assert.ok(!duelSaid(g, 6, 'Alpha became confused!'), '...so it never ends in confusion');
+  assert.strictEqual(seat(7, 1, 0).bide, false, 'the Bide is gone');
+  assert.strictEqual(seat(7, 1, 3).hp, 400, 'nothing unleashed');
+});
+
+// ------------------------------------------------------------------
+// R1b: the Lua driver's `fights` scenarios, asserted on the JS half (the
+// parity tests above hold the Lua half to the same stream;
+// tests/battle_sim_turn.lua's R1b section forces the bytes and counts them).
+// ------------------------------------------------------------------
+
+const r1Seat = (name, at, turn, slot, mon = 1) => jsRun(name).probes
+  .find((p) => p.at === at && p.turn === turn && p.slot === slot && p.mon === mon);
+const r1Row = (name, at, turn) => jsRun(name).probes
+  .find((p) => p.at === at && p.turn === turn && p.rng !== undefined);
+const r1End = (name, at) => jsRun(name).probes.find((p) => p.at === at && p.outcome !== undefined);
+// R1e's seat row: list index, wAILayer2Encouragement, the move struct.
+const duelRowSeat = (name, at, turn, seat) => jsRun(name).probes
+  .find((p) => p.at === at && p.turn === turn && p.seat === seat);
+const r1Level = (name, at, turn) => jsRun(name).probes
+  .find((p) => p.at === at && p.turn === turn && p.levelUp !== undefined).levelUp;
+
+test('Transform: 5 PP copies, undone at the switch-out, and the species byte behind a crit', () => {
+  const g = 'g1_transform_restore';
+  assert.deepStrictEqual([r1Seat(g, 1, 1, 0).moves, r1Seat(g, 1, 1, 0).types], ['thump:5,chop:5', '2'],
+    "Beta's moves at 5 PP each, Beta's type");
+  assert.deepStrictEqual([r1Seat(g, 1, 2, 0).moves, r1Seat(g, 1, 2, 0).types, r1Seat(g, 1, 2, 0).transformed],
+    ['morph:59,tap:60', '1', false], 'switched out: its own moves, PP and type back');
+  assert.ok(duelSaid(g, 1, 'Alpha used tap!'), 'and back in, its own move');
+  // Alpha's crits on the transformed wild Beta: GetEnemyMonStat, a CalcStat
+  // over Alpha's base Defense 70 and DV 9 at Beta's level 30 (52), against
+  // the party stat 40 without K7.
+  // (The rolls are R1c's draw order's: crit, roll, then the accuracy byte.)
+  assert.deepStrictEqual([duelHits(g, 2)[1], duelHits(g, 3)[1]], ['3:19:356', '3:25:350'],
+    'the CalcStat Defense 52 against the party 40');
+  assert.ok(duelSaid(g, 2, 'Beta used slash!') && duelHits(g, 2)[2] === '0:55:345',
+    "the copied slash, critting off Alpha's base Speed, with the CalcStat Attack");
+});
+
+test('Haze: every battler reset, the target cured and its move gone', () => {
+  const g = 'g1_haze_full';
+  const a = r1Seat(g, 1, 1, 0);
+  const b = r1Seat(g, 1, 1, 3);
+  assert.deepStrictEqual([a.status, a.stages, a.flags], ['poison', '0/0/0/0/0/0', ''],
+    'the user: Bad Poison gone, stages and Reflect / Focus Energy gone');
+  assert.deepStrictEqual([b.status, b.conf, b.flags, b.disable, b.stages], ['', 0, '', '', '0/0/0/0/0/0'],
+    'the target: cured, unconfused, no Mist / X Accuracy / seed / Disable');
+  // Two turns each: the thump comes on turn 2 only.
+  assert.strictEqual(duelTexts(g, 1).filter((x) => x === 'Beta used thump!').length, 1,
+    'the sleeping target woke and lost its turn-1 move');
+  assert.strictEqual(duelTexts(g, 2).filter((x) => x === 'Beta used thump!').length, 1,
+    'the frozen one likewise');
+  assert.deepStrictEqual([r1Seat(g, 3, 1, 1).conf, r1Seat(g, 3, 1, 1).stages], [0, '0/0/0/0/0/0'],
+    'a 2v2: the partner of the user too');
+  assert.deepStrictEqual([r1Seat(g, 3, 1, 4).status, r1Seat(g, 3, 1, 4).flags], ['poison', ''],
+    "...and the target's partner: plain poison, unseeded");
+  assert.strictEqual(r1Seat(g, 3, 1, 3).status, '', 'only the target is cured');
+});
+
+test("StatModifierDownEffect's primary: the computer's miss byte, then Mist and a doll before the accuracy byte", () => {
+  const g = 'g1_stat_drop_primary';
+  assert.ok(duelSaid(g, 1, 'But, it failed!'), "the computer's growl misses on its own byte");
+  assert.strictEqual(r1Seat(g, 2, 4, 0).stages.split('/')[0], '-4', 'a link fight: four growls, four drops');
+  assert.strictEqual(r1Row(g, 4, 1).rng, 8303, 'into a doll: no byte at all (the seed untouched)');
+  assert.strictEqual(r1Row(g, 6, 1).rng, 8305, 'SWORDS DANCE at +6: Nothing happened, no byte');
+  assert.ok(duelSaid(g, 6, 'Nothing happened!'));
+});
+
+test('ClearHyperBeam: a freeze on the player\'s turn and a trap that starts', () => {
+  const g = 'g1_clear_recharge';
+  assert.ok(!duelSaid(g, 1, 'Beta must recharge!'), "the player's freeze clears the wild beam's recharge");
+  // R1c: a recharge is the monster's own slot, behind the freeze check
+  // (CheckPlayerStatusConditions `.FrozenCheck` before `.HyperBeamCheck`), so
+  // a frozen Alpha says "frozen solid!" and keeps the bit for its thaw.
+  assert.ok(duelSaid(g, 2, 'Alpha is frozen solid!') && duelSeat(g, 2, 2, 0).recharge === true,
+    "the computer's freeze does not: still frozen, Alpha keeps NEEDS_TO_RECHARGE");
+  assert.ok(!duelSaid(g, 3, 'Alpha must recharge!') && duelSeat(g, 3, 2, 0).recharge === false,
+    'a link fight: both sides are the player');
+  assert.ok(!duelSaid(g, 4, 'Alpha must recharge!') && duelSaid(g, 4, "Beta's attack missed!"),
+    'a Wrap that misses has cleared it already');
+});
+
+test("the computer's item and switch in its own turn slot", () => {
+  const g = 'g1_computer_turn_slot';
+  const kinds = (at) => duelEvents(g, at).filter((e) => ['damage', 'item', 'switch'].includes(e.t))
+    .map((e) => e.t);
+  assert.deepStrictEqual(kinds(1), ['damage', 'item'], 'a slower trainer: the hit, then its potion');
+  assert.deepStrictEqual(kinds(2), ['switch', 'damage'], 'a faster one switches first, the hit finds Delta');
+  assert.strictEqual(duelHits(g, 2)[0], '3:5:395');
+  assert.deepStrictEqual(kinds(3), ['damage', 'switch'], 'a knocked-out one never switches; its send-out follows');
+  assert.notStrictEqual(r1Row(g, 4, 1).rng, r1Row(g, 1, 1).rng, 'a Speed tie draws its byte for the item too');
+});
+
+test('asleep, the selection is last turn\'s, and MIRROR MOVE finds a used move zeroed', () => {
+  const g = 'g1_asleep_selection';
+  const t = duelTexts(g, 1);
+  const second = t.indexOf('Beta used thump!');
+  assert.ok(second > 0 && t.indexOf('Alpha is fast asleep!', second) > second,
+    "turn 2: the sleeping Alpha's QUICK ATTACK moves in tap's bracket, after Beta");
+  assert.ok(t.includes('The MIRROR MOVE failed!'), 'turn 3: Beta mirrors nothing (MirrorMoveFailedText)');
+});
+
+test('Struggle with a move disabled reads the raw PP bytes', () => {
+  assert.strictEqual(duelTexts('g1_struggle_disabled', 1).filter((x) => x === 'Alpha used STRUGGLE!').length, 2);
+});
+
+test('DISABLE: a random slot, 1-8 steps in its own turn, a miss fails, a doll does not stop it', () => {
+  const g = 'g1_disable';
+  assert.ok(duelSaid(g, 1, "Beta's chop was disabled!") && duelSaid(g, 1, "Beta's disabled no more!"));
+  assert.ok(duelSaid(g, 3, "Beta's chop was disabled!"), "the wild target's 0-PP move is pickable");
+  assert.deepStrictEqual(duelTexts(g, 4).slice(0, 2), ['Alpha used lock!', 'But, it failed!']);
+  assert.ok(duelSaid(g, 4, "Beta's thump was disabled!"), '...and the doll lets the second through');
+});
+
+test('PoisonEffect turns a Poison type away; TOXIC badly poisons', () => {
+  const g = 'g1_poison_primary';
+  assert.ok(duelSaid(g, 1, "It didn't affect Beta!"));
+  assert.strictEqual(r1Seat(g, 2, 1, 3).status, 'poison');
+  assert.deepStrictEqual([r1Seat(g, 3, 3, 3).status, r1Seat(g, 3, 3, 3).hp], ['toxic', 250],
+    '25, 50, 75: the counter climbs');
+  assert.ok(duelSaid(g, 4, "It didn't affect Beta!"), 'a doll');
+});
+
+test('the multi-hit lines, by seat', () => {
+  const g = 'g1_multihit_lines';
+  assert.ok(duelSaid(g, 1, 'Hit the enemy 2 times!'));
+  assert.ok(duelSaid(g, 2, 'Hit 2 times!'));
+  assert.ok(!duelTexts(g, 3).some((x) => x.startsWith('Hit ')), 'a knockout says nothing');
+  assert.deepStrictEqual(duelHits(g, 4).slice(0, 2), ['3:1:399', '3:1:398'], 'power 0 still hits');
+});
+
+test('K9: the level-up rebuild, and what is refused', () => {
+  const g = 'g1_level_up';
+  assert.deepStrictEqual([1, 2, 3, 4, 5].map((t) => r1Level(g, 1, t)), [true, true, false, false, false]);
+  assert.strictEqual(r1Level(g, 2, 1), false, 'a link fight earns nothing');
+  const a = r1Seat(g, 1, 1, 0);
+  assert.deepStrictEqual([a.level, a.maxHp, a.party, a.cur], [21, 63, '63/52/94/57', '52/58/105/64'],
+    'party, then stage, burn and every badge');
+  const gamma = r1Seat(g, 1, 2, 0, 2);
+  assert.deepStrictEqual([gamma.level, gamma.maxHp, gamma.hp, gamma.party], [16, 40, 40, '23/23/23/30'],
+    'the bench, from its K7 sheet');
+});
+
+test('the crash, and the set-damage moves', () => {
+  const g = 'g1_crash_and_set_damage';
+  assert.strictEqual(duelHits(g, 1)[0], '0:1:399', 'a 1 HP crash');
+  assert.strictEqual(duelHits(g, 2)[0], '3:1:400', "behind its own doll: the opposing doll takes it");
+  assert.ok(duelSaid(g, 3, "It doesn't affect Beta!") && duelHits(g, 3)[0] === '0:1:399');
+  assert.deepStrictEqual(duelHits(g, 4).filter((h) => h.startsWith('3:')), ['3:30:370', '3:20:350'],
+    'SEISMIC TOSS and SONICBOOM through a 0x chart');
+  assert.deepStrictEqual(duelHits(g, 5).filter((h) => h.startsWith('3:')), ['3:40:360', '3:180:180']);
+});
+
+test('OHKO on a tie; full paralysis keeps the vanish', () => {
+  assert.strictEqual(r1End('g1_ohko_paralysis', 1).winner, 'p1', 'the tie lands');
+  const s = r1Seat('g1_ohko_paralysis', 2, 1, 0);
+  assert.deepStrictEqual([s.charging, s.invuln], [false, true]);
+  // (R1c: MoveHitTest's INVULNERABLE miss is PrintMoveFailureText's
+  // "<USER>'s attack missed!".)
+  assert.ok(duelSaid('g1_ohko_paralysis', 2, "Beta's attack missed!"), "Beta's thump finds nobody");
+});
+
+test('the trap starts before the hit', () => {
+  const g = 'g1_trap_start';
+  assert.notStrictEqual(r1Seat(g, 1, 1, 3).trapped, '', 'a doll that holds keeps it');
+  assert.strictEqual(r1Seat(g, 2, 1, 3).trapped, '', 'a miss takes it back');
+  assert.strictEqual(r1Seat(g, 3, 1, 3).trapped.split('/')[1], '0', 'an immunity leaves it at 0');
+  assert.notStrictEqual(r1Seat(g, 4, 1, 3).trapped, '', 'a doll that breaks keeps it too');
+});
+
+test('MIRROR MOVE copies the move used, not the caller', () => {
+  assert.ok(duelSaid('g1_mirror_used', 1, 'Alpha used THRASH!'));
+  assert.strictEqual(r1Seat('g1_mirror_used', 1, 1, 0).used, 'THRASH');
+});
+
+test('Pay Day on an escape, but not on RUN', () => {
+  const g = 'g1_pay_day_escape';
+  assert.deepStrictEqual([1, 2, 3].map((at) => r1End(g, at).payDay), [80, 40, 0]);
+  assert.deepStrictEqual([1, 2, 3].map((at) => r1End(g, at).reason), ['run', 'run', 'run']);
+});
+
+test('no hit test for a power-0 routine that has none', () => {
+  const g = 'g1_no_hit_test';
+  assert.strictEqual(r1Row(g, 1, 1).rng, 9701, 'turn 1: nothing drawn');
+  assert.strictEqual(r1Row(g, 1, 3).rng, r1Row(g, 1, 2).rng, 'turn 3: the GROWL fails before a byte');
+  // MonsStatsRoseText's "greatly" for an UP2 effect (R1e).
+  assert.ok(duelSaid(g, 1, "Alpha's ATTACK greatly rose!"), 'SWORDS DANCE lands');
+});
+
+// ------------------------------------------------------------------
+// R1c (gen12-referee-gaps-fix wave 3), each against pokered
+// ------------------------------------------------------------------
+
+test("PlayerCalcMoveDamage's draw order: crit, roll, then the accuracy byte; no gate byte for sleep", () => {
+  const g = 'g1_draw_order';
+  assert.ok(duelSaid(g, 1, "Alpha's attack missed!"), 'an accuracy-0 tap misses');
+  assert.strictEqual(r1Row(g, 1, 1).rng, r1Row(g, 2, 1).rng,
+    '...having drawn the crit byte and the roll before its accuracy byte, as the hit does');
+  assert.ok(duelSaid(g, 3, "Alpha's attack missed!") && r1Row(g, 3, 1).rng !== r1Row(g, 2, 1).rng,
+    'DREAM EATER into a waking target misses on MoveHitTest\'s sleep check, before its byte');
+  assert.strictEqual(r1Row(g, 4, 1).rng, 9801, 'the asleep and frozen gates draw nothing');
+  assert.ok(duelSaid(g, 4, 'Alpha is fast asleep!') && duelSaid(g, 4, 'Beta is frozen solid!'));
+  assert.strictEqual(r1Row(g, 5, 1).rng, 9801, 'a confusion counter of 1 snaps out with no byte');
+  assert.notStrictEqual(r1Row(g, 6, 1).rng, 9801, 'one still confused draws its self-hit byte');
+  assert.ok(duelSaid(g, 7, "Alpha's attack missed!"), 'COUNTER refuses a Fire hit...');
+  assert.ok(duelSaid(g, 8, "Beta's unaffected!"), "an OHKO into a faster target: UnaffectedText");
+  assert.strictEqual(r1Row(g, 8, 1).rng, r1Row(g, 6, 1).rng, '...after its one crit byte');
+});
+
+test("the computer never spends or reads its PP; a link foe does", () => {
+  const g = 'g1_computer_pp';
+  assert.deepStrictEqual([1, 2, 3].map((t) => r1Seat(g, 1, t, 3).moves), ['thump:1', 'thump:1', 'thump:1']);
+  assert.strictEqual(duelTexts(g, 1).filter((x) => x === 'Beta used thump!').length, 3);
+  assert.ok(duelSaid(g, 2, 'Beta used thump!') && !duelSaid(g, 2, 'Beta used STRUGGLE!'),
+    'a 0-PP move is picked and used, never STRUGGLE');
+  assert.ok(duelSaid(g, 3, 'Beta used STRUGGLE!'), 'one move, disabled: STRUGGLE');
+  assert.deepStrictEqual(duelTexts(g, 4).filter((x) => x.startsWith('Beta used')),
+    ['Beta used thump!', 'Beta used STRUGGLE!'], 'a link foe spends its PP and Struggles');
+});
+
+test('a doll stops only the stat drops, PoisonEffect and ConfusionEffect', () => {
+  const g = 'g1_doll_status';
+  assert.deepStrictEqual([r1Seat(g, 1, 1, 3).status, r1Seat(g, 1, 1, 3).sub], ['sleep', 50], 'SLEEP lands');
+  assert.strictEqual(r1Seat(g, 2, 1, 3).status, 'paralysis', 'THUNDER WAVE lands');
+  assert.ok(r1Seat(g, 3, 1, 3).flags.includes('s'), 'LEECH SEED lands');
+  assert.strictEqual(r1Seat(g, 4, 1, 0).transformed, true, 'TRANSFORM copies');
+  assert.ok(duelSaid(g, 5, 'Alpha learned splash!'), 'MIMIC copies');
+  assert.ok(duelSaid(g, 6, 'But, it failed!') && r1Row(g, 6, 1).rng === 9821,
+    'CONFUSE RAY fails on CheckTargetSubstitute, before its accuracy byte');
+});
+
+test('SleepEffect: a recharging target sleeps past every check; Paralyze / Leech Seed turn types away', () => {
+  const g = 'g1_sleep_effect';
+  assert.ok(duelSaid(g, 1, 'Beta fell asleep!'), 'an accuracy-0 SLEEP lands on the recharging Beta');
+  assert.deepStrictEqual([r1Seat(g, 1, 1, 3).status, r1Seat(g, 1, 1, 3).recharge], ['sleep', false],
+    '...its POISON overwritten and its recharge gone');
+  assert.ok(duelSaid(g, 1, "Beta's already asleep!"), 'turn 2: already asleep');
+  assert.strictEqual(r1Row(g, 1, 2).rng, r1Row(g, 1, 1).rng, '...with no byte');
+  assert.ok(duelSaid(g, 2, "Beta's already asleep!") && r1Row(g, 2, 1).rng === 9831);
+  assert.ok(duelSaid(g, 3, "It didn't affect Beta!") && r1Row(g, 3, 1).rng === 9831,
+    'a poisoned target: no byte');
+  assert.ok(duelSaid(g, 4, "It doesn't affect Beta!") && r1Row(g, 4, 1).rng === 9831,
+    'an ELECTRIC THUNDER WAVE into a GROUND type, before its byte');
+  assert.ok(duelSaid(g, 5, 'Beta evaded attack!') && !r1Seat(g, 5, 1, 3).flags.includes('s'),
+    'LEECH SEED into a GRASS type evades, after its byte');
+});
+
+test("MIMIC: the player's pick against the computer, a random one otherwise, MIMIC back at the switch-out", () => {
+  const g = 'g1_mimic';
+  assert.ok(duelSaid(g, 1, 'Alpha learned chop!'), 'the pick, row 2');
+  assert.deepStrictEqual([1, 2, 3, 4].map((t) => r1Seat(g, 1, t, 0).moves),
+    ['chop:9,tap:60', 'chop:8,tap:60', 'copy:8,tap:60', 'copy:8,tap:60'],
+    "the copy keeps MIMIC's PP, and the party's MIMIC comes back at the slot's PP");
+  assert.ok(duelSaid(g, 2, 'Alpha learned thump!'), 'no pick: the cursor\'s first row');
+  assert.strictEqual(r1Row(g, 2, 1).rng, r1Row(g, 1, 1).rng, '...no draw but its accuracy byte');
+  assert.ok(duelSaid(g, 3, 'Beta learned tap!'), "the computer's MIMIC draws");
+  assert.ok(duelSaid(g, 4, 'Alpha learned slam!'), 'a link fight draws whatever the seat asked');
+});
+
+test('FOCUS ENERGY and MIST fail when already up; SPLASH says No effect!', () => {
+  const t = duelTexts('g1_already_up', 1);
+  assert.deepStrictEqual(t.filter((x) => x.startsWith('Alpha')).slice(0, 2),
+    ['Alpha used pump!', "Alpha's getting pumped!"]);
+  assert.strictEqual(t.filter((x) => x === 'But, it failed!').length, 2, 'the second of each fails');
+  assert.ok(t.includes('No effect!') && !t.includes('But nothing happened'));
+});
+
+test("SwitchAndTeleportEffect: the level roll in a wild fight, the trainer's refusal", () => {
+  const g = 'g1_teleport';
+  assert.ok(duelSaid(g, 1, 'Alpha ran from battle!') && r1Row(g, 1, 1).rng === 9861,
+    'a user at or above its target\'s level escapes with no roll');
+  assert.strictEqual(duelTexts(g, 2).filter((x) => x === 'But, it failed!').length, 2,
+    'a level-5 TELEPORT from a level-90 Beta fails its roll twice');
+  assert.ok(duelSaid(g, 2, 'Alpha ran from battle!'), '...and then gets away');
+  assert.strictEqual(duelTexts(g, 3).filter((x) => x === "It didn't affect Alpha!").length, 2);
+  assert.ok(duelSaid(g, 3, 'Alpha ran away scared!'));
+  // ROAR blows its TARGET away: the runner is Alpha's seat, so Beta's wins
+  // (FX-R1; it was the user's seat).
+  assert.deepStrictEqual([r1End(g, 2).reason, r1End(g, 3).winner], ['run', 'p2']);
+  // The only byte that turn is the trainer's TrainerAI byte (GenericAI, K16).
+  const aiByte = G1bRng.create(9863);
+  aiByte.byte();
+  assert.ok(duelSaid(g, 4, 'Alpha is unaffected!') && duelSaid(g, 4, 'But, it failed!')
+    && r1Row(g, 4, 1).rng === aiByte.state(), 'a trainer fight: ROAR and TELEPORT fail, no roll');
+  assert.ok(duelSaid(g, 5, 'Beta was blown away!'));
+});
+
+test("the trap is the trapper's: held on the first turn, its later hits in its slot", () => {
+  const g = 'g1_trap_turns';
+  const t1 = duelTexts(g, 1);
+  assert.deepStrictEqual(t1.slice(0, 3), ['Alpha used wrap!', "Beta can't move!", "Alpha's attack continues!"],
+    'the slower Beta is held on the first turn, then CANNOT_MOVE without a word');
+  assert.ok(!t1.includes('Beta used thump!'), 'Beta never moves while held');
+  assert.ok(duelSaid(g, 2, 'Beta used thump!'), 'a faster Beta moves before the Wrap starts');
+  const e3 = duelEvents(g, 3).filter((e) => e.t === 'damage');
+  assert.ok(duelSaid(g, 3, "Alpha's attack continues!") && e3.every((e) => e.amount === 0),
+    "an immunity's trap: the continues line and a 0 hit, nothing more");
+  assert.ok(!duelTexts(g, 3).some((x) => x.includes('trap')), 'no "hurt by the trap"');
+  const t4 = duelTexts(g, 4);
+  assert.ok(t4.includes('Beta is fast asleep!') && !t4.includes("Beta can't move!"),
+    'a sleeping held Beta ticks its sleep in its slot');
+  assert.strictEqual(t4.filter((x) => x === 'Alpha used wrap!').length, 2,
+    'its switch to Delta lets the trap go: Alpha uses WRAP fresh');
+  assert.ok(duelSaid(g, 5, 'Beta is fast asleep!') && duelSaid(g, 5, 'Beta must recharge!'),
+    'asleep, the recharge waits; it recharges after it wakes');
+  assert.strictEqual(r1Seat(g, 5, 2, 3).recharge, true, '...still pending on the waking turn');
+  assert.ok(duelSaid(g, 6, "Delta can't move!"), 'Delta comes out free and is wrapped afresh');
+});
+
+test('a switch, an item and a recharge still meet the Speed compare', () => {
+  const g = 'g1_tie_actions';
+  assert.notStrictEqual(r1Row(g, 1, 1).rng, 9881, '40 against 40: the tie byte');
+  assert.strictEqual(r1Row(g, 2, 1).rng, 9881, '90 against 10: none');
+  assert.ok(duelSaid(g, 3, 'Alpha must recharge!'), 'the recharge turn is in the order');
+});
+
+test('TOXIC is plain poison on the bench', () => {
+  const g = 'g1_toxic_bench';
+  assert.deepStrictEqual([1, 2, 3].map((t) => r1Seat(g, 1, t, 0, 1).status), ['toxic', 'poison', 'poison']);
+  assert.deepStrictEqual(duelEvents(g, 1).filter((e) => e.t === 'damage' && e.slot === 0)
+    .map((e) => e.amount), [75, 25, 25], 'three sixteenths x the counter, then a sixteenth');
+});
+
+test('an escape after a faint of the player\'s pays no Pay Day', () => {
+  const g = 'g1_pay_day_faint';
+  assert.ok(duelSaid(g, 1, 'Coins scattered everywhere!') && duelSaid(g, 1, 'Gamma ran from battle!'));
+  assert.deepStrictEqual([r1End(g, 1).reason, r1End(g, 1).payDay], ['run', 0]);
+});
+
+// ------------------------------------------------------------------
+// R1d (wave 4): the battle menu through a lock-in, the cart's message order,
+// the charge's PP, a coop_wild RUN, Haze's lasting CANNOT_MOVE and the chart's
+// row order -- asserted off the JS half of the parity scenarios above.
+// ------------------------------------------------------------------
+
+test("a player's Bide, trap and hold keep the battle menu; the computer re-picks", () => {
+  const g = 'g1_menu_lockin';
+  const t1 = duelTexts(g, 1);
+  assert.deepStrictEqual(t1.slice(0, 3), ['Alpha used wrap!', "Beta can't move!", "Alpha's attack continues!"],
+    'FIGHT naming no slot: the continuation, and the held Beta silent');
+  assert.strictEqual(t1.filter((x) => x === 'Alpha used wrap!').length, 2,
+    "Beta's switch to Delta lets the trap go: Alpha's slot runs WRAP fresh at Delta");
+  assert.ok(!t1.includes('Beta used thump!') && !t1.includes('Delta used thump!'), 'nobody held moves');
+  const t2 = duelTexts(g, 2);
+  // ItemUseText00 names the item (R1e): "<PLAYER> used <ITEM>!".
+  assert.strictEqual(t2.filter((x) => x === 'p1 used X ATTACK!').length, 4, 'four items');
+  assert.strictEqual(t2.filter((x) => x === "Alpha's attack continues!").length, 0,
+    'an item turn is not a continuation');
+  assert.deepStrictEqual([1, 2, 3, 4].map((t) => r1Seat(g, 2, t, 0).trapping), ['4', '3', '2', '1'],
+    'each item takes a step off the counter');
+  assert.ok(t2.includes('Beta used thump!'),
+    'the turn the step reaches 0 the held wild Beta is free, re-picks and moves');
+  assert.strictEqual(r1Seat(g, 2, 5, 3).trapped, '', '...and is held by nothing');
+  const t3 = duelTexts(g, 3);
+  assert.deepStrictEqual(t3.slice(0, 3), ['Beta used wrap!', "Alpha can't move!", 'Beta used slam!'],
+    "Alpha's switch lets the wild trap go: SelectEnemyMove picks SLAM, not WRAP run fresh");
+  const t4 = duelTexts(g, 4);
+  assert.ok(!t4.some((x) => x.includes('energy') && x !== 'Alpha unleashed energy!'),
+    'BIDE says nothing past its used line, and the store turns nothing at all');
+  assert.strictEqual(r1Seat(g, 4, 2, 0).bide, r1Seat(g, 4, 1, 0).bide, 'an item stalls the Bide');
+  assert.ok(duelSaid(g, 4, 'Alpha unleashed energy!'), '...which still unleashes');
+  assert.strictEqual(duelTexts(g, 5).filter((x) => x === 'Alpha used BIDE!').length, 2,
+    'a switch drops the Bide; back out, Alpha uses BIDE afresh');
+  assert.strictEqual(r1Seat(g, 5, 3, 0, 1).bide, '', '...Alpha comes back with no Bide');
+  assert.strictEqual(duelTexts(g, 6).filter((x) => x === 'Beta is fast asleep!').length, 2,
+    'asleep, FIGHT naming a 0-PP slot is taken: the gate stops it every turn');
+});
+
+test('a charge turn is the charge line alone; the release says "used" and pays', () => {
+  const g = 'g1_charge_turn';
+  const e1 = duelEvents(g, 1);
+  assert.ok(!duelSaid(g, 1, 'Alpha used FLY!') || duelTexts(g, 1).indexOf('Alpha used FLY!')
+    > duelTexts(g, 1).indexOf('Alpha flew up high!'), 'no used line before the charge line!');
+  assert.strictEqual(duelTexts(g, 1).filter((x) => x === 'Alpha used FLY!').length, 1, 'one used line, the release');
+  assert.strictEqual(r1Seat(g, 1, 1, 0).moves, 'FLY:10', 'no PP on the charge turn');
+  assert.strictEqual(r1Seat(g, 1, 2, 0).moves, 'FLY:9', 'the release pays');
+  // ChargeEffect's FLY: TELEPORT's animation, a look and not a move (K22's
+  // `quiet`), still the setup beat; the release plays FLY.
+  assert.ok(e1.some((e) => e.t === 'anim' && e.text === 'TELEPORT' && e.amount === 1
+    && e.quiet === true), 'the vanish beat');
+  assert.ok(e1.some((e) => e.t === 'anim' && e.text === 'FLY' && e.amount === undefined),
+    'the release animates FLY');
+  assert.ok(duelSaid(g, 2, "Alpha's fully paralyzed!"), 'battle 2: paralysed on the release');
+  assert.deepStrictEqual([r1Seat(g, 2, 2, 0).moves, r1Seat(g, 2, 2, 0).charging], ['SOLARBEAM:10', false],
+    '...the charge is gone and nothing was paid');
+  assert.strictEqual(duelTexts(g, 3).filter((x) => x === 'Beta used FLY!').length, 1);
+  assert.strictEqual(r1Seat(g, 3, 2, 3).moves, 'FLY:10', "the computer's PP is never spent");
+});
+
+test('a PETAL DANCE continuation animates as THRASH', () => {
+  const anims = duelEvents('g1_thrash_anim', 1).filter((e) => e.t === 'anim' && e.slot === 0)
+    .map((e) => e.text);
+  // The first turn's ThrashPetalDanceEffect adds SHRINKING_SQUARE_ANIM, ahead
+  // of the move's own animation (SpecialEffectsCont runs before MoveHitTest).
+  assert.deepStrictEqual(anims.slice(0, 4),
+    ['SHRINKING_SQUARE_ANIM', 'PETAL_DANCE', 'THRASH', 'THRASH']);
+});
+
+test('the crit and effectiveness lines follow the hit; One-hit KO!', () => {
+  const g = 'g1_hit_lines';
+  const lines = (at) => duelEvents(g, at).filter((e) => (e.t === 'damage' && e.slot === 3)
+    || e.t === 'faint' || (e.t === 'msg' && !e.text.includes(' used ') && !e.text.includes('No effect')))
+    .map((e) => (e.t === 'msg' ? e.text : e.t));
+  assert.deepStrictEqual(lines(1), ['damage', 'Critical hit!', "It's super effective!", 'damage',
+    "It's super effective!", 'Hit the enemy 2 times!'], 'crit once, effectiveness every hit');
+  assert.deepStrictEqual(lines(2), ['damage', "It's super effective!", 'faint'], 'the line before the faint');
+  assert.deepStrictEqual(lines(3), ['damage', 'One-hit KO!', "It's super effective!", 'faint']);
+});
+
+test('coop_wild RUN rolls the cart\'s odds; solo wild is the client\'s', () => {
+  const g = 'g1_coop_run';
+  const t1 = duelTexts(g, 1);
+  assert.strictEqual(t1.filter((x) => x === "Can't escape!").length, 3, 'odds 12, 42, 72 fail on this seed');
+  assert.strictEqual(t1[t1.length - 1], 'Got away safely!', '...102 gets away');
+  assert.ok(t1.includes('Gamma used tap!'), 'a failed try spends only the runner\'s turn');
+  assert.deepStrictEqual([r1End(g, 1).reason, r1End(g, 1).outcome], ['run', 'win']);
+  assert.ok(duelSaid(g, 2, 'Got away safely!') && r1Row(g, 2, 1).rng === 9952, 'faster: no byte');
+  assert.ok(duelSaid(g, 3, 'Got away safely!') && r1Row(g, 3, 1).rng === 9953, 'divisor 0: no byte');
+  assert.deepStrictEqual(duelTexts(g, 4), [], "solo wild: the referee says nothing, the client rolled");
+  assert.strictEqual(r1End(g, 4).reason, 'run');
+});
+
+test("Haze's CANNOT_MOVE stands until a move menu writes over it", () => {
+  const g = 'g1_haze_lock';
+  assert.ok(!duelTexts(g, 1).some((x) => x.startsWith('Beta')), 'the thawed recharger never acts again');
+  assert.strictEqual(r1Seat(g, 1, 3, 3).recharge, true, '...and never recharges');
+  assert.ok(duelSaid(g, 2, 'Beta used tap!'), 'a thawed Beta with nothing forced picks afresh');
+  assert.ok(!duelTexts(g, 3).some((x) => x.startsWith('Beta')), 'a thawed raging player never acts again');
+});
+
+test("the chart's row order: the last row's line, the rows' rounding", () => {
+  const g = 'g1_chart_order';
+  assert.ok(duelSaid(g, 1, "Alpha's attack missed!") && !duelSaid(g, 1, "It doesn't affect Beta!"),
+    "immunity row first, a 2x after it: \"<USER>'s attack missed!\"");
+  assert.ok(duelSaid(g, 2, "It doesn't affect Beta!"), 'the immunity row last');
+  assert.ok(duelSaid(g, 3, "It doesn't affect Beta!"), 'no order: any immunity');
+  assert.ok(duelSaid(g, 4, "It's not very effective..."), '2x then 0.5x: the last row');
+  assert.ok(duelSaid(g, 5, "It's super effective!"), '0.5x then 2x: the last row');
+  assert.ok(!duelTexts(g, 6).some((x) => x.includes('effective')), 'no order: the product, no line');
+  assert.deepStrictEqual([4, 5, 6].map((at) => duelHits(g, at)[0]), ['3:8:392', '3:7:393', '3:8:392'],
+    'halving first loses the odd point');
+});
+
+// ------------------------------------------------------------------
+// R1e: each rule against pokered, on the JS half of the R1e scenarios (the
+// parity tests above hold the Lua half to the same streams;
+// tests/battle_sim_turn.lua's R1e section forces the bytes).
+// ------------------------------------------------------------------
+
+test("AttackSubstitute: SubstituteTookDamageText on every hit, naming the doll's owner", () => {
+  const g = 'g1_sub_lines';
+  const t1 = duelTexts(g, 1);
+  assert.strictEqual(t1.filter((x) => x === 'The SUBSTITUTE took damage for Beta!').length, 2,
+    'both DOUBLE KICK hits');
+  assert.ok(t1.indexOf("Beta's SUBSTITUTE broke!") > t1.lastIndexOf('The SUBSTITUTE took damage for Beta!'),
+    'the line, then the break');
+  const t2 = duelTexts(g, 2);
+  const hurt = t2.indexOf('It hurt itself in its confusion!');
+  assert.ok(hurt >= 0 && t2[hurt + 1] === 'The SUBSTITUTE took damage for Beta!',
+    "a self-hit behind Alpha's doll: the line names Beta, whose doll takes it");
+  assert.deepStrictEqual(duelTexts(g, 3).slice(1, 3),
+    ['The SUBSTITUTE took damage for Beta!', "Beta's SUBSTITUTE broke!"], 'past 255: the line, then the break');
+});
+
+test("DecrementPP wraps at 0; IncrementMovePP refunds a call", () => {
+  const g = 'g1_pp_wrap';
+  assert.strictEqual(r1Seat(g, 1, 2, 0).moves, 'wrap:63', "a released trap's fresh run at 0 PP: 63");
+  assert.strictEqual(r1Seat(g, 1, 3, 0).moves, 'wrap:63', '...the next WRAP is the trap\'s continuation, no spend');
+  assert.ok(duelSaid(g, 2, 'Fire defrosted Alpha!') && duelSaid(g, 2, 'Alpha used thump!'),
+    'thawed before its slot, Alpha runs last turn\'s selection');
+  assert.strictEqual(r1Seat(g, 2, 2, 0).moves, 'thump:63,tap:60', '...at 0 PP: 63, the menu\'s TAP untouched');
+  assert.strictEqual(r1Seat(g, 3, 1, 0).moves, 'METRONOME:60', 'the called FLY refunds the call');
+  assert.ok(duelSaid(g, 3, "Alpha's fully paralyzed!"), 'the release is cancelled');
+  assert.strictEqual(r1Seat(g, 3, 2, 0).moves, 'METRONOME:60', '...and the refund stands');
+  assert.strictEqual(r1Seat(g, 3, 4, 0).moves, 'METRONOME:59', 'a release that lands pays it');
+  assert.strictEqual(r1Seat(g, 4, 2, 0).moves, 'METRONOME:4', "the copied METRONOME nets one spent");
+  assert.strictEqual(r1Seat(g, 4, 3, 0).moves, 'morph:10,splash:60',
+    "the party's own slot 1 gained the refund (9 + 1), shown once it is itself");
+  assert.deepStrictEqual([1, 2].map((t) => r1Seat(g, 5, t, 3).moves), ['METRONOME:61', 'METRONOME:62'],
+    "the computer's METRONOME is refunded every call and never spent");
+});
+
+test('a trainer RUN files nothing and the turn waits for the real answer', () => {
+  const g = 'g1_npc_run';
+  assert.strictEqual(r1Row(g, 1, 1).rng, 10001, 'the refused RUN draws nothing, resolves nothing');
+  assert.ok(!duelSaid(g, 1, "No! There's no running from a trainer battle!"), 'no line from the referee');
+  assert.strictEqual(duelTexts(g, 1).filter((x) => x === 'Alpha used thump!').length, 2,
+    'the second row\'s FIGHT resolves turn 1, the third turn 2');
+});
+
+test('COUNTER reads the selection for COUNTER and the move struct for power and type', () => {
+  const g = 'g1_counter_struct';
+  assert.deepStrictEqual(duelHits(g, 1).slice(-1), ['3:6:394'],
+    'Beta switched: its struct is still THUMP, so COUNTER hits Delta for twice wDamage');
+  assert.deepStrictEqual(duelHits(g, 2).slice(2, 4), ['0:12:388', '3:24:370'],
+    "a Bide's unleash (power 1, BIDE's Normal type) is countered");
+  assert.ok(duelTexts(g, 2).slice(-1)[0] === "Alpha's attack missed!",
+    '...and a fresh BIDE (power 0) is not');
+  assert.deepStrictEqual(duelHits(g, 3).slice(-1), ['3:8:373'],
+    'a held Beta (CANNOT_MOVE) is countered off its struct and the wrap\'s wDamage');
+  // (K16: GenericAI's TrainerAI byte in Beta's slot moved the stream -- the
+  // KARATE that is countered now rolls 17, so COUNTER's 34.)
+  assert.ok(duelHits(g, 4).includes('3:34:348'), "the trainer's KARATE (type 1, 50) is countered");
+  assert.deepStrictEqual([duelRowSeat(g, 1, 1, 3).sp, duelRowSeat(g, 1, 1, 3).st], [10, 0],
+    "Beta's struct after its switch: THUMP's power and type");
+});
+
+test('the status animations: SLP / CONF, the PLAYER variant on a player seat, and BURN_PSN_ANIM', () => {
+  const g = 'g1_status_anims';
+  const anims = (at) => duelEvents(g, at).filter((e) => e.t === 'anim' || e.t === 'msg')
+    .map((e) => (e.t === 'anim' ? `@${e.text}:${e.slot}` : e.text));
+  const a1 = anims(1);
+  assert.deepStrictEqual(a1.slice(0, 4), ['@SLP_PLAYER_ANIM:0', 'Alpha is fast asleep!',
+    'Beta is fast asleep!', '@SLP_ANIM:3'], "the player's before its line, the computer's after");
+  const a2 = anims(2);
+  assert.deepStrictEqual(a2.slice(0, 2), ['Alpha is confused!', '@CONF_PLAYER_ANIM:0']);
+  assert.ok(a2.includes('@CONF_ANIM:3'), "the computer's confusion");
+  const burn = a2.indexOf("Beta's hurt by the burn!");
+  assert.strictEqual(a2[burn + 1], '@BURN_PSN_ANIM:3', 'BURN_PSN_ANIM after the line');
+  const a3 = anims(3);
+  assert.ok(a3.includes('@SLP_PLAYER_ANIM:0') && a3.includes('@CONF_PLAYER_ANIM:3'),
+    'a link fight: both seats are players');
+});
+
+test("the computer's move choice: .chooseRandomMove and AIEnemyTrainerChooseMoves", () => {
+  const g = 'g1_cart_pick';
+  assert.ok(r1Row(g, 1, 1).rng !== 10031, 'the wild pick draws');
+  assert.ok(!duelTexts(g, 2).includes('Beta used chop!'), 'the disabled slot is redrawn past');
+  assert.ok(!duelTexts(g, 3).some((x) => x === 'Beta used lull!' || x === 'Beta used toxin!'),
+    'layer 1 against a statused target: the status moves never picked');
+  assert.deepStrictEqual(duelTexts(g, 4).filter((x) => x.startsWith('Beta used')),
+    ['Beta used zap!', 'Beta used grow!', 'Beta used zap!', 'Beta used zap!'],
+    'layer 3 leaves ZAP alone; layer 2 lets GROW tie it on the second selection only');
+  assert.deepStrictEqual([1, 2, 3].map((t) => duelRowSeat(g, 1, t, 3).ai), [1, 2, 3],
+    'wAILayer2Encouragement counts the executed turns');
+  assert.strictEqual(duelRowSeat(g, 6, 2, 3).ai, 0, "ReplaceFaintedEnemyMon zeroes it");
+  assert.ok(duelSaid(g, 6, 'Kappa used grow!'), 'the second selection of n2 encourages GROW');
+});
+
+test('HealEffect_: REST, RECOVER, and the compare that fails 255 short', () => {
+  const g = 'g1_heal';
+  assert.deepStrictEqual(duelTexts(g, 1).slice(0, 3),
+    ['Alpha used REST!', 'Alpha fell asleep and became healthy!', 'Alpha regained health!']);
+  assert.strictEqual(r1Seat(g, 1, 1, 0).hp, 400, 'REST heals to the full');
+  assert.ok(duelSaid(g, 1, 'Alpha woke up!') && r1Seat(g, 1, 3, 0).status === '', 'two turns asleep');
+  assert.ok(duelSaid(g, 2, 'But, it failed!'), 'RECOVER at full HP fails');
+  assert.ok(duelSaid(g, 3, 'But, it failed!') && r1Seat(g, 3, 1, 0).hp === 145, '255 short fails too');
+  assert.strictEqual(r1Seat(g, 4, 1, 0).hp, 344, '256 short heals half the maximum');
+  assert.ok(duelSaid(g, 5, 'Alpha started sleeping!'), 'REST with no status');
+});
+
+test('the item lines, and Full Restore leaves confusion and the toxic bit', () => {
+  const g = 'g1_item_lines';
+  const t1 = duelTexts(g, 1);
+  for (const line of ['Alpha recovered by 20!', 'Alpha was cured of poison!', 'p1 used X ATTACK!',
+    "Alpha's ATTACK rose!", 'p1 played the POKé FLUTE.', 'All sleeping POKéMON woke up.',
+    'p1 used POKé BALL!', 'All right! Beta was caught!']) {
+    assert.ok(t1.includes(line), line);
+  }
+  assert.ok(!t1.some((x) => x.includes('used POTION') || x.includes('used ANTIDOTE')),
+    'the party menu items print no "used" line');
+  assert.deepStrictEqual([r1Seat(g, 2, 1, 0).linger, r1Seat(g, 2, 1, 0).conf], [true, 5],
+    "FULL RESTORE's `.healHP`: the toxic bit lingers, the confusion stays");
+  assert.ok(duelSaid(g, 3, 'p2 used POTION on Beta!'), "the trainer's item: AIPrintItemUse");
+});
+
+test('Conversion copies both of the target\'s types', () => {
+  assert.strictEqual(r1Seat('g1_conversion', 1, 1, 0).types, '2,3');
+  assert.ok(duelSaid('g1_conversion', 1, "Converted type to Beta's!"));
+});
+
+// RP1: the g1_pp_max streams, stated as claims (the parity tests hold the Lua
+// half to them).  Each `moves` row of Ann's: "pp/maxPp/ppUps" per slot.
+test('GetMaxPP through a wrap, .restorePP, K8 PP Ups on the moves rows, and POKé', () => {
+  const g = 'g1_pp_max';
+  const rows = (at) => duelEvents(g, at).filter((e) => e.t === 'moves' && e.side === 'a')
+    .map((e) => e.moves.map((m) => `${m.pp}/${m.maxPp}/${m.ppUps}`).join(','));
+  const NO_EFFECT = "It won't have any effect.";
+  const refused = (at) => jsRun(g).probes.filter((p) => p.at === at && p.refused !== undefined)
+    .map((p) => `${p.turn}:${p.refused}`);
+  assert.deepStrictEqual(rows(1), ['62/35/0', '35/35/0', '34/35/0'],
+    'a slot past its wrap keeps the stated GetMaxPP; the ETHER brings it down to it');
+  assert.deepStrictEqual(duelTexts(g, 1).filter((x) => x === 'PP was restored.' || x === NO_EFFECT),
+    ['PP was restored.'], '...restored once; the second is `.noEffect` -> `.itemNotUsed` (FX-R1)');
+  assert.deepStrictEqual(refused(1), ['3:p1'],
+    '...which hands the item and the turn back: refused unfiled, the FIGHT after it is the turn');
+  assert.deepStrictEqual(rows(2), ['0/18/1,60/60/0', '63/15/0,60/60/0', '15/15/0,60/60/0'],
+    'the borrow: one PP Up fewer on the row, GetMaxPP 15 over none, and the ETHER to 15');
+  assert.deepStrictEqual(rows(3), ['20/20/1,15/15/0', '19/20/1,15/15/0', '20/20/1,15/15/0'],
+    'MAX ETHER and MAX ELIXER on a full move with a PP Up: the whole-byte compare restores');
+  assert.deepStrictEqual(duelTexts(g, 3).filter((x) => x === 'PP was restored.' || x === NO_EFFECT),
+    ['PP was restored.', 'PP was restored.'], '...and a full move with none is no effect:');
+  assert.deepStrictEqual(refused(3), ['2:p1'], '...refused unfiled (FX-R1)');
+  assert.ok(duelSaid(g, 4, 'p1 used POKé DOLL!'), 'the doll: data/items/names.asm "POKé DOLL"');
+  // PlayedFluteNoEffectText's `para` is a line of its own (K18).
+  assert.ok(duelSaid(g, 5, 'Played the POKé FLUTE.'), 'PlayedFluteNoEffectText');
+  assert.ok(duelSaid(g, 5, "Now, that's a catchy tune!"), '...and its second paragraph');
+  assert.ok(duelSaid(g, 6, 'p1 used POKé BALL!') && duelSaid(g, 6, 'You missed the POKéMON!'),
+    'ItemUseBallText01');
+  assert.ok(duelSaid(g, 7, 'Darn! The POKéMON broke free!'), 'ItemUseBallText02');
+});
+
+// FX-R1: the g1_fx_r1 streams, stated as claims (the parity tests hold the Lua
+// half to them).
+test('FX-R1: evasion, send-out, balls, slot residuals, PSYWAVE, OHKO, ETHER, refusals, black-out', () => {
+  const g = 'g1_fx_r1';
+  const hits = (at) => duelEvents(g, at).filter((e) => e.t === 'damage' && e.side === 'b').length;
+  assert.strictEqual(hits(1), 1, 'evasion +6 reads the 25/100 ratio (`c = 14 - EVASIONMOD`): 1 of 4');
+  assert.strictEqual(hits(2), 4, 'evasion -6 reads 400/100, held at 255: 4 of 4');
+  assert.deepStrictEqual([1, 2, 3].map((t) => r1Seat(g, 3, t, 0).conf), [4, 4, 2],
+    'Alpha confused, switched out and back');
+  assert.strictEqual(duelTexts(g, 3).filter((x) => x === 'Alpha became confused!').length, 2,
+    'SendOutMon cleared CONFUSED: SUPERSONIC confuses Alpha again');
+  assert.ok(duelSaid(g, 4, 'All right! Beta was caught!') && r1End(g, 4).reason === 'catch',
+    'GREAT / ULTRA BALL: Rand1 redrawn into 0..200 / 0..150');
+  const t5 = duelTexts(g, 5);
+  assert.ok(t5.includes("Alpha's hurt by poison!") && !t5.includes('Beta used growl!'),
+    "Alpha's poison right after its slot takes its last HP: Beta never moves");
+  assert.deepStrictEqual([r1End(g, 5).outcome, r1End(g, 5).winner], ['win', 'p2']);
+  assert.ok(!duelEvents(g, 6).slice(0, duelEvents(g, 6).findIndex((e) => e.t === 'switch'))
+    .some((e) => e.t === 'msg' && e.text === "Alpha's hurt by poison!"),
+  'a slot that KOs the foe skips the knocker-out\'s residual');
+  assert.ok(duelSaid(g, 6, "Alpha's hurt by poison!"), '...and it ticks on the next turn');
+  assert.strictEqual(duelTexts(g, 7).filter((x) => x === 'Beta is fast asleep!').length, 1,
+    "Alpha's EXPLOSION ends the turn before the sleeping Beta's slot");
+  assert.ok(duelHits(g, 8).filter((h) => h.endsWith(':0:300') || h.endsWith(':0:296')).length >= 1,
+    "the computer's PSYWAVE draws from [0, b): a 0 lands");
+  assert.deepStrictEqual([r1Row(g, 9, 1).last, r1Seat(g, 9, 1, 3).sub, r1Seat(g, 9, 1, 3).hp],
+    [29553, 0, 30], 'an OHKO into a doll: 65535 through STAB and the roll breaks it outright');
+  assert.strictEqual(r1Row(g, 9, 2).last, 30, '...and the next takes the HP left (overkill)');
+  assert.deepStrictEqual([r1Seat(g, 10, 2, 0).moves, r1Seat(g, 10, 2, 0).transformed],
+    ['thump:5,chop:0', true], "ETHER on a TRANSFORMed monster: its own move, copied over the copies'");
+  const refused = (at) => jsRun(g).probes.filter((p) => p.at === at && p.refused !== undefined)
+    .map((p) => `${p.turn}:${p.refused}`);
+  assert.deepStrictEqual(refused(10), ['3:p1'], '...so a FIGHT on the emptied chop is refused');
+  assert.deepStrictEqual(refused(11), ['1:p1', '2:p1', '3:p1'],
+    'ItemUseFailed: a POTION at full HP, an ANTIDOTE with no poison, a POKé DOLL in a trainer fight');
+  assert.ok(!duelEvents(g, 11).some((e) => e.t === 'item'), '...none of them is used');
+  assert.deepStrictEqual([r1End(g, 12).outcome, r1End(g, 12).winner], ['win', 'p2'],
+    'both last monsters down against the computer: the player blacks out');
+  assert.deepStrictEqual([r1End(g, 13).outcome, r1End(g, 13).winner], ['draw', ''],
+    '...and in a link fight both carts black out: a draw');
+});
+
+// FX-R1: a learned row the hub laid in mid-fight (nextMoves12 takes a new
+// move's row whole -- a GetMaxPP and no base): DecrementPP's wrap reads the
+// base off the maximum it states, over the PP Ups it had before the step.
+// Twin of tests/battle_sim_turn.lua's 12b.
+test('FX-R1: a learned row without a base re-reads GetMaxPP through a wrap', () => {
+  const battle = build({
+    id: 'fxpp', mode: '1v1', seed: 12345, choiceTimeout: 60, reconnectGrace: 60,
+    sides: {
+      a: [{ playerId: 'p1', name: 'Ann', mons: [mn({ species: 'Alpha', moves: [mv('thump', 40, 255, 0)] })] }],
+      b: [{ playerId: 'p2', name: 'Bob', mons: [mn({ species: 'Beta', moves: [mv('thump', 40, 255, 0)] })] }],
+    },
+  });
+  battle.drainEvents();
+  const alpha = battle.byId.get('p1').mons[0];
+  alpha.moves[1] = { id: 'learned', pp: 0, ppUps: 1, maxPp: 18, power: 10,
+    accuracy: 255, type: 0, effect: 0, chance: 0 };
+  battle._decrementPp(alpha, 2);
+  const row = alpha.moves[1];
+  assert.strictEqual(`${row.pp}/${row.ppUps}/${row.maxPp}`, '63/0/15',
+    "a learned row's wrap: GetMaxPP re-read over the base its 18 named (15 + 3)");
+  assert.strictEqual(row.basePp, 15, '...the base kept on the row');
+});
+
+// ------------------------------------------------------------------
+// Contracts K17-K20: the g1_marks_faints streams, read raw -- the marks and
+// the breaks are what these pin (the parity tests hold the Lua half to the
+// same bytes). Twin of tests/battle_sim_turn.lua's 30.
+// ------------------------------------------------------------------
+
+const rawFight = (at) => {
+  const run = jsRunsRaw.find((entry) => entry.name === 'g1_marks_faints');
+  return run.events.filter((e) => e.battle === `g1mf${at}`);
+};
+const indexWhere = (list, pred) => {
+  const i = list.findIndex(pred);
+  return i < 0 ? null : i;
+};
+const lineAt = (list, text) => indexWhere(list, (e) => e.t === 'msg' && e.text === text);
+const kindAt = (list, t, slot, text) => indexWhere(list, (e) => e.t === t
+  && (slot === undefined || e.slot === slot) && (text === undefined || e.text === text));
+const inOrder = (...at) => at.every((v) => v !== null)
+  && at.every((v, i) => i === 0 || at[i - 1] < v);
+// The last `team` for a seat: the roster after its faint, not the opening one.
+const lastTeam = (list, slot) => {
+  for (let i = list.length - 1; i >= 0; i -= 1) {
+    if (list[i].t === 'team' && list[i].slot === slot) return i;
+  }
+  return null;
+};
+
+test('K17 / K18: <USER> and <TARGET> marked by side, the cart\'s breaks, bare names bare', () => {
+  const one = rawFight(1);
+  assert.ok(lineAt(one, '^aAlpha\nused thump!') !== null, "side a's user: ^a, a break after <USER>");
+  assert.ok(lineAt(one, '^bBeta\nused thump!') !== null, "side b's user: ^b");
+  assert.ok(lineAt(rawFight(2), 'Sucked health from\n^bBeta!') !== null,
+    'SuckedHealthText: <TARGET> marked with its own side');
+  assert.ok(lineAt(rawFight(7), 'p1 used\nX ATTACK!') !== null,
+    "ItemUseText00: the player's name bare, a break at `text_low`");
+  for (const e of jsRunsRaw.flatMap((run) => run.events)) {
+    if (e.t !== 'msg') continue;
+    assert.ok([...e.text].length <= Events.LINE_MAX, `within LINE_MAX: ${JSON.stringify(e.text)}`);
+  }
+  assert.strictEqual(Events.named('b', 'Beta'), '^bBeta');
+  assert.strictEqual(Events.plain("^aAlpha's\nATTACK\ngreatly rose!"), "Alpha's ATTACK greatly rose!");
+  // Events.plain mirrors W's plainBattleLine rule for rule: every line here,
+  // and a hyphen split over rows.
+  for (const e of jsRunsRaw.flatMap((run) => run.events)) {
+    if (e.t === 'msg') assert.strictEqual(Events.plain(e.text), plainBattleLine(e.text));
+  }
+  assert.strictEqual(Events.plain('BOB with-\ndrew ^bBETA!'), plainBattleLine('BOB with-\ndrew ^bBETA!'));
+  assert.strictEqual(Events.plain('BOB with-\ndrew ^bBETA!'), 'BOB with-drew BETA!');
+});
+
+test('K19: a knockout faints once the move is over; two at once, the player\'s first', () => {
+  const drain = rawFight(2);
+  assert.ok(inOrder(kindAt(drain, 'damage', 3), kindAt(drain, 'drain', 0),
+    lineAt(drain, 'Sucked health from\n^bBeta!'), kindAt(drain, 'faint', 3), lastTeam(drain, 3)),
+  'a drain KO: the hit, the heal, the line, then the faint and its ball');
+  const recoil = rawFight(3);
+  assert.ok(inOrder(lineAt(recoil, "^aAlpha's\nhit with recoil!"), kindAt(recoil, 'damage', 0),
+    lineAt(recoil, "^bBeta's\nRAGE is building!"), lineAt(recoil, "^bBeta's\nATTACK rose!"),
+    kindAt(recoil, 'faint', 0)),
+  "the user's recoil KO: the recoil, the target's RAGE, then the user's faint");
+  const blast = rawFight(4);
+  assert.ok(inOrder(kindAt(blast, 'damage', 0), kindAt(blast, 'damage', 3),
+    kindAt(blast, 'faint', 0), lastTeam(blast, 0), kindAt(blast, 'faint', 3),
+    lastTeam(blast, 3)),
+  "the computer's EXPLOSION takes both: the player's faint first, each ball with its own");
+  const snarl = rawFight(8);
+  assert.ok(!snarl.some((e) => e.t === 'msg' && e.text.includes('fell!')),
+    "a KO skips the move's own effect (`.executeOtherEffects` is past `ret z`)");
+});
+
+test("K20: STATUS_AFFECTED_ANIM, XSTATITEM_ANIM, ABSORB from the seeder, TOSS_ANIM", () => {
+  const sap = rawFight(5);
+  assert.ok(inOrder(kindAt(sap, 'anim', 0, 'ABSORB'), kindAt(sap, 'damage', 3),
+    kindAt(sap, 'drain', 0), lineAt(sap, 'LEECH SEED saps\n^bBeta!')),
+  "ABSORB on the seeder's seat, the HP both ways, the line naming the seeded");
+  const fly = rawFight(6);
+  const anim = kindAt(fly, 'anim', 0, 'STATUS_AFFECTED_ANIM');
+  assert.ok(anim !== null && lineAt(fly, "^aAlpha's\nattack missed!") === anim + 1,
+    'a released FLY that misses: STATUS_AFFECTED_ANIM right before the miss line');
+  const items = rawFight(7);
+  assert.ok(inOrder(kindAt(items, 'item', 0, 'POKE_BALL'), kindAt(items, 'anim', 0, 'TOSS_ANIM'),
+    lineAt(items, 'The trainer\nblocked the BALL!'), lineAt(items, "Don't be a thief!")),
+  'TOSS_ANIM before "The trainer blocked the BALL!"');
+  assert.ok(inOrder(lineAt(items, 'p1 used\nX ATTACK!'), kindAt(items, 'anim', 0, 'XSTATITEM_ANIM'),
+    lineAt(items, "^aAlpha's\nATTACK rose!"), kindAt(items, 'stat', 0)),
+  "XSTATITEM_ANIM on the user's seat between the use line and the rose line");
+  const xItem = kindAt(items, 'item', 0, 'X_ATTACK');
+  const xAnim = kindAt(items, 'anim', 0, 'XSTATITEM_ANIM');
+  assert.ok(xItem !== null && xItem < xAnim
+    && !items.slice(xItem + 1, xAnim).some((e) => e.t === 'anim'),
+  "the `item` event first and no other anim before XSTATITEM_ANIM (the client's bag-look swap)");
+  assert.strictEqual(items[kindAt(items, 'stat', 0)].text, "Alpha's ATTACK rose!",
+    "the `stat` event's text is the line read plain");
+});
+
+// ------------------------------------------------------------------
+// H1 (K16, K20 completion, K22): TrainerAI in the computer's slot,
+// EnemySendOut, the animations, RemoveFaintedPlayerMon's status
+// ------------------------------------------------------------------
+
+const rawOf = (name, prefix, at) => jsRunsRaw.find((entry) => entry.name === name)
+  .events.filter((e) => e.battle === `${prefix}${at}`);
+const itemsOf = (list) => list.filter((e) => e.t === 'item').map((e) => `${e.slot}:${e.text}`);
+
+test('TrainerAI: GenericAI\'s byte, each class family, wAICount per monster (K16)', () => {
+  const g = 'g1_trainer_ai';
+  assert.ok([1, 2, 3].every((t) => duelRowSeat(g, 1, t, 3).ac === 3)
+    && !duelEvents(g, 1).some((e) => e.t === 'item'),
+  'GenericAI: wAICount 3, never spent, never an item');
+  assert.notStrictEqual(r1Row(g, 1, 1).rng, 13001, '...its byte is drawn');
+  assert.deepStrictEqual(itemsOf(duelEvents(g, 2)), ['3:X_DEFEND'], 'MistyAI: one X DEFEND, its one use');
+  assert.strictEqual(duelRowSeat(g, 2, 8, 3).ac, 0, '...wAICount 0 after it');
+  const agatha = rawOf(g, 'g1ai', 3);
+  assert.ok(inOrder(lineAt(agatha, 'p2 with-\ndrew Beta!'), kindAt(agatha, 'send', 3, 'Delta')),
+    'AgathaAI: the withdraw line, then Delta -- the fainted Zeta walked past');
+  assert.ok(itemsOf(agatha).includes('3:SUPER_POTION'), '...and her SUPER POTION below a quarter');
+  assert.ok([1, 2, 3, 4, 5, 6, 7, 8, 9, 10].some((t) => duelRowSeat(g, 3, t, 3).ac === 255),
+    '...a switch puts wAICount back to $ff (EnemySendOutFirstMon)');
+  assert.deepStrictEqual([duelSeat(g, 4, 1, 3).status, duelSeat(g, 4, 1, 3).cur.split('/')[2]],
+    ['', '20'], 'BrockAI: FULL HEAL, the Speed left quartered (AICureStatus)');
+  assert.ok(duelSaid(g, 5, 'p2 used HYPER POTION on Beta!') && !duelSaid(g, 5, 'p2 with-drew Beta!')
+    && duelRowSeat(g, 5, 3, 3).ac === 0,
+  'CooltrainerFAI: HYPER POTION below a tenth -- her one use, so nothing after it');
+  const juggler = rawOf(g, 'g1ai', 6);
+  const sends = juggler.filter((e) => e.t === 'send' && e.slot === 3).map((e) => e.text);
+  assert.deepStrictEqual(sends.slice(0, 3), ['Beta', 'Gamma', 'Delta'],
+    'JugglerAI: Beta falls, Gamma is next in party order, then the switches');
+  const restore = rawOf(g, 'g1ai', 7);
+  assert.ok(inOrder(kindAt(restore, 'item', 3, 'FULL_RESTORE'), kindAt(restore, 'anim', 0, 'ABSORB'),
+    lineAt(restore, '^aAlpha\nused tap!')),
+  'a faster trainer: TrainerAI first, its residual, then Alpha');
+  assert.ok(!duelSaid(g, 8, 'Beta must recharge!') || duelTexts(g, 8).indexOf('Beta must recharge!')
+    > duelTexts(g, 8).lastIndexOf('p2 used SUPER POTION on Beta!'),
+  'an item spent past a recharge: the recharge comes after the uses run out');
+  assert.deepStrictEqual([duelRowSeat(g, 9, 4, 3).ac, duelRowSeat(g, 9, 4, 4).ac], [0, 0],
+    'a 2v2 trainer: each seat spent its own use');
+  assert.deepStrictEqual([itemsOf(duelEvents(g, 10)), r1Row(g, 10, 2).rng !== 13010],
+    [[], true], 'a wild monster: no item (its own move draws)');
+  assert.deepStrictEqual([itemsOf(duelEvents(g, 11)), r1Row(g, 11, 2).rng], [[], 13011],
+    'a link foe: no TrainerAI, no byte');
+  const solo = rawOf(g, 'g1ai', 12);
+  assert.ok(itemsOf(solo).includes('3:SUPER_POTION'), 'a solo seat: TrainerAI in its slot');
+  assert.deepStrictEqual(solo.filter((e) => e.t === 'send' && e.slot === 3).map((e) => e.text),
+    ['Beta', 'Kappa', 'Delta'], '...and EnemySendOut\'s replacements in party order');
+});
+
+test('K20 completion / K22: the animations the cart plays, the ones it does not, quiet', () => {
+  const g = 'g1_k22_anims';
+  const fight = (at) => rawOf(g, 'g1ka', at);
+  const anims = (at, slot) => fight(at).filter((e) => e.t === 'anim' && e.slot === slot)
+    .map((e) => `${e.text}${e.quiet ? '~' : ''}${e.amount === 1 ? '!' : ''}`);
+  const ball = fight(1);
+  const toss = kindAt(ball, 'anim', 0, 'TOSS_ANIM');
+  assert.ok(toss !== null && ball[toss + 1].text === 'BLOCKBALL_ANIM'
+    && lineAt(ball, 'The trainer\nblocked the BALL!') === toss + 2, 'TOSS_ANIM, BLOCKBALL_ANIM, the line');
+  assert.deepStrictEqual(anims(2, 0), ['XSTATITEM_ANIM!', 'SOLARBEAM'], 'a charge: XSTATITEM_ANIM, then the move');
+  assert.deepStrictEqual(anims(3, 0), ['TELEPORT~!', 'FLY'], 'FLY: a quiet TELEPORT, then FLY');
+  assert.deepStrictEqual(anims(4, 0), ['SLIDE_DOWN_ANIM!', 'DIG'], 'DIG: SLIDE_DOWN_ANIM, then DIG');
+  assert.ok(anims(5, 0)[0] === 'XSTATITEM_ANIM' && !anims(5, 0).includes('BIDE')
+    && duelSaid(g, 5, "Alpha's attack missed!"), "Bide: BideEffect's XSTATITEM_ANIM, a 0 unleash unanimated");
+  assert.deepStrictEqual(anims(6, 0), [], 'a missed move: nothing');
+  assert.deepStrictEqual(anims(7, 0), ['blast'], 'a missed EXPLOSION: still played');
+  assert.deepStrictEqual(anims(8, 0), [], 'an immunity: nothing');
+  assert.deepStrictEqual(anims(9, 0), ['growl'], 'GROWL: played where it lands, not at -6');
+  assert.deepStrictEqual(anims(10, 0), [], 'a sleep move turned away: nothing');
+  assert.deepStrictEqual(anims(11, 0), ['jab'], "MIRROR MOVE: the copied move's, never its own");
+  assert.deepStrictEqual(anims(12, 0), ['wrap', 'ABSORB~', 'wrap~', 'ABSORB~'],
+    "the seeder's ABSORB and the trap's later hit are quiet");
+  assert.deepStrictEqual([duelSeat(g, 13, 1, 3).status, duelSeat(g, 14, 1, 0).status], ['burn', ''],
+    'FaintEnemyPokemon keeps the computer\'s status; RemoveFaintedPlayerMon zeroes the player\'s');
+});
+
+test('an unreadable aiClass refuses the fight; a wild or link seat\'s is not read (K16)', () => {
+  const tryAi = (aiClass, mode = 'coop_npc') => Turn.attempt({
+    id: 'h1k', mode, seed: 1,
+    sides: {
+      a: [{ playerId: 'p1', mons: [{ species: 'Alpha', level: 20, maxHp: 60, stats: { atk: 40, def: 40, spd: 40, spc: 40 }, moves: [{ id: 'thump', pp: 20, power: 40, accuracy: 255, type: 0, effect: 0, chance: 0 }] }] }],
+      b: [{ playerId: 'p2', aiClass, mons: [{ species: 'Beta', level: 20, maxHp: 60, stats: { atk: 40, def: 40, spd: 40, spc: 40 }, moves: [{ id: 'thump', pp: 20, power: 40, accuracy: 255, type: 0, effect: 0, chance: 0 }] }] }],
+    },
+  });
+  const refused = tryAi({ uses: 0 });
+  assert.ok(refused.battle === null && /aiClass/.test(refused.reason), 'uses 0: refused');
+  assert.strictEqual(tryAi({ chance: 64 }).battle, null, 'no uses: refused');
+  assert.strictEqual(tryAi({ uses: 3, switch: 'yes' }).battle, null, 'a flag that is not a boolean: refused');
+  assert.strictEqual(tryAi({ uses: 3, hpBelow: 0 }).battle, null, 'a divisor of 0: refused');
+  const taken = tryAi({ uses: 3, chance: 256, item: 'X_SPEED', switch: false }).battle;
+  assert.deepStrictEqual(taken.byId.get('p2').aiClass, { uses: 3, chance: 256, item: 'X_SPEED' },
+    'a readable one: copied field by field');
+  assert.ok(tryAi({ uses: 0 }, 'wild').battle && tryAi({ uses: 0 }, '1v1').battle,
+    "a wild / link seat's: ignored");
+  assert.strictEqual(tryAi({ uses: 0 }, 'wild').battle.byId.get('p2').aiClass, null);
+});
+
+test('H1b: a multi-hit move animates every hit, THRASH starts on a square, a side-effect status shakes', () => {
+  const g = 'g1_h1b_anims';
+  const fight = (at) => rawOf(g, 'g1hb', at);
+  const seq = (at, keep) => fight(at).filter(keep).map((e) => (e.t === 'anim'
+    ? `@${e.slot}:${e.text}` : e.t === 'damage' ? `-${e.slot}` : e.text));
+  const mine = (at) => seq(at, (e) => (e.t === 'anim' && e.slot === 0) || (e.t === 'damage' && e.slot === 3));
+  assert.deepStrictEqual(mine(1), ['@0:kicks', '-3', '@0:kicks', '-3'], 'DOUBLE KICK: an animation a hit');
+  const barrage = mine(2);
+  assert.strictEqual(barrage.filter((x) => x === '@0:barrage').length,
+    barrage.filter((x) => x === '-3').length, 'two-to-five: as many animations as hits');
+  assert.deepStrictEqual(mine(3), ['@0:pebbles', '-3', '@0:pebbles', '-3'],
+    'power 0 (.skipbp): the first hit animates too');
+  const thrash = fight(4);
+  assert.ok(inOrder(lineAt(thrash, '^aAlpha\nused THRASH!'), kindAt(thrash, 'anim', 0, 'SHRINKING_SQUARE_ANIM'),
+    kindAt(thrash, 'anim', 0, 'THRASH'), kindAt(thrash, 'damage', 3)),
+  'THRASH: the used line, the square, the move, the hit');
+  assert.ok(thrash.every((e, i) => i === 0 || e.seq === thrash[i - 1].seq + 1),
+    'the moved animation keeps the stream\'s seq unbroken');
+  assert.strictEqual(thrash.filter((e) => e.text === 'SHRINKING_SQUARE_ANIM').length, 1,
+    '...on the first turn only');
+  const missed = fight(5);
+  assert.ok(kindAt(missed, 'anim', 0, 'SHRINKING_SQUARE_ANIM') !== null
+    && kindAt(missed, 'anim', 0, 'THRASH') === null, 'a missed THRASH: the square, no move animation');
+  const poison = fight(6);
+  assert.ok(inOrder(kindAt(poison, 'anim', 3, 'ENEMY_HUD_SHAKE_ANIM'), lineAt(poison, '^bBeta\nwas poisoned!'))
+    && inOrder(kindAt(poison, 'anim', 0, 'SHAKE_SCREEN_ANIM'), lineAt(poison, '^aAlpha\nwas poisoned!')),
+  "poison: the player's shakes the enemy's HUD, the computer's the screen, each ahead of its line");
+  const burn = fight(7);
+  assert.ok(inOrder(kindAt(burn, 'anim', 3, 'ENEMY_HUD_SHAKE_ANIM'), lineAt(burn, '^bBeta\nwas burned!'))
+    && kindAt(burn, 'anim', 0, 'ENEMY_HUD_SHAKE_ANIM') === null
+    && kindAt(burn, 'anim', 0, 'SHAKE_SCREEN_ANIM') === null,
+  "burn: the player's shakes the enemy's HUD, the computer's nothing");
+  const link = fight(8);
+  assert.ok(kindAt(link, 'anim', 3, 'ENEMY_HUD_SHAKE_ANIM') !== null
+    && kindAt(link, 'anim', 0, 'ENEMY_HUD_SHAKE_ANIM') !== null, 'a link fight: both sides are the player');
+  assert.ok(kindAt(fight(9), 'anim', 3, 'ENEMY_HUD_SHAKE_ANIM') !== null, "TWINEEDLE's poison shakes too");
+});

@@ -43,6 +43,7 @@
 --   3. Their client prompts them, unless they are mid-battle or mid-trade, in
 --      which case the prompt waits here until they are out of it.  A yes/no
 --      box over a live fight is the thing this whole hold exists to avoid.
+--      On Gen 3 it also waits out the cart's own menus (M:_drain, whenFree).
 --   4. Their answer comes back as mmo.friend_answer -- to them now, or held
 --      for them the same way if the asker has since gone offline.
 --
@@ -142,7 +143,8 @@ function M.new(transport, ui, opts)
     -- Asks that arrived while this player was in a battle or a trade, oldest
     -- first.  Drained by update() the moment they are out of it.
     held = {},
-    -- The name the box currently on screen is about, or nil.
+    -- The name the box currently on screen -- or waiting for the screen to
+    -- be free (M:_drain) -- is about, or nil.
     asking = nil,
     -- Set by src/Client.lua to "is this player mid-fight or mid-session".
     -- Absent means never busy, which is what the suite drives it as.
@@ -153,6 +155,38 @@ end
 function M:_warn(fmt, ...)
   local log = self.mod and self.mod.log
   if log and type(log.warn) == "function" then log:warn(fmt, ...) end
+end
+
+-- ------- prompts that wait for the player
+--
+-- Two kinds of wait, and they are not the same wait.  `busy` (above) is
+-- about the *session*: mid-battle or mid-trade, the ask stays in `held` and
+-- is not taken out at all.  This one is about the *screen*: on Gen 3 the
+-- cart's BAG, START, dex or PC can be open, or an NPC mid-sentence, or a
+-- script or warp holding the player -- src/Ui.lua's Ui.occupied -- and a box
+-- pushed then goes up through the cart's half-finished menu.  So everything
+-- this module puts on screen unasked (the ask itself, and the lines about an
+-- ask the player made and walked away from) goes through Ui:whenFree, which
+-- shows it now when the player is free and otherwise queues it -- in order
+-- with Sessions' and Party's own waiting prompts, one box at a time.
+--
+-- A ui without whenFree (the suite's stubs), and Gen 1 / Gen 2 (where
+-- Ui.occupied is always false and the queue never fills), show it at once,
+-- exactly as before.  The lines M:ask says in answer to ADD FRIEND are the
+-- player's own menu talking back and never wait.
+local function whenFree(self, game, show, opts)
+  local ui = self.ui
+  if type(ui) == "table" and type(ui.whenFree) == "function" then
+    return ui:whenFree(game, show, opts)
+  end
+  return show()
+end
+
+-- A sentence the hub brought, put up when the player can read it.  Filed
+-- under this module so M:reset can take it back: a line about the last
+-- connection's list is not worth reading on the next one.
+function M:tell(text)
+  return whenFree(self, nil, function() return self.ui:say(text) end, { owner = self })
 end
 
 -- ------- persistence
@@ -306,10 +340,16 @@ end
 -- Everything goes, including a half-finished ask: a prompt left armed across a
 -- disconnect would answer to a hub that is no longer listening, and an
 -- outgoing name held past the connection would refuse the next session's first
--- ask with "you already asked them".
+-- ask with "you already asked them".  That includes a box still waiting for
+-- the player to come out of the cart's menus (M:tell, M:_drain): the hub
+-- holds the ask and hands it over again on the next welcome.
 function M:reset()
   self.bucket, self.entries = nil, {}
   self.outgoing, self.held, self.asking = {}, {}, nil
+  local ui = self.ui
+  if type(ui) == "table" and type(ui.dropDeferred) == "function" then
+    ui:dropDeferred(self)
+  end
 end
 
 -- ------- reading the list
@@ -492,7 +532,7 @@ function M:onAsk(game, msg)
   end
   if self:count() >= Config.FRIENDS_MAX then
     self:_answer(name, false)
-    self.ui:say(("%s asked to be\nfriends, but your\nlist is full."):format(name))
+    self:tell(("%s asked to be\nfriends, but your\nlist is full."):format(name))
     return
   end
   -- Already asked, or already queued: one ask per name, so a hub re-delivering
@@ -513,18 +553,31 @@ end
 -- battle or a trade is the failure src/Sessions.lua already refuses invites to
 -- avoid, and a friend request is the one ask here that can afford to wait --
 -- the hub is holding it, so nothing is lost by asking in a minute.
+--
+-- Past that, the box itself waits for the screen (whenFree, above): it is
+-- `asking` from the moment it leaves `held`, so a second delivery of the same
+-- ask is still recognised as one, and nothing else is drained behind it until
+-- it is answered.  An ask that stops being current before its box could go up
+-- -- the connection reset -- is dropped unseen; the hub asks again.
 function M:_drain(game)
   if self.asking or #self.held == 0 then return false end
   if self.busy and self.busy(game) then return false end
 
   local ask = table.remove(self.held, 1)
   self.asking = ask.key
-  self.ui:confirm(game, ("%s wants to be\nfriends!"):format(ask.name),
-    function(yes)
-      self.asking = nil
-      if yes then self:_add(ask.name) end
-      self:_answer(ask.name, yes and true or false)
-    end)
+  local bucket = self.bucket
+  local function current()
+    return self.asking == ask.key and self.bucket == bucket
+  end
+  whenFree(self, game, function()
+    if not current() then return nil end
+    return self.ui:confirm(game, ("%s wants to be\nfriends!"):format(ask.name),
+      function(yes)
+        self.asking = nil
+        if yes then self:_add(ask.name) end
+        self:_answer(ask.name, yes and true or false)
+      end)
+  end, { alive = current, owner = self })
   return true
 end
 
@@ -549,15 +602,15 @@ function M:onAnswer(msg)
   self.outgoing[key] = nil
 
   if msg.accept ~= true then
-    self.ui:say(("%s said no."):format(name))
+    self:tell(("%s said no."):format(name))
     return
   end
   if self.entries[key] then return end
   if not self:_add(name) then
-    self.ui:say(("Your friends list\nis full (%d)."):format(Config.FRIENDS_MAX))
+    self:tell(("Your friends list\nis full (%d)."):format(Config.FRIENDS_MAX))
     return
   end
-  self.ui:say(("%s is now your\nfriend!"):format(name))
+  self:tell(("%s is now your\nfriend!"):format(name))
 end
 
 -- They took us off their list.

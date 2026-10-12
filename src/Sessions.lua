@@ -49,14 +49,33 @@
 -- the `strict` and `verdict` values TradeSession needs to refuse a mon the
 -- other game would rebuild differently; hardcoding "full" would silently
 -- desync two differently-modded players.
+--
+-- ------- three generations, three trade codecs, one machine
+--
+-- Gen 1 hands the session to the engine's Protocol.TradeSession, Gold to
+-- src/Trade2.lua, FireRed / LeafGreen / Emerald to src/Trade3.lua.  All three
+-- are the same stage machine over the same wire vocabulary, so everything
+-- below beginTrade -- the picker, the confirm, the settle-then-leave teardown,
+-- the save, the evolution -- is shared, and only asks the generation where
+-- the answer is a different screen: Gen 3 has no game.stack (every screen is
+-- a layer on src/ui/game3/stack.lua), no Evolution.evolve (the cart's own
+-- EvolutionScene), no MoveLearnMenu (the cart's own LearnMove prompts) and no
+-- game.writeSave (Game3:saveGame).  Each of those arms sits in front of the
+-- Gen 1 / Gen 2 code it replaces and returns before that code runs, so a Red
+-- or Gold session never reaches a Gen 3 module -- the loader throws on the
+-- cross-generation require.
 
 local need, mod = ...
+local Config = need("Config")
 local Wire = need("Wire")
 local SessionNet = need("SessionNet")
 local MediatedBattle = need("MediatedBattle")
 local Gen = need("Gen")
+local Gen3 = need("Gen3")
 local Trade2 = need("Trade2")
+local Trade3 = need("Trade3")
 local EvolveFx = need("EvolveFx")
+local LearnMove = need("LearnMove")
 
 local M = {}
 M.__index = M
@@ -168,9 +187,164 @@ function M.isFightState(state)
   return false
 end
 
+-- ------- Gen 3's screen stack
+--
+-- A Gen 3 boot has no game.stack.  Every screen -- the cart's menus and this
+-- mod's alike -- is a layer on the modal stack src/ui/game3/stack.lua keeps
+-- (Gen3.stack()), and a layer is the record Stack.push builds, { id, mod, ...
+-- }, around the table that was pushed.  src/Gen3Ui.lua pushes the screen
+-- itself as `mod` under a unique "rby_mmo:<Screen>#n" id, and src/Ui.lua's
+-- doors (Ui.holds / Ui.unwindTo / Ui.pop) answer from there on a Gen 3 boot --
+-- so those doors are what this file asks, through `self.ui`, whenever it
+-- carries them.
+--
+-- The engine stack is read directly only where there is no ui to ask (the
+-- static fight check) and for a ui without the doors (a headless harness's
+-- stub): then a held box is looked for as the layer, the table in it, its
+-- layer id, or the `screen` / `state` a wrapper layer keeps, and a layer is
+-- taken down the way Gen3Ui.pop takes it -- removed, then its optional
+-- `exit`, which only this mod's own layers are given.
+--
+-- Asked only of a game with no `stack` of its own on a Gen 3 boot: a Gen 1
+-- or Gen 2 game, and every harness that hands one in, takes the old path
+-- untouched.  Reads the engine's `_layers` directly because Stack has no
+-- iterator, and "is this box anywhere on the stack" is the question.
+local LAYER_PREFIX = Config.GEN3_LAYER_PREFIX or "rby_mmo:"
+
+local function stack3(game)
+  if type(game) == "table" and game.stack ~= nil then return nil end
+  if not Gen3.active() then return nil end
+  local Stack = Gen3.stack()
+  if type(Stack) == "table" and type(Stack._layers) == "table" then return Stack end
+  return nil
+end
+
+local function layerHolds(layer, target)
+  if target == nil or type(layer) ~= "table" then return false end
+  if layer == target or layer.mod == target or layer.id == target then return true end
+  local inner = layer.mod
+  return type(inner) == "table" and (inner.screen == target or inner.state == target)
+end
+
+local function layerIndex3(Stack, target)
+  local layers = Stack._layers
+  for i = #layers, 1, -1 do
+    if layerHolds(layers[i], target) then return i end
+  end
+  return nil
+end
+
+-- Take the top layer down the way Gen3Ui.pop (and StateStack:pop on Gen 1)
+-- takes one down: removed first, then its optional `exit` -- for this mod's
+-- own layers only, since a cart layer's module is not a screen object.
+local function popTop3(Stack)
+  local layers = Stack._layers
+  local top = layers[#layers]
+  if not top then return false end
+  pcall(Stack.pop)
+  local inner = top.mod
+  local exit = type(inner) == "table" and inner.exit
+  if type(exit) == "function" and type(top.id) == "string"
+      and top.id:sub(1, #LAYER_PREFIX) == LAYER_PREFIX then
+    pcall(exit, inner)
+  end
+  return true
+end
+
+-- One of src/Ui.lua's stack doors (a module function, reached through the Ui
+-- instance's metatable), or nil when this ui has none.
+local function uiDoor(self, name)
+  local ui = type(self) == "table" and self.ui or nil
+  local door = type(ui) == "table" and ui[name] or nil
+  if type(door) == "function" then return door end
+  return nil
+end
+
+-- ------- prompts that wait for the player
+--
+-- src/Ui.lua's Ui.occupied / Ui:whenFree.  On Gen 3 a prompt this module
+-- raises unasked -- somebody's request, the answer to an ask the player made
+-- and walked away from, a trade screen opening on the far side's accept --
+-- waits while the cart is using the screen (its BAG, START, the dex, an
+-- NPC's sentence ...) instead of going up through it, and appears the moment
+-- the player is free.  A ui without them (every harness stub), and Gen 1 /
+-- Gen 2 (where Ui.occupied is always false), show it at once, as before.
+local function gameOf(self, game)
+  if game ~= nil then return game end
+  local ctx = type(self.ui) == "table" and self.ui.ctx or nil
+  return type(ctx) == "table" and ctx.game or nil
+end
+
+function M:occupied(game)
+  local door = uiDoor(self, "occupied")
+  if not door then return false end
+  local ok, busy = pcall(door, gameOf(self, game))
+  return ok and busy == true
+end
+
+local function whenFree(self, game, show, opts)
+  local ui = self.ui
+  if type(ui) == "table" and type(ui.whenFree) == "function" then
+    return ui:whenFree(gameOf(self, game), show, opts)
+  end
+  return show()
+end
+
+-- A sentence for the player, put up when they are free to read it.  onDone
+-- runs when it is dismissed -- or at once when no box could go up at all, so
+-- a continuation hung on it (the trade evolution) is never stranded.  Only a
+-- line with nothing behind it is filed under this module (Ui:whenFree's
+-- owner), so M:onTransportReady can take the stale ones back without ever
+-- taking a continuation with them.
+function M:tell(game, text, onDone)
+  local ui = self.ui
+  return whenFree(self, game, function()
+    local box = ui:say(text, onDone)
+    if not box and onDone then onDone() end
+    return box
+  end, onDone == nil and { owner = self } or nil)
+end
+
+local function unwind3(Stack, target, alsoPop)
+  local index = layerIndex3(Stack, target)
+  if not index then return false end
+  local guard = 0
+  while #Stack._layers > index and guard < 16 do
+    popTop3(Stack)
+    guard = guard + 1
+  end
+  local layers = Stack._layers
+  if alsoPop and #layers == index and layerHolds(layers[index], target) then
+    popTop3(Stack)
+  end
+  return true
+end
+
+-- A Gen 3 layer that is a fight: the table pushed, or the state a wrapper
+-- layer carries, read by the same isFightState rule.
+local function layerFight(layer)
+  if type(layer) ~= "table" then return false end
+  local inner = layer.mod
+  if M.isFightState(inner) then return true end
+  return type(inner) == "table"
+    and (M.isFightState(inner.state) or M.isFightState(inner.screen))
+end
+
 function M.stackHasFight(game)
   local stack = game and game.stack
-  if not stack then return false end
+  if not stack then
+    -- Gen 3: the cart's own battle runs inside the field phase rather than
+    -- on the stack, so it is asked of the battle module; this mod's fights
+    -- are layers.
+    local Stack = stack3(game)
+    if not Stack then return false end
+    if Gen3.inBattle() then return true end
+    local layers = Stack._layers
+    for i = #layers, 1, -1 do
+      if layerFight(layers[i]) then return true end
+    end
+    return false
+  end
   local states = stack.states
   if type(states) == "table" then
     for i = #states, 1, -1 do
@@ -227,6 +401,17 @@ end
 function M:onStack(game, target)
   local stack = game and game.stack
   local states = stack and stack.states
+  if not stack and target ~= nil then
+    local Stack = stack3(game)
+    if Stack then
+      local holds = uiDoor(self, "holds")
+      if holds then
+        local ok, held = pcall(holds, game, target)
+        if ok and held then return true end
+      end
+      return layerIndex3(Stack, target) ~= nil
+    end
+  end
   if not (states and target) then return nil end
   for i = #states, 1, -1 do
     if states[i] == target then return true end
@@ -236,6 +421,17 @@ end
 
 function M:unwindTo(game, target, alsoPop)
   local stack = game and game.stack
+  if not stack and target ~= nil then
+    local Stack = stack3(game)
+    if Stack then
+      local unwind = uiDoor(self, "unwindTo")
+      if unwind then
+        local ok, done = pcall(unwind, game, target, alsoPop)
+        if ok and done then return true end
+      end
+      return unwind3(Stack, target, alsoPop)
+    end
+  end
   if not (stack and target) then return false end
   if self:onStack(game, target) == false then return false end
   local guard = 0
@@ -347,18 +543,31 @@ function M:onRequest(game, msg)
     return
   end
 
-  self.incoming = { from = from, name = name, kind = kind }
-  local box = self.ui:confirm(game,
-    ("%s wants to\n%s!"):format(name, kind == "trade" and "trade" or "battle"),
-    function(yes)
-      local pending = self.incoming
-      self.incoming = nil
-      self.incomingBox = nil
-      if not pending then return end
-      self.transport:send(Wire.RESPOND,
-        { to = pending.from, kind = pending.kind, accept = yes and true or false })
-    end)
-  self.incomingBox = { box = box, game = game }
+  -- Free but looking at the cart's own screen (Gen 3: the BAG, START, an
+  -- NPC's sentence -- Ui.occupied) is not busy: the ask is held, not refused,
+  -- and put to the player the moment they close what they have open.  It is
+  -- marked `deferred` until then, which is what M:onCancel and
+  -- waitOutRequest read: an ask withdrawn or run out before it was ever seen
+  -- goes without a box.  While it waits this side still reads as "asked" to
+  -- everybody else, exactly as it would with the box up.
+  local incoming = { from = from, name = name, kind = kind, deferred = true }
+  self.incoming = incoming
+  whenFree(self, game, function()
+    if self.incoming ~= incoming then return nil end
+    incoming.deferred = nil
+    local box = self.ui:confirm(game,
+      ("%s wants to\n%s!"):format(name, kind == "trade" and "trade" or "battle"),
+      function(yes)
+        local pending = self.incoming
+        self.incoming = nil
+        self.incomingBox = nil
+        if not pending then return end
+        self.transport:send(Wire.RESPOND,
+          { to = pending.from, kind = pending.kind, accept = yes and true or false })
+      end)
+    self.incomingBox = { box = box, game = game }
+    return box
+  end, { alive = function() return self.incoming == incoming end, owner = self })
 end
 
 -- The corner line an auto-refusal leaves on the *refusing* player's screen.
@@ -405,7 +614,7 @@ function M:onDecline(msg)
   local kind = outgoing and outgoing.kind
   self.outgoing = nil
   self:closeWaitBox()
-  self.ui:say(M.declineText(name, kind, Wire.declineReason(msg.reason)))
+  self:tell(nil, M.declineText(name, kind, Wire.declineReason(msg.reason)))
 end
 
 -- The asker walked away before we answered.  Their name is stamped by the
@@ -417,8 +626,16 @@ function M:onCancel(msg)
   if not pending then return end
   if from and pending.from ~= from then return end
   self.incoming = nil
+  if pending.deferred then
+    -- Never on screen (the player was in the cart's own menus the whole
+    -- time), so there is no box to take down and no "cancelled" to explain:
+    -- the queued prompt drops itself (its alive check is this field), and
+    -- the corner says who asked, as it does for an ask refused while busy.
+    self:sayRefused(pending.name, pending.kind)
+    return
+  end
   self:closeIncomingBox()
-  self.ui:say(("%s cancelled\nthe invite."):format(name))
+  self:tell(nil, ("%s cancelled\nthe invite."):format(name))
 end
 
 -- A player left the game.  Same duty Party:onPeerGone has for invites: an
@@ -432,7 +649,7 @@ function M:onPeerGone(id)
     local name = self.outgoing.name or "They"
     self.outgoing = nil
     self:closeWaitBox()
-    self.ui:say(("%s went\noffline."):format(name))
+    self:tell(nil, ("%s went\noffline."):format(name))
   end
   if self.incoming and self.incoming.from == id then
     self.incoming = nil
@@ -530,6 +747,15 @@ function M:dropLocalFight()
     if top == fight then
       pcall(function() stack:pop() end)
     end
+  elseif not stack then
+    local Stack = stack3(fight.game)
+    local layers = Stack and Stack._layers
+    if layers and layerHolds(layers[#layers], fight) then
+      local pop = uiDoor(self, "pop")
+      local ok, popped = false, false
+      if pop then ok, popped = pcall(pop, fight.game, fight) end
+      if not (ok and popped) then popTop3(Stack) end
+    end
   end
 end
 
@@ -588,6 +814,17 @@ function M:beginMediated(game, sessionId, peerId, peerName, role)
   return true
 end
 
+-- One byte (0..255) for a roll the cart makes outside the referee (the Gold
+-- wild item in `beginWildMediated`): love.math.random when LOVE is up, plain
+-- math.random under a headless suite -- CoopBattle.randomByte's reading.
+function M.randomByte()
+  local love_ = rawget(_G, "love")
+  local roll = love_ and love_.math and love_.math.random or math.random
+  local ok, value = pcall(roll, 0, 255)
+  if ok and tonumber(value) then return math.floor(value) % 256 end
+  return 0
+end
+
 -- Protocol-only wild mediated fight: the caller (or a test) already opened a
 -- hub battle with mode "wild". This screen uploads the player's party and the
 -- wild sheets as side "b", and keeps `wildCatchMon` for a catch grant.
@@ -611,7 +848,23 @@ function M:beginWildMediated(game, battleId, opts)
   local wildParty = opts.wildParty
   if type(wildParty) ~= "table" or #wildParty == 0 then
     if opts.mon then
-      wildParty = MediatedBattle.snapshotMons(game, { opts.mon })
+      -- Gold's wild monster holds what the cart would have rolled for it
+      -- (pokecrystal LoadEnemyMon `.WildItem`; MediatedBattle.rollWildItem2),
+      -- written onto the engine monster -- the one a catch keeps -- before
+      -- its sheet is cut, exactly as src/SoloBattle.lua and src/CoopBattle.lua's
+      -- `wildMons` roll it: the engine builds every wild monster holding
+      -- nothing.  Off the caller's byte source (`opts.random`, a function
+      -- answering 0..255) or love.math.random's, never the referee's stream;
+      -- `opts.battleType` is the Gold battle's (BATTLETYPE_FORCEITEM hands
+      -- item 1 over unrolled).  A no-op off Gold and for a monster already
+      -- holding one.  A caller that hands its own `wildParty` described the
+      -- monster itself and is left as it is.
+      MediatedBattle.rollWildItem2(game, opts.mon, {
+        battleType = opts.battleType,
+        random = type(opts.random) == "function" and opts.random or M.randomByte,
+      })
+      -- ...with Gold's dex weight on the sheet (contract K21, HEAVY BALL).
+      wildParty = MediatedBattle.snapshotWild(game, opts.mon)
     end
   end
   if type(wildParty) ~= "table" or #wildParty == 0 then
@@ -629,6 +882,9 @@ function M:beginWildMediated(game, battleId, opts)
     mode         = "wild",
     wildParty    = wildParty,
     wildCatchMon = opts.wildCatchMon or opts.mon,
+    -- Gold's wBattleType (contract K21): the screen states it on the
+    -- ruleset it uploads, for LURE BALL.
+    battleType   = opts.battleType,
     autoPick     = self.autoPick == true,
     -- Same on the wild path, and it is the one that reaches this most often:
     -- a wild fight is where a mediated party earns its levels today, and a
@@ -649,6 +905,15 @@ end
 -- `teach`).  The hub hears first and the player second: the leave is a fact
 -- about a fight that is already over, and the prompt below can sit on screen
 -- for as long as somebody takes to answer it.
+--
+-- On Gen 3 the evolutions wait for the last learn to be answered.  Both are
+-- the cart's own exchanges -- LearnMove.begin's prompts, and EvolutionScene,
+-- which runs LearnMove.begin again for the evolved species before it closes
+-- -- and starting the scene while a learn is still on screen ran the two
+-- through the same engine module at once: callbacks lost, learns dropped.
+-- The cart itself never overlaps them (after a battle it teaches, then
+-- evolves).  Gen 1 and Gen 2 keep their order: both offers at once, as
+-- before -- their screens stack.
 function M:endMediated(game, toLearn)
   local fight = self.fight
   self.fight = nil
@@ -659,13 +924,19 @@ function M:endMediated(game, toLearn)
   -- the snapshot -- a mid-movie snapDisplay abandoned apply and left
   -- leveledUp for this offer; evoResolved subtracts a prompt the player
   -- already answered on the arena.
-  self:offerForgets(game, toLearn)
-  if fight then
+  local function evolutions()
+    if not fight then return end
     EvolveFx.offerEvolutions(game, fight.leveledUp, fight.result, fight.evoResolved, {
       warn = function(fmt, ...) mod.log:warn(fmt, ...) end,
       ui = (self.ui and self.ui.push and self.ui) or mod.ui,
     })
   end
+  if Gen.generation(game) == 3 then
+    if not self:offerForgets(game, toLearn, evolutions) then evolutions() end
+    return
+  end
+  self:offerForgets(game, toLearn)
+  evolutions()
 end
 
 -- Moves a monster levelled into during a mediated fight but had no room for.
@@ -691,13 +962,19 @@ end
 -- fires on both answers: after "learned" and after "did not learn". That is
 -- what sequences two pending learns without stacking two menus, and what
 -- makes declining cost nothing but the next prompt.
-function M:offerForgets(game, toLearn)
+--
+-- `onAllDone` (Gen 3 only; see M:endMediated) runs once, after the last
+-- entry has been answered.  False, and onAllDone never called, when there is
+-- nothing to offer -- the caller carries on itself.
+function M:offerForgets(game, toLearn, onAllDone)
   game = game or (self.ui and self.ui.ctx and self.ui.ctx.game)
   if not (game and type(toLearn) == "table" and #toLearn > 0) then return false end
 
   -- Copied, because the list belongs to a screen that is being torn down.
   local pending = {}
   for i = 1, #toLearn do pending[i] = toLearn[i] end
+  local gen3 = Gen.generation(game) == 3
+  local finished = false
 
   local nextOne
   nextOne = function()
@@ -708,7 +985,30 @@ function M:offerForgets(game, toLearn)
       -- in it; the rest of the list is still owed to the player.
       entry = table.remove(pending, 1)
     end
-    if entry == nil then return end
+    if entry == nil then
+      if gen3 and not finished then
+        finished = true
+        if onAllDone then onAllDone() end
+      end
+      return
+    end
+
+    -- Gen 3 has no MoveLearnMenu to push: the cart's own exchange runs
+    -- through src/LearnMove.lua's Gen 3 arm (LearnMove.begin, handed this
+    -- mod's boxes on the game3 stack and the summary screen's move picker,
+    -- in the field's wording -- the fight is already over) and calls back
+    -- once on both answers, which sequences the queue exactly as the Gen 1
+    -- screen's callback does.  Its boxes are this mod's own layers, not the
+    -- engine's Message / Choice singletons an evolution scene also drives.
+    if gen3 then
+      if LearnMove.open(game, entry.mon, entry.move, function() nextOne() end,
+          { ui = self.ui, battle = false }) then
+        return
+      end
+      mod.log:warn("could not open the move-learning prompt for move %s; it "
+        .. "can still be learned by levelling again", tostring(entry.move))
+      return nextOne()
+    end
 
     local pushed
     local ok = pcall(function()
@@ -759,14 +1059,26 @@ function M:onBattleReady(msg)
   if ready and self.fight then self.fight:onReady(ready) end
 end
 
+-- Read in this boot's own vocabulary (Wire.battleEvent's `generation`): Gen 1
+-- and Gen 2 exactly as their stream always read, Gen 3 the union with its own
+-- fields.  With no fight there is nothing to read it for.
 function M:onBattleEvent(msg)
-  local event = Wire.battleEvent(msg)
-  if event and self.fight then self.fight:onEvent(event) end
+  local fight = self.fight
+  if not fight then return end
+  local event = Wire.battleEvent(msg, Gen.generation(gameOf(self, fight.game)))
+  if event then fight:onEvent(event) end
 end
 
+-- Read in this boot's own vocabulary too (Wire.battleOutcome's `generation`):
+-- the Pay Day pot's bound is the reader's cart's -- 999999 on Red and Gold
+-- (contract K11, Wire.PAYDAY12_MAX), Gen 3's u16 there -- and a reader that
+-- named none capped a Red or Gold pot at Gen 3's 65535, dropping a larger one.
+-- With no fight there is nothing to read it for.
 function M:onBattleOutcome(msg)
-  local outcome = Wire.battleOutcome(msg)
-  if outcome and self.fight then self.fight:onOutcome(outcome) end
+  local fight = self.fight
+  if not fight then return end
+  local outcome = Wire.battleOutcome(msg, Gen.generation(gameOf(self, fight.game)))
+  if outcome then fight:onOutcome(outcome) end
 end
 
 -- A refused relay is the same silence src/Hub.lua's onDrop was given a voice
@@ -839,7 +1151,7 @@ function M:onSessionEnd(reason)
   if session.stage == "trade" or session.stage == "settling" then return end
   self.active = nil
   if reason == "peer_left" then
-    self.ui:say(("%s disconnected."):format(session.peerName))
+    self:tell(nil, ("%s disconnected."):format(session.peerName))
   end
 end
 
@@ -863,8 +1175,12 @@ function M:endSession(message)
   local fight = self.fight
   self.fight = nil
   if fight then fight:finish("draw", "disconnect") end
-  if session then session.net:close() end
-  if message then self.ui:say(message) end
+  if session then
+    -- a Gen 3 trade's "Waiting for NAME..." (M:holdTrade) goes with it
+    self:releaseHold(session)
+    session.net:close()
+  end
+  if message then self:tell(nil, message) end
 end
 
 -- ------- the handshake, then the handoff (trade only)
@@ -934,7 +1250,19 @@ function M:beginTrade(game, session, modules)
   -- engine TradeSession path byte-for-behaviour. Capability-tested so an
   -- older engine without packMon2 refuses clearly instead of packing Gen 1
   -- shapes into a Gold party.
-  if Gen.generation(game) == 2 then
+  --
+  -- Gen 3: Trade3 over packMon3 / unpackMon3, the same capability rule --
+  -- a build without the Gen 3 codec must not fall through to the Gen 1
+  -- one, which would pack a FireRed party as Red mons.
+  local generation = Gen.generation(game)
+  if generation == 3 then
+    if not (Trade3 and Trade3.capable and Trade3.capable()) then
+      mod.log:warn("Gen 3 trade needs Protocol.packMon3 and unpackMon3 on "
+        .. "this engine -- update gen1recomp (dev branch)")
+      return self:endSession("You can't trade\non this build.")
+    end
+    session.trade = Trade3.TradeSession.new(game, opts)
+  elseif generation == 2 then
     if not (Trade2 and Trade2.capable and Trade2.capable()) then
       mod.log:warn("Gen 2 trade needs Protocol.packMon2 and unpackMon2 on "
         .. "this engine -- update gen1recomp (dev branch) or trade on Gen 1")
@@ -987,6 +1315,53 @@ function M:handleTrade(game, session, msg)
   if reply then session.net:send(reply) end
 end
 
+local function generationOf3(game)
+  return Gen.generation(game) == 3
+end
+
+-- The Gen 3 session running now: the game's own (Game3 replaces the table on
+-- a CONTINUE and clears it at the title), else the runtime's.
+local function currentSession3(game)
+  local s = type(game) == "table" and game.session or nil
+  if type(s) == "table" then return s end
+  return Gen3.session()
+end
+
+-- ------- the trade holds the screen (Gen 3)
+--
+-- From the pick until the swap is saved, a layer of this mod's own stays up
+-- -- "Waiting for NAME...", src/Ui.lua's Ui:holdScreen -- and with it up the
+-- cart's field and START are frozen.  The cart's own trade screen owns the
+-- screen for the whole exchange the same way; here it matters because the
+-- peer files the party it was *shown*, so a mon moved or a held item taken
+-- off after the pick is one the peer would receive while this save still had
+-- it (src/Trade3.lua's header).  The confirm goes up over it.  It comes down
+-- at "done", once the swap is on the cartridge, or with the session, however
+-- that ends.  A ui without holdScreen (Gen 1 / Gen 2 -- whose pick never
+-- waited for the cart's menus -- and every harness stub) holds nothing.
+function M:holdTrade(game, session)
+  if not session or session.hold or self.active ~= session then return false end
+  if session.stage ~= "trade" then return false end
+  local ui = self.ui
+  if not (type(ui) == "table" and type(ui.holdScreen) == "function") then return false end
+  if Gen.generation(game) ~= 3 then return false end
+  local ok, box = pcall(ui.holdScreen, ui, game,
+    ("Waiting for\n%s..."):format(tostring(session.peerName or "them")))
+  if not (ok and type(box) == "table") then return false end
+  session.hold = { box = box, game = game }
+  return true
+end
+
+function M:releaseHold(session)
+  local held = session and session.hold
+  if not held then return false end
+  session.hold = nil
+  local pop = uiDoor(self, "pop")
+  if not pop then return false end
+  local ok, popped = pcall(pop, held.game, held.box)
+  return ok and popped == true
+end
+
 -- Drives the trade UI from the state machine's stage rather than from the
 -- messages, so the prompt shown always matches what the machine will accept.
 function M:advanceTrade(game, session)
@@ -994,6 +1369,11 @@ function M:advanceTrade(game, session)
   if not trade then return end
 
   if trade.stage == "picking" and not session.pickOpen then
+    -- The far side's accept can land while this player has the cart's own
+    -- BAG or START open (Gen 3; Ui.occupied): the picker waits for them to
+    -- close it, asked again every tick, rather than going up through it.  A
+    -- human is choosing either way, and this stage has no clock.
+    if self:occupied(game) then return end
     session.pickOpen = true
     self.ui:pickPartyMon(game, trade, function(index)
       session.pickOpen = false
@@ -1001,7 +1381,24 @@ function M:advanceTrade(game, session)
         session.net:send({ type = "bye" })
         return self:endSession("The trade was\ncancelled.")
       end
+      -- A Gen 3 cart refuses some offers outright -- the last mon able to
+      -- battle, a mon or an egg this save or the partner's cannot trade yet
+      -- (Trade3:refusal).  The picker greys those rows, and this is the
+      -- belt for one that got through: the cart's sentence, then the picker
+      -- again once it has been read.  Gen 1 / Gen 2 machines have no
+      -- `refusal`, so they never reach it.
+      local why = trade.refusal and trade:refusal(index)
+      if why then
+        session.pickOpen = true
+        if not self.ui:say(why, function() session.pickOpen = false end) then
+          session.pickOpen = false
+        end
+        return
+      end
+      -- Gen 3: a pick of a mon the peer was never shown (the party changed
+      -- while the picker waited) answers a bye and cancels -- see Trade3.
       session.net:send(trade:pick(index))
+      if trade.stage ~= "cancelled" then self:holdTrade(game, session) end
     end)
 
   -- myConfirm, not just the box flag: the machine sits in "confirming" from
@@ -1010,9 +1407,28 @@ function M:advanceTrade(game, session)
   -- and asked them to agree to the same trade over and over.
   elseif trade.stage == "confirming" and trade.myConfirm == nil
          and not session.confirmOpen then
+    -- Gen 3: an offer this cart cannot take (Trade3:theirRefusal -- an
+    -- event-only MEW / DEOXYS that is not, or a mon this save may not
+    -- receive before the National Dex) is not put to the player as a yes /
+    -- no.  The cart answers it: the no goes out, the peer is let go, and the
+    -- cart's own sentence says why.  Nothing was applied on either side --
+    -- neither reached "done".
+    local refused = trade.theirRefusal and trade:theirRefusal()
+    if refused then
+      session.net:send(trade:confirm(false))
+      session.net:send({ type = "bye" })
+      return self:endSession("The trade stopped:\n" .. refused)
+    end
+    -- Same wait as the picker's: their pick can arrive while the player is in
+    -- the cart's menus.  Nothing is on the wire from this side yet, so no
+    -- clock runs against the wait (waitOut's CONFIRM_TIMEOUT starts at our
+    -- own answer); the far side's own timeout is what bounds it.
+    if self:occupied(game) then return end
     session.confirmOpen = true
     local theirs = trade.theirParty and trade.theirParty[trade.theirPick]
     local label = theirs and tostring(theirs.species) or "their POKéMON"
+    -- Gen 3 species are numbers; the cart names a mon by its nickname.
+    if theirs and trade.labelOf then label = trade:labelOf(theirs) end
     self.ui:confirm(game, ("Trade for\n%s?"):format(label), function(yes)
       session.confirmOpen = false
       session.net:send(trade:confirm(yes and true or false))
@@ -1026,6 +1442,16 @@ function M:advanceTrade(game, session)
     local slot = trade.myPick
     local ok, received, evolveTo, evoEntry =
       pcall(function() return trade:apply(game) end)
+    -- An apply that answered nothing applied nothing (Trade2 and Trade3 warn
+    -- and return nil; Gen 1's raises instead), so it is the failure branch
+    -- below, not a "traded over!" about a mon that never arrived.
+    local raised = not ok
+    if ok and received == nil then ok = false end
+    -- Trade3 found the mon it sent by identity; the received one is there.
+    if trade.appliedSlot then slot = trade.appliedSlot end
+    -- The session this trade wrote into (Gen 3): the evolution below is
+    -- about that save and no other -- see `evolve`.
+    local owner = generationOf3(game) and trade.session or nil
 
     -- Reaching "done" means two things at once: the peer's confirm is in
     -- hand, and this side's own confirm went out before the machine could
@@ -1049,8 +1475,12 @@ function M:advanceTrade(game, session)
       -- and ahead of the box: the swap is already in game.save.party, and
       -- every frame it is only there is a frame a force-quit can undo it in.
       self:saveTrade(game)
+      -- The exchange is over and on disk: the screen goes back to the player
+      -- (the line below goes up in the hold's place).
+      self:releaseHold(session)
 
       local name = received and tostring(received.species) or "a POKéMON"
+      if received and trade.labelOf then name = trade:labelOf(received) end
       -- The evolution follows the line, never sits under it: the cable club
       -- prints "Trade completed!" and only then flashes the mon, and a movie
       -- opening on top of a box the player is still reading would bury it.
@@ -1060,21 +1490,39 @@ function M:advanceTrade(game, session)
       -- committed on both sides by now and there is no second chance at it.
       -- The guard is what keeps a stub that *both* calls back and returns
       -- nothing from evolving the same mon twice.
+      --
+      -- On Gen 3 the line can wait (M:tell, the cart's menus), and a player
+      -- can reset to the title and load another save while it does.  The
+      -- evolution -- and the save it ends in -- belongs to the save the swap
+      -- was made in: under any other it would evolve a mon that is not in
+      -- the party and then write *that* save over this one.
       local evolved = false
       local function evolve()
         if evolved then return end
         evolved = true
+        if owner ~= nil and currentSession3(game) ~= owner then
+          mod.log:warn("a different save was loaded before %s could evolve "
+            .. "after the trade, so it did not -- the trade itself was saved; "
+            .. "trade it again to give the evolution another chance",
+            tostring(Trade3.displayName(received)))
+          return
+        end
         self:evolveTraded(game, received, evolveTo, evoEntry, slot)
       end
-      if not self.ui:say(("%s was\ntraded over!"):format(name), evolve) then
-        evolve()
-      end
+      -- Through M:tell, so a player who opened the BAG while waiting on the
+      -- far side's confirm reads it once they close the BAG rather than
+      -- through it -- and tell runs `evolve` at once when no box could go up.
+      self:tell(game, ("%s was\ntraded over!"):format(name), evolve)
     else
+      self:releaseHold(session)
       -- The peer has our confirm and will apply regardless, so there is no
       -- undo to offer; what there is, is a way to see what actually landed.
-      mod.log:warn("applying the finished trade raised (%s) -- check the "
-        .. "party from START > POKéMON before trading again", tostring(received))
-      self.ui:say("The trade failed\nto complete.")
+      -- (A nil answer already said why in its own warning.)
+      if raised then
+        mod.log:warn("applying the finished trade raised (%s) -- check the "
+          .. "party from START > POKéMON before trading again", tostring(received))
+      end
+      self:tell(game, "The trade failed\nto complete.")
     end
 
   elseif trade.stage == "cancelled" and not session.applied then
@@ -1113,11 +1561,21 @@ end
 -- the honest thing to do is say so and name the way out.  `false` is a
 -- refusal rather than a throw (src/script/Commands.lua reads it that way for
 -- a tool session that vetoes writes) and is reported the same.
+--
+-- Gen 3's writer is Game3:saveGame -- START > SAVE's own path, which also
+-- persists the live flag store and the FRLG quest log before it writes, and
+-- which the engine's own Gen 3 link trade runs after every trade as well
+-- (src/core/game3/link/trade.lua saveAfterTrade).  It answers nil when the
+-- phase has nothing to save, which reads as written, as on the other two.
 function M:saveTrade(game)
-  if type(game) ~= "table" or type(game.writeSave) ~= "function" then
-    return false
+  if type(game) ~= "table" then return false end
+  local write = game.writeSave
+  if type(write) ~= "function" and type(game.saveGame) == "function"
+      and Gen.generation(game) == 3 then
+    write = game.saveGame
   end
-  local ok, wrote = pcall(game.writeSave, game)
+  if type(write) ~= "function" then return false end
+  local ok, wrote = pcall(write, game)
   if ok and wrote ~= false then return true end
   mod.log:warn("could not save after the trade (%s) -- the POKéMON is in "
     .. "the party, but save from START > SAVE before quitting or it will "
@@ -1156,7 +1614,9 @@ end
 function M:evolveTraded(game, mon, evolveTo, entry, slot)
   if not (game and type(mon) == "table" and evolveTo) then return false end
 
-  local isGen2 = Gen.generation(game) == 2
+  local generation = Gen.generation(game)
+  if generation == 3 then return self:evolveTraded3(game, mon, evolveTo) end
+  local isGen2 = generation == 2
   local ok, Evolution = pcall(require,
     isGen2 and "src.core.gen2.Evolution" or "src.pokemon.Evolution")
   if not (ok and type(Evolution) == "table") then
@@ -1222,6 +1682,60 @@ function M:evolveTraded(game, mon, evolveTo, entry, slot)
   return false
 end
 
+-- The Gen 3 evolution: the cart's own EvolutionScene, opened the way
+-- natives_trade.lua tryTradeEvolution opens it after a cable trade --
+-- `canStop = false` (a trade evolution cannot be cancelled with B), via
+-- "trade" so pokemon.evolved says so.  The scene is a layer of its own that
+-- applies the evolution itself (Evolution.apply: species, renamed nickname,
+-- stats, dex, Shedinja) and runs the learn-move queue for the new species
+-- before it pops itself and calls back -- which is where the second save
+-- goes.  The held item a trade-item row wanted is already gone: Trade3's
+-- apply asked Evolution.tradeTarget, which takes it the way the cart does.
+--
+-- Without a window (headless) or without the scene module, the evolution is
+-- applied outright, as tryTradeEvolution's own headless branch does, and
+-- the player is told what they missed.
+function M:evolveTraded3(game, mon, evolveTo)
+  local Evolution = Gen3.engine("src.core.game3.evolution")
+  if not (Evolution and type(Evolution.apply) == "function") then
+    mod.log:warn("the engine's Gen 3 evolution module is unavailable, so the "
+      .. "POKéMON just traded over did not evolve -- update gen1recomp "
+      .. "(dev branch); the trade itself is safe")
+    return false
+  end
+  local session = (type(game) == "table" and game.session) or Gen3.session()
+  local function persist() self:saveTrade(game) end
+
+  if type(love) == "table" and love.graphics then
+    local Scene = Gen3.engine("src.ui.game3.evolution_scene")
+    if Scene and type(Scene.start) == "function" then
+      local ok, shown = pcall(Scene.start, mon, evolveTo, {
+        canStop = false,
+        session = session,
+        via = "trade",
+        onDone = function() persist() end,
+      })
+      if ok and shown then return true end
+    end
+  end
+
+  if tonumber(mon.species) == tonumber(evolveTo) then return true end
+  local ran, applied = pcall(Evolution.apply, mon, evolveTo, session,
+    session and session.bag, "trade")
+  if ran and applied then
+    persist()
+    if type(love) == "table" and love.graphics then
+      mod.log:warn("could not open the evolution screen, so %s evolved "
+        .. "without one -- the POKéMON is fine; report the line above",
+        tostring(Trade3.displayName(mon)))
+    end
+    return true
+  end
+  mod.log:warn("%s did not evolve after the trade -- trade it again to give "
+    .. "the evolution another chance", tostring(Trade3.displayName(mon)))
+  return false
+end
+
 -- The Gen 2 push, split out because it carries the slot bookkeeping the Gen
 -- 1 path does not need: EvolutionAnim builds a *new* party record and files
 -- it at `index`, so a wrong index would write the evolved mon over somebody
@@ -1279,7 +1793,19 @@ end
 
 -- Transport became ready again (welcome after a blip, or the suite calling
 -- this directly). Resume a live mediated fight with mmo.battle_reconnect.
+--
+-- Anything still held back for the player (M:tell, a deferred ask) is about
+-- the connection before this one -- an ask the hub forgot with it, a "said
+-- no" to an ask the reconnect already cleared -- so it goes, unseen, rather
+-- than surfacing later as an ask nobody can answer.  The line a finished
+-- trade still owes is kept: it carries the evolution behind it, and M:tell
+-- never files such a line under this module (see there).
 function M:onTransportReady()
+  if self.incoming and self.incoming.deferred then self.incoming = nil end
+  local ui = self.ui
+  if type(ui) == "table" and type(ui.dropDeferred) == "function" then
+    ui:dropDeferred(self)
+  end
   local fight = self.fight
   if fight and not fight.finished and fight.onTransportReady then
     return fight:onTransportReady()
@@ -1306,6 +1832,17 @@ function M:update(game, dt)
   self.linkWasDown = not alive
 
   self:waitOutRequest(game, dt)
+
+  -- Prompts held back while the cart had the screen (Ui:whenFree -- this
+  -- module's, Party's, anyone's that shares the Ui).  Ui pumps its queue from
+  -- an input.step link of its own on Gen 3 as well, hub or no hub (a line a
+  -- finished trade owes outlives the connection); this pass is the one the
+  -- hub tick adds, and a ui without that link (a harness) relies on.
+  -- Nothing queued is one field read.
+  local ui = self.ui
+  if type(ui) == "table" and type(ui.pumpDeferred) == "function" then
+    ui:pumpDeferred(gameOf(self, game))
+  end
 
   local session = self.active
   if not session then return end
@@ -1383,11 +1920,27 @@ function M:waitOutRequest(game, dt)
     if outgoing.clock >= REQUEST_TIMEOUT then
       local name = outgoing.name or "They"
       self:cancelRequest()
-      self.ui:say(("%s never\nanswered."):format(name))
+      self:tell(game, ("%s never\nanswered."):format(name))
     end
   end
 
   local incoming = self.incoming
+  if incoming and incoming.deferred then
+    -- Their ask, still waiting for this player to come out of the cart's
+    -- menus (M:onRequest).  Clocked on the asker's own REQUEST_TIMEOUT: by
+    -- the time it runs out here the asker has given up and cancelled (which
+    -- M:onCancel drops without a box), so this is only the backstop for a
+    -- cancel that never arrived -- the ask is dropped unseen and answered no,
+    -- the reason saying this side was busy, which it was.
+    incoming.clock = (incoming.clock or 0) + dt
+    if incoming.clock >= REQUEST_TIMEOUT then
+      self.incoming = nil
+      self.transport:send(Wire.RESPOND,
+        { to = incoming.from, kind = incoming.kind, accept = false, reason = "busy" })
+      self:sayRefused(incoming.name, incoming.kind)
+    end
+    return
+  end
   local held = incoming and self.incomingBox
   if not (held and held.box) then return end
   local on = self:onStack(held.game or game, held.box)

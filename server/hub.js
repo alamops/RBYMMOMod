@@ -19,7 +19,10 @@
  * relay backend already speaks, so the client reuses the engine's framing
  * instead of shipping its own.
  *
- * No dependencies: node hub.js [port] [--generation 1|2]
+ * No dependencies: node hub.js [port] [--generation 1|2|3]
+ *
+ * 1 = Red/Blue/Yellow, 2 = Gold/Silver/Crystal, 3 = FireRed, LeafGreen and
+ * Emerald (one Gen 3 hub admits all three carts; PROTOCOL 30+).
  *
  * ----------------------------------------------------------------------
  *
@@ -75,7 +78,9 @@ const shim = parseShimArgv(process.argv);
 // beats RBY_MMO_PORT, and the player cap is still clamped to 2..64 rather
 // than obeyed -- via config.js, which owns those bounds now, so there is one
 // definition of them instead of two that can drift. Generation follows the
-// same precedence: argv --generation > RBY_MMO_GENERATION > default 1.
+// same precedence: argv --generation > RBY_MMO_GENERATION > default 1, and
+// config.js is also where 1|2|3 is checked -- a value outside it is pulled to
+// 1 with a warning line, never silently.
 const given = {
   listen: {
     host: process.env.RBY_MMO_HOST || '0.0.0.0',
