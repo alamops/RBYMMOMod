@@ -72,17 +72,20 @@ local stubMod = {
       errors[#errors + 1] = ok and line or tostring(fmt)
     end,
   },
-  -- The forget prompt's only seam. `Coop.offerForgets` calls
-  -- `mod.ui.push(game, "MoveLearnMenu", mon, move)` and the engine's screen
-  -- goes straight onto the stack, so a stand-in that records *and pushes* is
-  -- what makes the ordering question in section 10 answerable at all.
+  -- The forget prompt's only seam. `Coop.offerForgets` opens through
+  -- `LearnMove.open`, which on this suite (package.path is blank, so
+  -- generation stays 1) pushes `MoveLearnMenu` with the completion
+  -- callback as the fifth argument. The stand-in records that callback
+  -- and pushes, which is what makes section 10's order answerable.
   ui = {
-    push = function(game, screen, mon, move)
+    push = function(game, screen, mon, move, done)
+      local marker = { moveLearn = true }
       prompts[#prompts + 1] = {
-        screen = screen, mon = mon, move = move,
+        screen = screen, mon = mon, move = move, done = done,
         top = game and game.stack and game.stack:top(),
       }
-      if game and game.stack then game.stack:push({ moveLearn = true }) end
+      if game and game.stack then game.stack:push(marker) end
+      return marker
     end,
   },
   options = { get = function() return false end },
@@ -1084,12 +1087,13 @@ end)()
 -- ------------------------------------------------------------------
 --
 -- The buried battle comes off the stack *before* the forget prompt goes up.
--- `Coop.offerForgets` pushes MoveLearnMenu synchronously, straight above
--- whatever is on top; an unwind that then popped everything above the buried
--- battle destroyed the menu in the same frame it was raised, and every solo
--- level-up that taught a fifth move lost it silently. Co-op never had the bug
--- because co-op unwinds at the *start* of its fight and has nothing left above
--- the battle by prompt time.
+-- `Coop.offerForgets` opens through LearnMove.open, which here pushes
+-- MoveLearnMenu synchronously, straight above whatever is on top; an unwind
+-- that then popped everything above the buried battle destroyed the menu in
+-- the same frame it was raised, and every solo level-up that taught a fifth
+-- move lost it silently. Co-op takes the buried battle off at the start of
+-- its fight; on Gold the ending pop is inside onDone, and the prompt goes
+-- up only after that.
 --
 -- Except that the two steps swap over on Gold, and have to: Gen 1's
 -- `BattleState:finish` pops the state and then calls onFinish, so a caller
@@ -1108,12 +1112,16 @@ end)()
     seed = 7,
   })
   playOut(f)
-  -- What a level-up that taught a fifth move hands `onDone`.
-  f.fight.toLearn = { { mon = f.party[1], move = "THUMP" } }
+  -- What a level-up that taught a fifth move hands `onDone`. The party
+  -- mon already knows THUMP, so the banked move is one it does not: an
+  -- entry the live mon already has is skipped rather than prompted.
+  f.fight.toLearn = { { mon = f.party[1], move = "BUMP" } }
   f.fight:exit()
 
   eq(#prompts, 1, "the forget prompt was offered exactly once")
   eq(prompts[1] and prompts[1].screen, "MoveLearnMenu", "and it is that screen")
+  ok(type(prompts[1] and prompts[1].done) == "function",
+     "LearnMove.open hands MoveLearnMenu its completion callback")
   ok(prompts[1] and prompts[1].top and prompts[1].top.isOverworld,
      "raised over the world -- the buried battle was already unwound, so "
      .. "there is nothing left for the unwind to take the menu down with")
@@ -1134,13 +1142,15 @@ end)()
     seed = 7,
   })
   playOut(f)
-  f.fight.toLearn = { { mon = f.party[1], move = "THUMP" } }
+  f.fight.toLearn = { { mon = f.party[1], move = "BUMP" } }
   f.fight:exit()
 
   eq(#f.ending, 1, "the ritual ran")
   eq(f.ending[1].top, f.state,
      "with the battle still on the stack, because its own onDone is the pop")
   eq(#prompts, 1, "and the prompt still went up once")
+  ok(type(prompts[1] and prompts[1].done) == "function",
+     "LearnMove.open hands MoveLearnMenu its completion callback")
   ok(prompts[1] and prompts[1].top and prompts[1].top.isOverworld,
      "after that pop, over the world -- pushed before it, the menu is what "
      .. "the pop would have taken")
@@ -1175,7 +1185,7 @@ end)()
     seed = 7,
   })
   playOut(f)
-  f.fight.toLearn = { { mon = f.party[1], move = "THUMP" } }
+  f.fight.toLearn = { { mon = f.party[1], move = "BUMP" } }
   f.fight:exit()
 
   eq(#f.ending, 1, "the ritual ran on a Gold battle whose onDone never pops")
@@ -1187,6 +1197,8 @@ end)()
      or (f.game.stack:top() and f.game.stack:top().moveLearn),
      "leaving the world, not a finished battle, under what is on top")
   eq(#prompts, 1, "the forget prompt still went up exactly once")
+  ok(type(prompts[1] and prompts[1].done) == "function",
+     "LearnMove.open hands MoveLearnMenu its completion callback")
   ok(prompts[1] and prompts[1].top and prompts[1].top.isOverworld,
      "over the world -- the correction ran before the prompt, so there was "
      .. "nothing left for it to unwind through")
@@ -1210,7 +1222,7 @@ end)()
     seed = 7,
   })
   playOut(f)
-  f.fight.toLearn = { { mon = f.party[1], move = "THUMP" } }
+  f.fight.toLearn = { { mon = f.party[1], move = "BUMP" } }
   f.fight:exit()
 
   eq(#f.ending, 1, "exactly one of the two callbacks ran")
@@ -1219,6 +1231,8 @@ end)()
      "and the battle is off the stack, though the callback that pops it "
      .. "was never the one called")
   eq(#prompts, 1, "the forget prompt went up exactly once")
+  ok(type(prompts[1] and prompts[1].done) == "function",
+     "LearnMove.open hands MoveLearnMenu its completion callback")
   ok(prompts[1] and prompts[1].top and prompts[1].top.isOverworld,
      "over the world")
 end)()
@@ -1249,6 +1263,63 @@ end)()
   eq(#f.ending, 0, "a battle too deeply buried to reach was never finished")
   eq(Coop.stackHolds(f.game, f.state), true, "and is still on the stack, "
      .. "waiting to be fought as an ordinary battle")
+end)()
+
+;(function()
+  -- A win that leaves nothing standing still blacks out, and the warp has to
+  -- see the forget prompt already on top. pumpBlackout fires in the same
+  -- call when the overworld is what is showing; running it before the prompt
+  -- sends the player to the center with the YES/NO never opened.
+  local seen = {}
+  local realBlackout = Coop.blackout
+  Coop.blackout = function(self, game, ctx)
+    local top = game and game.stack and game.stack:top()
+    seen[#seen + 1] = {
+      prompts = #prompts,
+      learn = top and top.moveLearn or false,
+      world = top and top.isOverworld or false,
+      ctx = ctx,
+    }
+    return realBlackout(self, game, ctx)
+  end
+
+  local function wipedWin(gold)
+    prompts = {}
+    local f = fightOf("trainer", {
+      gold = gold or nil,
+      party = { mon({ species = "ALPHA", spd = 90, atk = 120, maxHp = 200,
+                      level = 40 }) },
+      foes = { mon({ species = "BETA", spd = 5, maxHp = 20, atk = 1 }) },
+      seed = 7,
+    })
+    playOut(f)
+    f.sim.byId[PLAYER].mons[1].hp = 0
+    f.fight.result = "win"
+    f.fight.toLearn = { { mon = f.party[1], move = "BUMP" } }
+    f.fight:exit()
+    return f
+  end
+
+  wipedWin(false)
+  eq(#seen, 1, "a wiped Gen 1 win blacks out once")
+  eq(seen[1].prompts, 1, "and only after the forget prompt is up")
+  ok(seen[1].learn, "the screen on top is that prompt, so the warp waits")
+  ok(not seen[1].world, "the overworld is not what the pump sees")
+  eq(seen[1].ctx, "battle", "solo names the fight a battle")
+  eq(#prompts, 1, "still exactly one prompt")
+
+  seen = {}
+  wipedWin(true)
+  eq(#seen, 1, "a wiped Gold win blacks out once")
+  eq(seen[1].prompts, 1, "after its own pop, and after the prompt")
+  ok(seen[1].learn, "the prompt is on top, so the pop did not take it")
+  ok(not seen[1].world, "and the overworld is underneath, not showing")
+  eq(seen[1].ctx, "battle", "the noun is still a solo battle")
+  eq(#prompts, 1, "still exactly one prompt on Gold")
+  ok(type(prompts[1] and prompts[1].done) == "function",
+     "LearnMove.open still hands MoveLearnMenu its completion callback")
+
+  Coop.blackout = realBlackout
 end)()
 
 ;(function()
