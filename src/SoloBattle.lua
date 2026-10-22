@@ -1229,20 +1229,21 @@ end
 --      same trainer twice.
 --
 --      This step used to be number five, *after* the forget prompts, and that
---      inversion was a real bug rather than an untidiness. `Coop.offerForgets`
---      pushes `MoveLearnMenu` synchronously, straight above the buried battle;
---      an unwind that then popped everything above that battle destroyed the
---      menu -- and, for two moves at once, the "..." box carrying the
---      continuation -- in the same frame it was raised. Every solo level-up
---      that taught a fifth move lost it silently. Co-op never had the bug
---      because co-op unwinds at the *start* of its fight (`Coop.lua:2510`) and
---      so has nothing left above the battle by prompt time; solo unwinds at the
---      end, which inverts the pair. Doing it first here reproduces exactly the
---      stack shape co-op prompts over: the world, and nothing above it.
---   5. **The forget prompts go up, over the world**, as they do in co-op: they
---      are the player's own screens and belong over the world, not under a
---      warp -- and `Coop.pumpBlackout` is written to wait for them, since the
---      thing it waits for is the overworld coming back to the top.
+--      inversion was a real bug rather than an untidiness. The prompt opens
+--      through `LearnMove.open`, straight above whatever is on top; an unwind
+--      that then popped everything above that battle destroyed the menu in
+--      the same frame it was raised. Every solo level-up that taught a fifth
+--      move lost it silently. Co-op takes its buried battle off at the start
+--      of the fight and, on Gold, pops again inside `onDone` when the fight
+--      ends, so the prompt there goes up only after that pop. Doing the
+--      unwind first here is the same order: the world, then the prompt.
+--   5. **The forget prompts go up, over the world**, one move per
+--      `LearnMove.open` callback. Gen 2 reaches `learnMoveOn`; Gen 1 still
+--      resolves to `MoveLearnMenu` inside that call. They are the player's
+--      own screens and belong over the world, not under a warp -- and
+--      `Coop.pumpBlackout` waits for the overworld to come back to the top
+--      on Gen 1. On Gold the prompt's update holds the white fade until the
+--      answer.
 --   6. **The ritual runs, and the whiteout is run by whoever the engine did
 --      not run it for.** A won trainer battle whose winner's own team was
 --      wiped is the case that needs the second half: the engine marks the
@@ -1254,16 +1255,18 @@ end
 -- about who pops the battle around it. Gen 1's `BattleState:finish` pops the
 -- state itself and *then* calls `onFinish`, so a caller standing in for it pops
 -- first and hands the ritual a state already off the stack -- which is the
--- contract co-op has always run on. Gen 2 has no such split: the pop lives
--- *inside* the closure `World:startBattle` hands to `Gen2BattleState` as
--- `onDone`, which the loader aliases onto `onFinish` (`src/Client.lua:2523`),
--- and it pops the top of the stack unconditionally.
+-- contract co-op has always run on. Gen 1's `onFinish` does not pop. Gen 2 has
+-- no such split: the pop lives *inside* the closure `World:startBattle` hands
+-- to `Gen2BattleState` as `onDone`, which the loader aliases onto `onFinish`
+-- (`src/Client.lua:2602`), and it pops the top of the stack unconditionally.
 --
 -- So on Gold the battle is left where it is and the ritual takes it down, and
 -- the prompts go up after -- because anything pushed before it would be exactly
--- what that pop took. The callback is the test rather than the generation
--- number, because "does the ritual pop for itself" is a property of the
--- callback and not of the game.
+-- what that pop took. Gen 2 evolutions wait for the same moment: a screen
+-- pushed inside `finishBuriedBattle` is what `onDone` removes, so they run
+-- after `settleStack`, and the prompt is their `onSettled`. Who pops is a
+-- property of the callback. Generation 2 is what moves the evolution offer,
+-- because only that anim replaces the party slot the prompt has to name.
 --
 -- ------- and the prediction is checked rather than trusted
 --
@@ -1307,12 +1310,11 @@ function M:_ended(result, toLearn)
   local outcome = M.engineResult(result, reason)
   local blackout = Coop.blacksOut(outcome, game)
 
-  -- Coop's own, borrowed rather than copied a third time. It reads exactly one
-  -- field off the holder it is called on -- `self.ui`, to pace two prompts with
-  -- a "..." box -- and this file has one. Sessions states its own twin of this
-  -- flow because it cannot reach Coop at all; this file can, and a third copy
-  -- of "put the moves a level taught to the player" would be a third thing to
-  -- keep in step.
+  -- Coop's own, borrowed rather than copied a third time. It opens one
+  -- LearnMove prompt per callback and reads `self.ui` only for the free-slot
+  -- fallback line. Sessions states its own twin because it cannot reach
+  -- Coop; this file can, and a third copy of "put the moves a level taught
+  -- to the player" would be a third thing to keep in step.
   local function offerForgets()
     local okForgets, whyForgets = pcall(Coop.offerForgets, self, game, toLearn)
     if not okForgets then
@@ -1386,9 +1388,9 @@ function M:_ended(result, toLearn)
   -- given its result and is still owed a real fight -- see `mayFinish` above --
   -- so it must be left exactly where it is.
   --
-  -- Before the forget prompts, never after: the prompts push MoveLearnMenu
-  -- straight above whatever is on top, and an unwind that ran after them is an
-  -- unwind that takes them down again.
+  -- Before the forget prompts, never after: LearnMove.open pushes straight
+  -- above whatever is on top, and an unwind that ran after them takes them
+  -- down again.
   local function settleStack()
     if not (engine and handled) then return end
     if Coop.stackHolds(game, engine) ~= true then return end
@@ -1399,21 +1401,37 @@ function M:_ended(result, toLearn)
     end
   end
 
+  -- The blackout runs once, after the first prompt is up. On Gold that can
+  -- be a later turn: the evolution anim's onSettled is what opens the prompt.
+  local function afterPrompts()
+    if blackout and not (handled and engineRitual) then
+      -- "battle", not co-op's default "2-on-2": a lone player's four possible
+      -- blackout warnings must not describe a feature they were not using.
+      Coop.blackout(self, game, "battle")
+    end
+  end
+
   -- Steps 5 and 6, in whichever order the buried battle's own pop allows.
   if ritualPops then
     finishEngine()
     settleStack()
-    offerForgets()
+    if Gen.generation(game) == 2 then
+      Coop.stampLearnIndex(game, toLearn)
+      Coop.offerEvolutions(game, levelled, outcome, evoResolved, {
+        onSettled = function()
+          offerForgets()
+          afterPrompts()
+        end,
+      })
+    else
+      offerForgets()
+      afterPrompts()
+    end
   else
     offerForgets()
     finishEngine()
     settleStack()
-  end
-
-  if blackout and not (handled and engineRitual) then
-    -- "battle", not co-op's default "2-on-2": a lone player's four possible
-    -- blackout warnings must not describe a feature they were not using.
-    Coop.blackout(self, game, "battle")
+    afterPrompts()
   end
 
   -- And nothing else, deliberately: a wild encounter that ended in a catch has

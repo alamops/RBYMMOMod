@@ -66,6 +66,7 @@ local Gen = need("Gen")
 local CoopBattle = need("CoopBattle")
 local Mediated = need("MediatedBattle")
 local EvolveFx = need("EvolveFx")
+local LearnMove = need("LearnMove")
 
 -- How often a standing offer is re-attempted while this client is busy.
 --
@@ -485,12 +486,34 @@ end
 -- cancel): those mons must not be offered again.
 --
 -- Body lives on EvolveFx so Sessions:endMediated can call the same offer
--- without requiring this module (that graph is a cycle).
-function M.offerEvolutions(game, leveledUp, result, evoResolved)
+-- without requiring this module (that graph is a cycle). `opts.onSettled`
+-- is forwarded; the warn and the ui stay this wrapper's.
+function M.offerEvolutions(game, leveledUp, result, evoResolved, opts)
+  opts = type(opts) == "table" and opts or {}
   return EvolveFx.offerEvolutions(game, leveledUp, result, evoResolved, {
     warn = function(fmt, ...) mod.log:warn(fmt, ...) end,
     ui = mod.ui,
+    onSettled = opts.onSettled,
   })
+end
+
+-- Remember where each banked move sat in the save party, before an
+-- evolution anim replaces that slot. Only a missing index is filled, and
+-- only by table identity, so a later prompt can read the live record.
+function M.stampLearnIndex(game, toLearn)
+  if type(toLearn) ~= "table" then return end
+  local party = game and game.save and game.save.party
+  if type(party) ~= "table" then return end
+  for _, entry in ipairs(toLearn) do
+    if type(entry) == "table" and entry.partyIndex == nil then
+      for i, mon in ipairs(party) do
+        if mon == entry.mon then
+          entry.partyIndex = i
+          break
+        end
+      end
+    end
+  end
 end
 
 -- Tell the buried engine battle how the fight it never ran went.
@@ -517,11 +540,14 @@ function M.finishBuriedBattle(engine, game, result, blackout)
     engineRitual = true
   end
 
-  -- Before afterBattle: vanilla offers evolutions on the battle screen, then
-  -- whites out. This fight already popped that screen, so the offer sits on
-  -- the overworld -- the same place the forget-a-move menu already goes --
-  -- and pumpBlackout waits for it when a warp is owed.
-  M.offerEvolutions(game, engine.leveledUp, result, engine.evoResolved)
+  -- Before afterBattle on Gen 1: vanilla offers evolutions on the battle
+  -- screen, then whites out. This fight already popped that screen, so the
+  -- offer sits on the overworld. Gen 2's onDone pops whatever is on top, so
+  -- an anim pushed here is what that pop removes. Gen 2 evolutions wait
+  -- until the pop has run (onBattleOver / SoloBattle:_ended).
+  if Gen.generation(game) ~= 2 then
+    M.offerEvolutions(game, engine.leveledUp, result, engine.evoResolved)
+  end
 
   local ok, err = pcall(finish, outcome)
   if not ok then
@@ -2576,8 +2602,9 @@ function M:syntheticFinish(game, plan, coopState)
     end
     -- Stub battle for afterBattle: kind/oppClass keep the Oak's Lab rival
     -- blackout exception honest if it ever lands here. Evolutions do not
-    -- read leveledUp off this stub -- afterBattle never did; they go through
-    -- M.offerEvolutions, the same check the walk-in path runs.
+    -- read leveledUp off this stub -- afterBattle never did. Gen 1 offers
+    -- them here, on the same table checkParty mutates. Gen 2 waits until
+    -- afterBattle's pop has run, then offers from onBattleOver.
     local stub = {
       kind = "trainer",
       oppClass = class,
@@ -2585,7 +2612,9 @@ function M:syntheticFinish(game, plan, coopState)
       leveledUp = coopState and coopState.leveledUp or nil,
       evoResolved = coopState and coopState.evoResolved or nil,
     }
-    M.offerEvolutions(game, stub.leveledUp, "win", stub.evoResolved)
+    if Gen.generation(game) ~= 2 then
+      M.offerEvolutions(game, stub.leveledUp, "win", stub.evoResolved)
+    end
     if type(ow.afterBattle) == "function" then
       local ok, err = pcall(ow.afterBattle, ow, "win", stub)
       if not ok then
@@ -2893,11 +2922,10 @@ function M:onBattleOver(result, game, state, toLearn)
   -- world after the fix rather than the world that needed one.
   local blackout = M.blacksOut(result, game)
 
-  self:offerForgets(game, toLearn)
-  -- Consumed, not dropped. The trainer has been fought -- by four of them --
-  -- so the script that was waiting in front of it carries on and the ordinary
-  -- 1v1 never runs. Dropping it instead would leave that script suspended for
-  -- the rest of the session.
+  -- Consumed first, while nothing of ours is on the stack. The trainer has
+  -- been fought -- by four of them -- so the script that was waiting in
+  -- front of it carries on and the ordinary 1v1 never runs. Dropping it
+  -- instead would leave that script suspended for the rest of the session.
   --
   -- Two answers come back, and between them they say who owes the ritual:
   --
@@ -2906,6 +2934,8 @@ function M:onBattleOver(result, game, state, toLearn)
   --     the trainer. Nobody (here) has an onFinish to hand a result to.
   --     Party fights leave blackout to us; invite NPC wins take
   --     M:syntheticFinish below when the waiter's npcId is on the plan.
+  --     The fifth-move prompt still opens: consume being a no-op is not a
+  --     reason to drop a move the fight banked.
   --   * true plus engineRitual -- we handed the engine "lose" and its own
   --     afterBattle did the whole vanilla thing. Not ours; running a second
   --     one would halve the money twice.
@@ -2913,11 +2943,16 @@ function M:onBattleOver(result, game, state, toLearn)
   --     wiped. The engine marked the trainer beaten and ran the rewards, and
   --     deliberately did not black anybody out (see M:consume). Ours.
   --
-  -- All of it runs *here*, after the battle screen has already come off the
-  -- stack: CoopBattle:finish pops the state and StateStack:pop then calls its
-  -- exit, which is what reaches this function. The ritual's save writes land
-  -- immediately; its warp waits for whatever the two lines above may have put
-  -- on screen (see M:pumpBlackout).
+  -- Gold's onDone, which Client aliases onto onFinish, always pops the top
+  -- of the stack and then arms the white return fade. That pop has to run
+  -- before any learn screen goes up: a screen pushed first is what the pop
+  -- removes, and the menu left behind never updates, so the fade stays
+  -- white. An empty toLearn pushes nothing of ours; the finisher's own pop
+  -- is the only one. Gen 1's onFinish does not pop.
+  --
+  -- The ritual's save writes land immediately. The warp waits until the
+  -- first learn screen is up (see M:pumpBlackout) -- asked from `after`,
+  -- never also from here.
   local handled, engineRitual = self:consume(result, blackout)
   -- Invite / menu joiner: no buried BattleState, so consume is a no-op. On a
   -- win, finish the trainer off synthetically from the waiter's npcId --
@@ -2926,64 +2961,103 @@ function M:onBattleOver(result, game, state, toLearn)
   if not handled and result == "win" and plan and plan.npcId then
     handled = self:syntheticFinish(game, plan, state)
   end
-  if blackout and not (handled and engineRitual) then self:blackout(game) end
+
+  -- The prompt, then the blackout. Gen 2 evolutions run after the pop and
+  -- defer both until their anims are gone, because the prompt has to name
+  -- the party record the anim left behind. Gen 1 evolutions already ran
+  -- inside the finisher, on the same table.
+  local function after()
+    self:offerForgets(game, toLearn)
+    if blackout and not (handled and engineRitual) then
+      self:blackout(game)
+    end
+  end
+  if Gen.generation(game) == 2 then
+    M.stampLearnIndex(game, toLearn)
+    M.offerEvolutions(game, state and state.leveledUp, result,
+      state and state.evoResolved, { onSettled = after })
+  else
+    after()
+  end
 end
 
 -- Leftovers a monster levelled into but had no room for during a co-op
 -- fight. Free slots already landed mid-battle; this is only the fifth-move
--- case. Put to the player *after* the battle, one screen at a time -- a
--- forget menu mid-fight would stall the other humans through the hub's
--- choice timeout, and unlike everything else on that screen this choice
--- only its owner can make and only their own save records.
+-- case. Opened after the battle's pop, one move per callback, on the white
+-- return fade -- a forget menu mid-fight would stall the other humans
+-- through the hub's choice timeout, and unlike everything else on that
+-- screen this choice only its owner can make and only their own save
+-- records. The screen's update holds World:step, so the fade stays white
+-- behind the dialog and ticks after the answer.
 --
 -- 1v1 / wild opens the same prompt mid-award (MediatedBattle + LearnMove.open).
 -- This path is the co-op leftover, plus any 1v1 prompt they left unanswered.
 --
--- The engine's own MoveLearnMenu is pushed rather than a copy of it: it is the
--- screen that already knows how to show four moves and their PP, and how to
--- refuse politely. Gen 2 has no Gen2MoveLearnMenu twin, but the Gen 1 screen
--- still resolves from the registry and works on Gold for the forget prompt —
--- try it rather than silently dropping earned moves.
+-- LearnMove.open is the opener. Gen 2 reaches Game2:learnMoveOn (Yes/No,
+-- the deleter, Waterfall and Whirlpool). Gen 1 still resolves to
+-- MoveLearnMenu inside that call. A second pending move opens only from the
+-- first answer. The mon is the live party slot when stampLearnIndex
+-- recorded one -- an evolution anim may already have replaced that table.
+-- An entry the live mon already knows is skipped. `open` returning false
+-- keeps the free-slot autofill, or the warn, and continues.
 --
--- Sessions:offerForgets is this function's twin on the mediated 1v1 / wild
--- leftover path, over the same `{ mon, move }` entries: a fight that is not a
--- co-op battle has no co-op state to hand this one, so it states the flow
--- itself. The two differ in how they sequence -- that one hands MoveLearnMenu
--- its own completion callback, this one paces with a "..." box -- and if this
--- ever needs revisiting, that is the version to copy.
+-- Sessions:offerForgets is the 1v1 leftover twin over the same `{ mon, move }`
+-- entries. It does not call Gold's onDone. This one does not either; the
+-- pop already happened above.
 function M:offerForgets(game, toLearn)
   if not (game and toLearn and #toLearn > 0) then return false end
   local pending = {}
   for i, entry in ipairs(toLearn) do pending[i] = entry end
+  local party = game.save and game.save.party
+
+  local function knows(mon, move)
+    if type(mon) ~= "table" or type(mon.moves) ~= "table" then return false end
+    for _, known in ipairs(mon.moves) do
+      local id = type(known) == "table" and known.id or known
+      if id == move then return true end
+    end
+    return false
+  end
 
   local function nextOne()
     local entry = table.remove(pending, 1)
-    if not entry then return end
-    local ok = pcall(function()
-      mod.ui.push(game, "MoveLearnMenu", entry.mon, entry.move)
-    end)
-    if not ok then
-      -- Auto-fill an empty move slot when the forget UI is missing; otherwise
-      -- warn so the player can re-level outside co-op.
-      local mon = entry.mon
-      local moved = false
-      if type(mon) == "table" and type(mon.moves) == "table" and #mon.moves < 4 then
-        local mdef = game.data and game.data.moves and game.data.moves[entry.move]
-        mon.moves[#mon.moves + 1] = {
-          id = entry.move,
-          pp = (mdef and mdef.pp) or 5,
-        }
-        moved = true
-        self.ui:say((mon.nickname or mon.species or "POKéMON")
-          .. " learned\n" .. tostring(entry.move) .. "!")
-      end
-      if not moved then
-        mod.log:warn("could not open the move-learning screen for %s; it can "
-          .. "still be learned by levelling again", tostring(entry.move))
-      end
+    if entry == nil then return end
+    if type(entry) ~= "table" then
+      nextOne()
+      return
     end
-    -- One at a time, so two level-ups do not stack two menus.
-    if #pending > 0 then self.ui:say("...", nextOne) end
+    local mon = entry.mon
+    local idx = entry.partyIndex
+    if type(party) == "table" and type(party[idx]) == "table" then
+      mon = party[idx]
+    end
+    if knows(mon, entry.move) then
+      nextOne()
+      return
+    end
+    local opened = false
+    local ok = pcall(function()
+      opened = LearnMove.open(game, mon, entry.move, nextOne) and true or false
+    end)
+    if ok and opened then return end
+    -- Auto-fill an empty move slot when the forget UI is missing; otherwise
+    -- warn so the player can re-level outside co-op.
+    local moved = false
+    if type(mon) == "table" and type(mon.moves) == "table" and #mon.moves < 4 then
+      local mdef = game.data and game.data.moves and game.data.moves[entry.move]
+      mon.moves[#mon.moves + 1] = {
+        id = entry.move,
+        pp = (mdef and mdef.pp) or 5,
+      }
+      moved = true
+      self.ui:say((mon.nickname or mon.species or "POKéMON")
+        .. " learned\n" .. tostring(entry.move) .. "!")
+    end
+    if not moved then
+      mod.log:warn("could not open the move-learning screen for %s; it can "
+        .. "still be learned by levelling again", tostring(entry.move))
+    end
+    nextOne()
   end
 
   nextOne()

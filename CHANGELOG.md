@@ -4,6 +4,17 @@ All notable changes to this mod are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version
 here must match `manifest.version`.
 
+## [1.4.20] - 2026-10-21
+
+### Fixed
+
+- **A full moveset can learn a move after a Gold or Crystal co-op fight.**
+  Levelling a Pokémon that already knew four moves showed the announcement
+  and then a dialog with no YES/NO. Answering was impossible, and when the
+  battle ended the screen stayed white. The replace-or-skip prompt now opens
+  after the fight, on the white return fade, and the map fades in after the
+  answer. A Pokémon that also evolves is asked on the evolved form.
+
 ## [1.4.19] - 2026-09-29
 
 ### Fixed

@@ -9066,13 +9066,19 @@ pump(ann); pump(bob); pump(cal); pump(dee)
 
 for _, side in ipairs({ ann, bob, cal, dee }) do
   check(side.coop.lastPlan ~= nil, side.name .. " reaches the handoff")
-  eq(side.coop.lastPlan.kind, "party", "as a party battle")
-  eq(#side.coop.lastPlan.allies, 2, "with two on their side")
-  eq(#side.coop.lastPlan.foes, 2, "and two against")
+  -- A missing plan has to fail these, not abort the chunk: the evolution
+  -- and fifth-move sections below never run if this index throws.
+  local plan = side.coop.lastPlan
+  eq(plan and plan.kind, "party", "as a party battle")
+  eq(plan and #(plan.allies or {}), 2, "with two on their side")
+  eq(plan and #(plan.foes or {}), 2, "and two against")
 end
-eq(ann.coop.lastPlan.side, bob.coop.lastPlan.side,
+local annPlan = ann.coop.lastPlan
+local bobPlan = bob.coop.lastPlan
+local calPlan = cal.coop.lastPlan
+eq(annPlan and annPlan.side, bobPlan and bobPlan.side,
    "partners are told they are on the same side")
-check(ann.coop.lastPlan.side ~= cal.coop.lastPlan.side,
+check(annPlan and calPlan and annPlan.side ~= calPlan.side,
       "and opponents are not")
 
 -- ------- the engine's battle is finished off, not left hanging
@@ -9671,8 +9677,10 @@ end)()
     if #(group.members or {}) == 4 then liveId = id end
   end
   check(liveId ~= nil, "agreeing on a party battle opens a relay group")
-  local group = hub.coopBattles[liveId]
-  eq(#group.members, 4, "with all four in it")
+  -- No group means the handoff above already failed. Indexing it would abort
+  -- the rest of this file, including the evolution and fifth-move sections.
+  local group = liveId and hub.coopBattles[liveId]
+  eq(group and #group.members, 4, "with all four in it")
   eq(ann.client.coopBattleId, liveId, "and each of them filed under it")
 
   -- one goodbye closes it for everybody
@@ -13680,15 +13688,16 @@ end)()
 
   local npcMenu = setmetatable({
     sim = npcClient.sim, mine = 1, phase = "choose", commandIndex = runIndex,
-    pending = {},
+    pending = {}, messages = {},
   }, { __index = CoopBattle })
   local committed
   npcMenu.commit = function(_, action) committed = action end
   CoopBattle.updateCommand(npcMenu, { wasPressed = function(_, k) return k == "a" end })
   eq(npcMenu.runAsk, nil, "against an NPC, RUN never raises a prompt")
-  check(committed ~= nil and committed.kind == "run",
-        "it is filed as the ordinary refused action instead -- byte-identical "
-        .. "to today")
+  eq(committed, nil,
+     "and it is not filed -- a filed run used to forfeit the gym")
+  eq(npcMenu.phase, "messages",
+     "the refusal is said, and the turn is not spent")
 
   -- ------- the partner's prompt: NO by default, and a settle floor before
   -- any button counts
@@ -30356,6 +30365,216 @@ end)()
   T.same(scissorWith(function(x, y) return 112.5 + x * 5, 24.5 + y * 5 end),
      { 112, 24, 801, 481 },
      "a fractional origin still reaches the far edge's partial pixel")
+end)()
+
+-- ------- issue #105 — a Gen 2 fifth move opens after the pop
+--
+-- Gold's onDone pops the top of the stack and arms the white return fade.
+-- The learn prompt has to go up after that pop, one move per callback, on
+-- the party record an evolution anim left behind. Invented species only.
+
+;(function()
+  local Coop = need("Coop")
+  local keptUi = stubMod.ui
+  local pushes = {}
+  local storedOnDone
+  local nextBorn
+  stubMod.ui = {
+    push = function(game, screen, opts)
+      pushes[#pushes + 1] = screen
+      if screen ~= "Gen2EvolutionAnim" then return nil end
+      if nextBorn and type(opts) == "table" and type(opts.index) == "number" then
+        game.save.party[opts.index] = nextBorn
+      end
+      storedOnDone = opts and opts.onDone
+      local marker = { evo = true }
+      if game.stack and game.stack.push then game.stack:push(marker) end
+      return marker
+    end,
+  }
+
+  local function fullMoves(extra)
+    local moves = {
+      { id = "DUST_A", pp = 10 },
+      { id = "DUST_B", pp = 10 },
+      { id = "DUST_C", pp = 10 },
+      { id = "DUST_D", pp = 10 },
+    }
+    if extra then moves[#moves + 1] = { id = extra, pp = 15 } end
+    return moves
+  end
+
+  local function fresh(party, data)
+    pushes = {}
+    storedOnDone = nil
+    local learned = {}
+    local fade = false
+    local popped = {}
+    local stack = {
+      states = {},
+      top = function(self) return self.states[#self.states] end,
+      pop = function(self)
+        local st = table.remove(self.states)
+        popped[#popped + 1] = st
+        return st
+      end,
+      push = function(self, st) self.states[#self.states + 1] = st end,
+    }
+    local game = {
+      generation = 2,
+      stack = stack,
+      save = { party = party, money = 0 },
+      data = data or { pokemon = {}, moves = {} },
+      learnMoveOn = function(self, mon, moveId, done)
+        local marker = { learn = true, mon = mon, moveId = moveId, done = done }
+        learned[#learned + 1] = marker
+        self.stack:push(marker)
+      end,
+    }
+    local function finish()
+      stack:pop()
+      fade = true
+    end
+    return game, learned, function() return fade end, popped, finish
+  end
+
+  local function fighter(engine)
+    return setmetatable({
+      running = false,
+      engineBattle = engine,
+      battle = { plan = {} },
+      party = { count = function() return 2 end },
+      transport = { send = function() end },
+      ui = { say = function() end },
+    }, { __index = Coop })
+  end
+
+  local function poppedLearn(popped, learned)
+    for _, st in ipairs(popped) do
+      if st and st.learn then return true end
+      for _, marker in ipairs(learned) do
+        if st == marker then return true end
+      end
+    end
+    return false
+  end
+
+  local function saw(screen)
+    for _, name in ipairs(pushes) do
+      if name == screen then return true end
+    end
+    return false
+  end
+
+  -- (1) Fifth move, buried engine present. The pop runs, then one prompt.
+  local mon = {
+    species = "DUSTBUG", level = 13, hp = 20, stats = { hp = 20 },
+    moves = fullMoves(),
+  }
+  local game, learned, faded, popped, finish = fresh({ mon })
+  local engine = { onFinish = finish, onDone = finish }
+  fighter(engine):onBattleOver("win", game, nil, { { mon = mon, move = "DUST_E" } })
+  check(faded(), "a fifth move still runs Gold's popping onDone")
+  eq(#learned, 1, "and opens one learn prompt")
+  eq(learned[1].mon, mon, "for that party mon")
+  eq(learned[1].moveId, "DUST_E", "and that move")
+  eq(game.stack:top(), learned[1], "the learn marker is the top of the stack")
+  check(not poppedLearn(popped, learned),
+        "the pop did not remove the learn marker")
+
+  -- (2) Nothing to learn still pops, and pushes no learn screen.
+  for _, list in ipairs({ nil, {} }) do
+    local g2, learned2, faded2, _, finish2 = fresh({ mon })
+    local engine2 = { onFinish = finish2, onDone = finish2 }
+    fighter(engine2):onBattleOver("win", g2, nil, list)
+    eq(#learned2, 0, "an empty toLearn does not call learnMoveOn")
+    check(faded2(), "and the fade is still armed")
+    local top = g2.stack:top()
+    check(not (top and top.learn), "the stack has no learn marker")
+  end
+
+  -- (3) A party fight has no buried engine. The prompt still opens.
+  local g3, learned3 = fresh({ mon })
+  local partyFight = fighter(nil)
+  partyFight.engineBattle = nil
+  partyFight:onBattleOver("win", g3, nil, { { mon = mon, move = "DUST_E" } })
+  eq(#learned3, 1, "a party fight with no engineBattle still opens the prompt")
+  eq(learned3[1].mon, mon, "on the same party mon")
+  eq(learned3[1].moveId, "DUST_E", "for the banked move")
+
+  -- (4) A loss still asks, and does not open an evolution anim.
+  local evoData = {
+    pokemon = {
+      WORM = {
+        name = "WORM",
+        evolutions = { { method = "EVOLVE_LEVEL", level = 7, into = "MOTH" } },
+      },
+      MOTH = { name = "MOTH" },
+    },
+    moves = {},
+  }
+  local worm = {
+    species = "WORM", level = 7, hp = 20, stats = { hp = 20 },
+    moves = fullMoves(),
+  }
+  local g4, learned4, _, _, finish4 = fresh({ worm }, evoData)
+  local engine4 = { onFinish = finish4, onDone = finish4 }
+  fighter(engine4):onBattleOver("loss", g4, { leveledUp = { [worm] = true } },
+    { { mon = worm, move = "DUST_E" } })
+  eq(#learned4, 1, "a loss with a fifth move still calls learnMoveOn")
+  eq(learned4[1].moveId, "DUST_E", "for that move")
+  check(not saw("Gen2EvolutionAnim"),
+        "a Gen 2 loss does not push Gen2EvolutionAnim")
+
+  -- (5) The second move waits for the first answer.
+  local g5, learned5, _, _, finish5 = fresh({ mon })
+  local engine5 = { onFinish = finish5, onDone = finish5 }
+  fighter(engine5):onBattleOver("win", g5, nil, {
+    { mon = mon, move = "DUST_E" },
+    { mon = mon, move = "DUST_F" },
+  })
+  eq(#learned5, 1, "two banked moves open only the first prompt")
+  eq(learned5[1].moveId, "DUST_E", "which is the first move")
+  learned5[1].done(true)
+  eq(#learned5, 2, "the second learnMoveOn runs inside the first done")
+  eq(learned5[2].moveId, "DUST_F", "and it is the second move")
+  eq(learned5[2].mon, mon, "on the same mon")
+
+  -- (6) Evolution replaces the slot. The prompt names the new table,
+  -- and only after the anim's onDone.
+  nextBorn = {
+    species = "MOTH", level = 7, hp = 30, stats = { hp = 30 },
+    moves = fullMoves(),
+  }
+  local g6, learned6, _, _, finish6 = fresh({ worm }, evoData)
+  local engine6 = { onFinish = finish6, onDone = finish6 }
+  fighter(engine6):onBattleOver("win", g6, { leveledUp = { [worm] = true } },
+    { { mon = worm, move = "DUST_E" } })
+  eq(#learned6, 0, "learnMoveOn waits until the evolution anim is done")
+  check(type(storedOnDone) == "function", "the anim's onDone was stored")
+  eq(g6.save.party[1], nextBorn, "the stub replaced the party slot")
+  storedOnDone()
+  eq(#learned6, 1, "onDone then opens the prompt")
+  eq(learned6[1].mon, nextBorn, "on the evolved party record")
+  eq(learned6[1].moveId, "DUST_E", "for the move the old form banked")
+  eq(g6.stack:top(), learned6[1], "and that prompt is what is on top")
+
+  -- (7) The evolved form already knows the move. Do not ask again.
+  nextBorn = {
+    species = "MOTH", level = 7, hp = 30, stats = { hp = 30 },
+    moves = fullMoves("DUST_E"),
+  }
+  local g7, learned7, _, _, finish7 = fresh({ worm }, evoData)
+  local engine7 = { onFinish = finish7, onDone = finish7 }
+  fighter(engine7):onBattleOver("win", g7, { leveledUp = { [worm] = true } },
+    { { mon = worm, move = "DUST_E" } })
+  eq(#learned7, 0, "the already-known case also waits out the anim")
+  check(type(storedOnDone) == "function", "and still stored onDone")
+  storedOnDone()
+  eq(#learned7, 0, "a move the evolved mon already has is not asked again")
+
+  nextBorn = nil
+  stubMod.ui = keptUi
 end)()
 
 T.finish("rby_mmo")
