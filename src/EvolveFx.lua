@@ -440,18 +440,37 @@ end
 -- graph is a cycle -- so the offer lives here, and Coop.offerEvolutions is
 -- the wrapper that stamps mod.log / mod.ui. `opts.warn` is `function(fmt, ...)`
 -- and `opts.ui` is the facade with `:push` (Gen 2 only).
+--
+-- `opts.onSettled`, when it is a function, runs exactly once, when this
+-- call no longer has a Gen2EvolutionAnim up. Every path that pushes nothing
+-- runs it before returning. The Gen 2 queue runs it when `nextOne` finds
+-- the pending list empty -- the anim's own onDone still only pops and
+-- continues the queue. Nil changes nothing a caller can observe.
 local offerEvolutionsGen2
 
 function M.offerEvolutions(game, leveledUp, result, evoResolved, opts)
+  opts = type(opts) == "table" and opts or {}
+  local settled = false
+  local function settle()
+    if settled then return end
+    settled = true
+    if type(opts.onSettled) == "function" then opts.onSettled() end
+  end
+
   leveledUp = M.withoutResolved(leveledUp, evoResolved)
-  if not (game and type(leveledUp) == "table") then return false end
+  if not (game and type(leveledUp) == "table") then
+    settle()
+    return false
+  end
   local any = false
   for _ in pairs(leveledUp) do
     any = true
     break
   end
-  if not any then return false end
-  opts = type(opts) == "table" and opts or {}
+  if not any then
+    settle()
+    return false
+  end
   local warn = opts.warn
   local function note(fmt, ...)
     if type(warn) == "function" then warn(fmt, ...) end
@@ -460,8 +479,11 @@ function M.offerEvolutions(game, leveledUp, result, evoResolved, opts)
   if Gen.generation(game) == 2 then
     local outcome = result
     if outcome == "loss" then outcome = "lose" end
-    if outcome == "lose" or outcome == "draw" then return false end
-    return offerEvolutionsGen2(game, leveledUp, opts.ui, note)
+    if outcome == "lose" or outcome == "draw" then
+      settle()
+      return false
+    end
+    return offerEvolutionsGen2(game, leveledUp, opts.ui, note, settle)
   end
 
   local ok, Evolution = pcall(require, "src.pokemon.Evolution")
@@ -470,28 +492,35 @@ function M.offerEvolutions(game, leveledUp, result, evoResolved, opts)
     note("the engine's evolution module is unavailable, so POKéMON "
       .. "that levelled in this battle were not offered evolutions -- level "
       .. "again in a wild fight or use a RARE CANDY")
+    settle()
     return false
   end
   local ran, err = pcall(Evolution.checkParty, game, nil, leveledUp)
   if not ran then
     note("evolutions from this fight could not be offered (%s); "
       .. "level again in a wild fight or use a RARE CANDY", tostring(err))
+    settle()
     return false
   end
+  settle()
   return true
 end
 
-offerEvolutionsGen2 = function(game, leveledUp, ui, note)
+offerEvolutionsGen2 = function(game, leveledUp, ui, note, settle)
   local ok, Evolution = pcall(require, "src.core.gen2.Evolution")
   if not (ok and type(Evolution) == "table"
       and type(Evolution.plan) == "function") then
     note("the engine's Gen 2 evolution module is unavailable, so "
       .. "POKéMON that levelled in this battle were not offered evolutions "
       .. "-- level again in a wild fight or use a RARE CANDY")
+    settle()
     return false
   end
   local party = game.save and game.save.party
-  if type(party) ~= "table" then return false end
+  if type(party) ~= "table" then
+    settle()
+    return false
+  end
   local flags = {}
   local flagged = false
   for i, mon in ipairs(party) do
@@ -500,14 +529,21 @@ offerEvolutionsGen2 = function(game, leveledUp, ui, note)
       flagged = true
     end
   end
-  if not flagged then return false end
+  if not flagged then
+    settle()
+    return false
+  end
   local planned = Evolution.plan(game.data, party, flags,
     { timeOfDay = gen2Daytime() })
-  if type(planned) ~= "table" or #planned == 0 then return false end
+  if type(planned) ~= "table" or #planned == 0 then
+    settle()
+    return false
+  end
   if not (ui and type(ui.push) == "function") then
     note("could not open the evolution screen, so POKéMON that "
       .. "levelled in this battle were not offered evolutions -- level "
       .. "again in a wild fight or use a RARE CANDY")
+    settle()
     return false
   end
 
@@ -515,7 +551,10 @@ offerEvolutionsGen2 = function(game, leveledUp, ui, note)
   for i, row in ipairs(planned) do pending[i] = row end
   local function nextOne()
     local row = table.remove(pending, 1)
-    if not row then return end
+    if not row then
+      settle()
+      return
+    end
     local pushed
     local ran = pcall(function()
       pushed = ui.push(game, "Gen2EvolutionAnim", {
