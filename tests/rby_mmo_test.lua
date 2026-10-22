@@ -30466,6 +30466,7 @@ end)()
     return false
   end
 
+  local function fifthMoveCases()
   -- (1) Fifth move, buried engine present. The pop runs, then one prompt.
   local mon = {
     species = "DUSTBUG", level = 13, hp = 20, stats = { hp = 20 },
@@ -30581,9 +30582,12 @@ end)()
   check(type(storedOnDone) == "function", "and still stored onDone")
   storedOnDone()
   eq(#learned7, 0, "a move the evolved mon already has is not asked again")
+  end
 
+  local okFifth, errFifth = pcall(fifthMoveCases)
   nextBorn = nil
   stubMod.ui = keptUi
+  check(okFifth, "Gen 2 fifth-move prompt: " .. tostring(errFifth))
 end)()
 
 -- ------- issue #105 — the paths that still white-screen if they drift
