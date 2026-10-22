@@ -21775,7 +21775,7 @@ if eng and eng.BattleState then
   local leaderClass, leaderParty
   if okBadges and type(victories) == "table" then
     for key, reward in pairs(victories) do
-      if reward.badge and type(key) == "string" then
+      if type(reward) == "table" and reward.badge and type(key) == "string" then
         local hash = key:find("#", 1, true)
         if hash then
           leaderClass = key:sub(1, hash - 1)
@@ -30539,6 +30539,8 @@ end)()
   eq(#learned5, 2, "the second learnMoveOn runs inside the first done")
   eq(learned5[2].moveId, "DUST_F", "and it is the second move")
   eq(learned5[2].mon, mon, "on the same mon")
+  learned5[1].done(false)
+  eq(#learned5, 2, "answering the first prompt again does not open a third")
 
   -- (6) Evolution replaces the slot. The prompt names the new table,
   -- and only after the anim's onDone.
@@ -30546,7 +30548,7 @@ end)()
     species = "MOTH", level = 7, hp = 30, stats = { hp = 30 },
     moves = fullMoves(),
   }
-  local g6, learned6, _, _, finish6 = fresh({ worm }, evoData)
+  local g6, learned6, _, popped6, finish6 = fresh({ worm }, evoData)
   local engine6 = { onFinish = finish6, onDone = finish6 }
   fighter(engine6):onBattleOver("win", g6, { leveledUp = { [worm] = true } },
     { { mon = worm, move = "DUST_E" } })
@@ -30558,6 +30560,13 @@ end)()
   eq(learned6[1].mon, nextBorn, "on the evolved party record")
   eq(learned6[1].moveId, "DUST_E", "for the move the old form banked")
   eq(g6.stack:top(), learned6[1], "and that prompt is what is on top")
+  local evoPopped = false
+  for _, st in ipairs(popped6) do
+    if st and st.evo then evoPopped = true end
+  end
+  check(evoPopped, "the anim's onDone pops the evolution screen before the prompt")
+  check(not poppedLearn(popped6, learned6),
+        "that pop does not take the learn prompt with it")
 
   -- (7) The evolved form already knows the move. Do not ask again.
   nextBorn = {
@@ -30575,6 +30584,615 @@ end)()
 
   nextBorn = nil
   stubMod.ui = keptUi
+end)()
+
+-- ------- issue #105 — the paths that still white-screen if they drift
+--
+-- The section above opens one prompt after an empty-stack pop. These cases
+-- are the exits around that: onSettled has to fire once on every path that
+-- leaves no anim up, a second evolution must not pop the prompt, a loss
+-- must not warp while the YES/NO is the screen, and a prompt that cannot
+-- open has to fall through to the next entry instead of stalling the ending.
+
+;(function()
+  local EvolveFx = need("EvolveFx")
+  local Coop = need("Coop")
+  local Evolution1 = require("src.pokemon.Evolution")
+  local Evo2 = require("src.core.gen2.Evolution")
+  local realCheck = Evolution1.checkParty
+  local realPlan = Evo2.plan
+  local realWarn = stubMod.log.warn
+  local realUi = stubMod.ui
+  local realWorld = stubMod.world
+  local evoKey = "src.core.gen2.Evolution"
+  local savedPreload = package.preload[evoKey]
+
+  local evoData = {
+    pokemon = {
+      WORM = {
+        name = "WORM",
+        evolutions = { { method = "EVOLVE_LEVEL", level = 7, into = "MOTH" } },
+      },
+      MOTH = { name = "MOTH" },
+    },
+    moves = {},
+  }
+
+  local function stackOf(states)
+    return {
+      states = states or {},
+      top = function(self) return self.states[#self.states] end,
+      pop = function(self) return table.remove(self.states) end,
+      push = function(self, st) self.states[#self.states + 1] = st end,
+    }
+  end
+
+  local function fourMoves(extra)
+    local list = {
+      { id = "DUST_A", pp = 10 }, { id = "DUST_B", pp = 10 },
+      { id = "DUST_C", pp = 10 }, { id = "DUST_D", pp = 10 },
+    }
+    if extra then list[#list + 1] = { id = extra, pp = 15 } end
+    return list
+  end
+
+  local function worm()
+    return {
+      species = "WORM", level = 7, hp = 20, stats = { hp = 20 },
+      moves = fourMoves(),
+    }
+  end
+
+  local function restoreHooks()
+    Evolution1.checkParty = realCheck
+    Evo2.plan = realPlan
+    stubMod.log.warn = realWarn
+    stubMod.ui = realUi
+    stubMod.world = realWorld
+    package.loaded[evoKey] = package.loaded[evoKey] or Evo2
+    package.preload[evoKey] = savedPreload
+  end
+
+  local function onSettledCases()
+    local function once(game, leveled, result, opts)
+      local n = 0
+      opts = opts or {}
+      opts.onSettled = function() n = n + 1 end
+      local ret = EvolveFx.offerEvolutions(game, leveled, result, nil, opts)
+      return n, ret
+    end
+
+    local n, ret = once(nil, nil, "win")
+    eq(n, 1, "no game settles once")
+    eq(ret, false, "and offers nothing")
+
+    local bare = { generation = 2, save = { party = {} }, data = evoData }
+    n, ret = once(bare, {}, "win")
+    eq(n, 1, "an empty leveledUp set settles once")
+    eq(ret, false, "and offers nothing")
+
+    local okNil = pcall(function()
+      EvolveFx.offerEvolutions(nil, nil, "win", nil, nil)
+    end)
+    check(okNil, "a nil onSettled does not throw")
+
+    local w = worm()
+    local game = {
+      generation = 2,
+      save = { party = { w }, money = 200 },
+      data = evoData,
+      stack = stackOf(),
+    }
+    local planned = 0
+    Evo2.plan = function(...)
+      planned = planned + 1
+      return realPlan(...)
+    end
+    n, ret = once(game, { [w] = true }, "loss")
+    eq(n, 1, "a Gen 2 loss settles once")
+    eq(ret, false, "and does not evolve")
+    eq(planned, 0, "without asking Evolution.plan")
+    n, ret = once(game, { [w] = true }, "draw")
+    eq(n, 1, "a Gen 2 draw settles once")
+    eq(planned, 0, "and also skips Evolution.plan")
+
+    local other = { species = "WORM", level = 7 }
+    n, ret = once(game, { [other] = true }, "win")
+    eq(n, 1, "a levelled mon that is not in the party settles once")
+    eq(planned, 0, "before a plan is built")
+
+    Evo2.plan = realPlan
+    local checks = 0
+    Evolution1.checkParty = function()
+      checks = checks + 1
+      return 0
+    end
+    local g1 = {
+      generation = 1,
+      save = { party = { w } },
+      data = evoData,
+    }
+    n, ret = once(g1, { [w] = true }, "win")
+    eq(checks, 1, "Gen 1 still runs checkParty")
+    eq(n, 1, "and settles once after it returns")
+    eq(ret, true, "a finished checkParty is an offer")
+    Evolution1.checkParty = function() error("no module") end
+    n, ret = once(g1, { [w] = true }, "win")
+    eq(n, 1, "a throwing checkParty still settles once")
+    eq(ret, false, "and reports that nothing was offered")
+    checks = 0
+    Evolution1.checkParty = function()
+      checks = checks + 1
+      return 0
+    end
+    local okPlain = pcall(function()
+      EvolveFx.offerEvolutions(g1, { [w] = true }, "win", nil, nil)
+    end)
+    check(okPlain, "Gen 1 with a nil onSettled does not throw")
+    eq(checks, 1, "and still runs checkParty")
+    Evolution1.checkParty = realCheck
+
+    Evo2.plan = function() return {} end
+    n, ret = once(game, { [w] = true }, "win", {
+      ui = { push = function() error("plan was empty") end },
+    })
+    eq(n, 1, "an empty Gen 2 plan settles once")
+    eq(ret, false, "and pushes no anim")
+    Evo2.plan = realPlan
+
+    n, ret = once(game, { [w] = true }, "win", { ui = {} })
+    eq(n, 1, "a missing ui.push settles once")
+    eq(ret, false, "and does not pretend an anim is up")
+
+    local pushes = 0
+    n, ret = once(game, { [w] = true }, "win", {
+      ui = { push = function() pushes = pushes + 1; return nil end },
+      warn = function() end,
+    })
+    eq(pushes, 1, "a failed push is attempted")
+    eq(n, 1, "and the drained queue settles once, before the call returns")
+    eq(ret, true, "the offer still reports that it ran the queue")
+
+    local savedLoaded = package.loaded[evoKey]
+    local savedPreload = package.preload[evoKey]
+    package.loaded[evoKey] = nil
+    package.preload[evoKey] = function() error("missing for the test") end
+    n, ret = once(game, { [w] = true }, "win", { ui = { push = function() end } })
+    package.loaded[evoKey] = savedLoaded
+    package.preload[evoKey] = savedPreload
+    eq(n, 1, "a missing Gen 2 evolution module settles once")
+    eq(ret, false, "and offers nothing")
+
+    local a, b = worm(), worm()
+    local queued = {
+      generation = 2,
+      save = { party = { a, b } },
+      data = evoData,
+      stack = stackOf(),
+    }
+    local dones, settled = {}, 0
+    local offered = EvolveFx.offerEvolutions(queued, { [a] = true, [b] = true },
+      "win", nil, {
+        onSettled = function() settled = settled + 1 end,
+        ui = {
+          push = function(g, _, opts)
+            local marker = { evo = true }
+            g.stack:push(marker)
+            dones[#dones + 1] = opts.onDone
+            return marker
+          end,
+        },
+      })
+    eq(offered, true, "two pending evolutions leave an anim up")
+    eq(#dones, 1, "only the first anim is pushed")
+    eq(settled, 0, "onSettled waits while that anim is up")
+    dones[1]()
+    eq(#dones, 2, "the first onDone pops, then starts the second anim")
+    eq(settled, 0, "and does not settle with one anim still to come")
+    eq(queued.stack:top().evo, true, "the second anim is what is on top")
+    dones[2]()
+    eq(settled, 1, "onSettled runs when the queue is empty")
+    eq(queued.stack:top(), nil, "both anims were popped")
+    dones[2]()
+    eq(settled, 1, "a second onDone does not settle again")
+  end
+
+  local okSettled, errSettled = pcall(onSettledCases)
+  restoreHooks()
+  check(okSettled, "onSettled cases: " .. tostring(errSettled))
+
+  local function coopCases()
+    local learned, menus, anims, says, warns, warps = {}, {}, {}, {}, {}, {}
+    local born
+    local failMenus = false
+
+    local function reset()
+      learned, menus, anims, says, warns, warps = {}, {}, {}, {}, {}, {}
+      born = nil
+      failMenus = false
+    end
+
+    stubMod.log.warn = function(_, fmt, ...)
+      local ok, line = pcall(string.format, fmt, ...)
+      warns[#warns + 1] = ok and line or tostring(fmt)
+    end
+    stubMod.world = {
+      overworld = function() end,
+      warpTo = function(_, map)
+        warps[#warps + 1] = map
+        return true
+      end,
+    }
+    stubMod.ui = {
+      push = function(game, screen, a, b, c)
+        if screen == "Gen2EvolutionAnim" then
+          local opts = a
+          if born and type(opts) == "table" and type(opts.index) == "number" then
+            game.save.party[opts.index] = born
+          end
+          local marker = { evo = true }
+          if game.stack then game.stack:push(marker) end
+          anims[#anims + 1] = opts and opts.onDone
+          return marker
+        end
+        if screen == "MoveLearnMenu" then
+          if failMenus then return nil end
+          local marker = { moveLearn = true, mon = a, move = b, done = c }
+          if game.stack then game.stack:push(marker) end
+          menus[#menus + 1] = marker
+          return marker
+        end
+        return nil
+      end,
+    }
+
+    local function side(engine, say)
+      return setmetatable({
+        running = false,
+        engineBattle = engine,
+        battle = { plan = {} },
+        party = { count = function() return 2 end },
+        transport = { send = function() end },
+        ui = { say = say or function() end },
+      }, { __index = Coop })
+    end
+
+    local function harness(party, list)
+      reset()
+      local fade = false
+      local buried = { buried = true }
+      local overworld = { isOverworld = true }
+      local stack = stackOf({ overworld, buried })
+      local game = {
+        generation = 2,
+        stack = stack,
+        save = {
+          party = party,
+          money = 200,
+          lastHeal = { map = "CENTER", x = 4, y = 5 },
+        },
+        data = evoData,
+        learnMoveOn = function(self, mon, moveId, done)
+          local marker = { learn = true, mon = mon, moveId = moveId, done = done }
+          learned[#learned + 1] = marker
+          self.stack:push(marker)
+        end,
+      }
+      local function finish()
+        stack:pop()
+        fade = true
+      end
+      return game, stack, function() return fade end, finish, buried, overworld
+    end
+
+    -- (8) open returns false: warn or autofill, then the next entry, same call.
+    local full = {
+      species = "FULL", level = 10, hp = 10, stats = { hp = 10 },
+      moves = fourMoves(),
+    }
+    local room = {
+      species = "ROOM", level = 10, hp = 10, stats = { hp = 10 },
+      moves = { { id = "DUST_A", pp = 10 } },
+    }
+    local g8, _, _, finish8 = harness({ full, room })
+    g8.learnMoveOn = nil
+    failMenus = true
+    local said = 0
+    local holder8 = side({ onFinish = finish8, onDone = finish8 }, function()
+      said = said + 1
+    end)
+    holder8:onBattleOver("win", g8, nil, {
+      { mon = full, move = "DUST_E" },
+      { mon = room, move = "DUST_F" },
+    })
+    eq(#full.moves, 4, "a full moveset is not autofilled when the prompt cannot open")
+    eq(#room.moves, 2, "the next entry still autofills in that same call")
+    eq(room.moves[2] and room.moves[2].id, "DUST_F", "and it is the second banked move")
+    eq(#warns, 1, "only the full moveset is warned")
+    eq(said, 1, "and only the free slot is announced")
+    eq(#learned, 0, "learnMoveOn was not the opener")
+
+    -- (9) A move the live mon already has is skipped; the next one opens now.
+    local known = {
+      species = "DUSTBUG", level = 13, hp = 20, stats = { hp = 20 },
+      moves = fourMoves("DUST_E"),
+    }
+    local g9, _, _, finish9 = harness({ known })
+    side({ onFinish = finish9, onDone = finish9 }):onBattleOver("win", g9, nil, {
+      { mon = known, move = "DUST_E" },
+      { mon = known, move = "DUST_F" },
+    })
+    eq(#learned, 1, "an already-known move does not open a prompt")
+    eq(learned[1] and learned[1].moveId, "DUST_F",
+       "the next banked move opens in the same call")
+    eq(learned[1].mon, known, "on that mon")
+
+    -- (10) A partyIndex already stamped is the slot the prompt names.
+    local left = {
+      species = "LEFT", level = 13, hp = 20, stats = { hp = 20 },
+      moves = fourMoves(),
+    }
+    local right = {
+      species = "RIGHT", level = 13, hp = 20, stats = { hp = 20 },
+      moves = fourMoves(),
+    }
+    local g10, _, _, finish10 = harness({ left, right })
+    side({ onFinish = finish10, onDone = finish10 }):onBattleOver("win", g10, nil, {
+      { mon = left, move = "DUST_E", partyIndex = 2 },
+    })
+    eq(#learned, 1, "a pre-stamped entry still opens")
+    eq(learned[1].mon, right, "on the live slot, not the banked table")
+    eq(learned[1].moveId, "DUST_E", "for the banked move")
+
+    -- (11) Skipping the first answer still opens the second. Twice does not.
+    local mon = {
+      species = "DUSTBUG", level = 13, hp = 20, stats = { hp = 20 },
+      moves = fourMoves(),
+    }
+    local g11, _, _, finish11 = harness({ mon })
+    side({ onFinish = finish11, onDone = finish11 }):onBattleOver("win", g11, nil, {
+      { mon = mon, move = "DUST_E" },
+      { mon = mon, move = "DUST_F" },
+    })
+    eq(#learned, 1, "two moves still open one prompt")
+    learned[1].done(false)
+    eq(#learned, 2, "a skip still opens the next move")
+    eq(learned[2].moveId, "DUST_F", "which is the second one")
+    learned[1].done(true)
+    eq(#learned, 2, "the first prompt answers only once")
+
+    -- (12) Party-fight loss: the warp waits until the prompt is covering
+    -- the overworld. No buried engine, so this blackout is ours.
+    local hurt = {
+      species = "DUSTBUG", level = 13, hp = 1, stats = { hp = 20 },
+      moves = fourMoves(),
+    }
+    local g12 = harness({ hurt })
+    g12.stack = stackOf({ { isOverworld = true } })
+    local holder12 = side(nil)
+    holder12:onBattleOver("loss", g12, nil, { { mon = hurt, move = "DUST_E" } })
+    eq(#learned, 1, "a party-fight loss still opens the prompt")
+    eq(g12.stack:top(), learned[1], "and that prompt is on top")
+    eq(#warps, 0, "so the center warp does not fire under it")
+    check(holder12.pendingWarp ~= nil, "the warp is waiting for the prompt to close")
+    eq(g12.save.money, 100, "the loss still taxed the money")
+    eq(hurt.hp, 20, "and healed the party")
+
+    -- (13) Gen 1 stays on MoveLearnMenu, and the same warp waits.
+    local game13 = harness({ mon })
+    game13.generation = 1
+    game13.stack = stackOf({ { isOverworld = true } })
+    game13.learnMoveOn = function() learned[#learned + 1] = { via = "learnMoveOn" } end
+    local holder13 = side(nil)
+    holder13:onBattleOver("loss", game13, nil, { { mon = mon, move = "DUST_E" } })
+    eq(#learned, 0, "Gen 1 does not call learnMoveOn")
+    eq(#menus, 1, "it pushes MoveLearnMenu")
+    eq(menus[1].mon, mon, "for that mon")
+    eq(menus[1].move, "DUST_E", "and that move")
+    check(type(menus[1].done) == "function",
+          "LearnMove.open hands MoveLearnMenu its completion callback")
+    eq(game13.stack:top(), menus[1], "the menu is on top of the overworld")
+    eq(#warps, 0, "the Gen 1 warp waits too")
+    check(holder13.pendingWarp ~= nil, "pending until the menu closes")
+
+    -- (14) Evolution is pushed after the finisher's pop. Blackout waits
+    -- for the anim, and the prompt names the replaced party record.
+    local faint = worm()
+    faint.hp = 0
+    local g14, stack14, faded14, finish14, buried14 =
+      harness({ faint })
+    born = {
+      species = "MOTH", level = 7, hp = 0, stats = { hp = 30 },
+      moves = fourMoves(),
+    }
+    local holder14 = side({ onFinish = finish14, onDone = finish14 })
+    holder14:onBattleOver("win", g14, { leveledUp = { [faint] = true } },
+      { { mon = faint, move = "DUST_E" } })
+    check(faded14(), "the finisher still popped")
+    eq(stack14:top().evo, true, "the evolution anim is what that pop left up")
+    check(stack14:top() ~= buried14, "the pop removed the buried battle, not the anim")
+    eq(#learned, 0, "the prompt waits for the anim")
+    eq(holder14.pendingWarp, nil, "and so does the blackout")
+    eq(g14.save.money, 200, "money is not taxed while the anim is up")
+    eq(faint.hp, 0, "the party is not healed yet")
+    check(type(anims[1]) == "function", "the anim's onDone was stored")
+    anims[1]()
+    eq(#learned, 1, "onDone then opens the prompt")
+    eq(learned[1].mon, born, "on the evolved party record")
+    eq(g14.stack:top(), learned[1], "which is the top of the stack")
+    eq(#warps, 0, "the warp still waits, because the prompt is showing")
+    check(holder14.pendingWarp ~= nil, "the blackout is armed behind that prompt")
+    eq(g14.save.money, 100, "and the tax lands with the prompt, not before it")
+    eq(born.hp, 30, "the evolved mon is the one that was healed")
+
+    -- (15) Two evolutions: the prompt opens after the second onDone, and
+    -- that pop is not what takes the prompt down.
+    local first, second = worm(), worm()
+    born = nil
+    local g15, _, _, finish15 = harness({ first, second })
+    side({ onFinish = finish15, onDone = finish15 }):onBattleOver(
+      "win", g15, { leveledUp = { [first] = true, [second] = true } },
+      { { mon = first, move = "DUST_E" } })
+    eq(#anims, 1, "the first evolution is the only anim up")
+    eq(#learned, 0, "no prompt yet")
+    anims[1]()
+    eq(#anims, 2, "its onDone starts the second anim")
+    eq(#learned, 0, "and still does not open the prompt")
+    eq(g15.stack:top().evo, true, "the second anim is on top")
+    anims[2]()
+    eq(#learned, 1, "the second onDone is what opens the prompt")
+    eq(learned[1].mon, first, "on the mon that banked the move")
+    eq(g15.stack:top(), learned[1], "and the second pop did not take that prompt")
+
+    -- (16) Invite joiner: afterBattle's pop is not the evolution screen.
+    local joiner = worm()
+    local moth = {
+      species = "MOTH", level = 7, hp = 30, stats = { hp = 30 },
+      moves = fourMoves(),
+    }
+    local poppedByAfter
+    local sentinel = { sentinel = true }
+    local g16stack = stackOf({ sentinel })
+    local ow = {
+      map = { def = { label = "FIX_TOWN" } },
+      npcPool = {
+        route3_bug_a = {
+          def = { trainerClass = "OPP_BUG_CATCHER", trainerParty = 1 },
+        },
+      },
+      afterBattle = function()
+        poppedByAfter = g16stack:pop()
+      end,
+    }
+    local g16 = {
+      generation = 2,
+      stack = g16stack,
+      save = {
+        party = { joiner }, money = 100,
+        defeatedTrainers = {}, flags = {},
+        lastHeal = { map = "CENTER", x = 1, y = 1 },
+      },
+      data = evoData,
+      learnMoveOn = function(self, mon, moveId, done)
+        local marker = { learn = true, mon = mon, moveId = moveId, done = done }
+        learned[#learned + 1] = marker
+        self.stack:push(marker)
+      end,
+    }
+    reset()
+    born = moth
+    stubMod.world = {
+      overworld = function() return ow end,
+      warpTo = function(_, map)
+        warps[#warps + 1] = map
+        return true
+      end,
+    }
+    local invite = setmetatable({
+      running = false,
+      battle = { plan = { npcId = "route3_bug_a" } },
+      party = { count = function() return 2 end },
+      transport = { send = function() end },
+      ui = { say = function() end },
+    }, { __index = Coop })
+    local checks = 0
+    Evolution1.checkParty = function()
+      checks = checks + 1
+      return 0
+    end
+    invite:onBattleOver("win", g16, { leveledUp = { [joiner] = true } },
+      { { mon = joiner, move = "DUST_E" } })
+    Evolution1.checkParty = realCheck
+    eq(checks, 0, "a Gen 2 invite does not run checkParty inside syntheticFinish")
+    eq(poppedByAfter, sentinel, "afterBattle popped the screen that was already there")
+    check(not (poppedByAfter and poppedByAfter.evo),
+          "that pop was not the evolution anim")
+    eq(#learned, 0, "the prompt waits until the anim's onDone")
+    eq(#anims, 1, "the anim was pushed after that pop")
+    check(type(anims[1]) == "function", "and its onDone is still to come")
+    anims[1]()
+    eq(#learned, 1, "onDone opens the prompt")
+    eq(learned[1].mon, moth, "on the evolved party record")
+    eq(g16.stack:top(), learned[1], "which is left on top")
+  end
+
+  local okCoop, errCoop = pcall(coopCases)
+  restoreHooks()
+  check(okCoop, "co-op ending cases: " .. tostring(errCoop))
+
+  local function soloCase()
+    local checks = 0
+    Evolution1.checkParty = function()
+      checks = checks + 1
+      return 0
+    end
+    local learned, anims = {}, {}
+    local moth = {
+      species = "MOTH", level = 7, hp = 30, stats = { hp = 30 },
+      moves = fourMoves(),
+    }
+    stubMod.ui = {
+      push = function(game, screen, opts)
+        if screen ~= "Gen2EvolutionAnim" then return nil end
+        if type(opts) == "table" and type(opts.index) == "number" then
+          game.save.party[opts.index] = moth
+        end
+        local marker = { evo = true }
+        game.stack:push(marker)
+        anims[#anims + 1] = opts.onDone
+        return marker
+      end,
+    }
+    local w = worm()
+    local engine = {}
+    local game = {
+      generation = 2,
+      stack = stackOf({ { isOverworld = true }, engine }),
+      save = { party = { w }, money = 0 },
+      data = evoData,
+      learnMoveOn = function(self, mon, moveId, done)
+        local marker = { learn = true, mon = mon, moveId = moveId, done = done }
+        learned[#learned + 1] = marker
+        self.stack:push(marker)
+      end,
+    }
+    local fade = false
+    engine.onDone = function()
+      game.stack:pop()
+      fade = true
+    end
+    engine.onFinish = engine.onDone
+    local levels = {}
+    levels[w] = 6
+    local Solo = need("SoloBattle")
+    local solo = setmetatable({
+      game = game,
+      sim = { byId = {} },
+      save = game.save,
+      levels = levels,
+      engine = engine,
+      ui = { say = function() end },
+    }, { __index = Solo })
+    check(type(Solo._ended) == "function",
+          "SoloBattle._ended is the ending the prompt waits on")
+    solo:_ended("win", { { mon = w, move = "DUST_E" } })
+    check(fade, "solo Gold still ran the popping onDone")
+    eq(checks, 0, "and did not run Gen 1 checkParty for that evolution")
+    eq(#anims, 1, "one evolution anim, after the pop")
+    eq(#learned, 0, "the prompt is not up yet")
+    eq(game.stack:top().evo, true, "the anim is what the pop left on the stack")
+    check(type(anims[1]) == "function", "its onDone was stored")
+    anims[1]()
+    eq(#learned, 1, "onDone opens the solo prompt")
+    eq(learned[1].mon, moth, "on the evolved party record")
+    eq(learned[1].moveId, "DUST_E", "for the move the old form banked")
+    eq(game.stack:top(), learned[1], "and that prompt is left on top")
+    Evolution1.checkParty = realCheck
+  end
+
+  local okSolo, errSolo = pcall(soloCase)
+  restoreHooks()
+  check(okSolo, "solo Gen 2 ending: " .. tostring(errSolo))
 end)()
 
 T.finish("rby_mmo")

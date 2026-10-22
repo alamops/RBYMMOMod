@@ -1266,6 +1266,63 @@ end)()
 end)()
 
 ;(function()
+  -- A win that leaves nothing standing still blacks out, and the warp has to
+  -- see the forget prompt already on top. pumpBlackout fires in the same
+  -- call when the overworld is what is showing; running it before the prompt
+  -- sends the player to the center with the YES/NO never opened.
+  local seen = {}
+  local realBlackout = Coop.blackout
+  Coop.blackout = function(self, game, ctx)
+    local top = game and game.stack and game.stack:top()
+    seen[#seen + 1] = {
+      prompts = #prompts,
+      learn = top and top.moveLearn or false,
+      world = top and top.isOverworld or false,
+      ctx = ctx,
+    }
+    return realBlackout(self, game, ctx)
+  end
+
+  local function wipedWin(gold)
+    prompts = {}
+    local f = fightOf("trainer", {
+      gold = gold or nil,
+      party = { mon({ species = "ALPHA", spd = 90, atk = 120, maxHp = 200,
+                      level = 40 }) },
+      foes = { mon({ species = "BETA", spd = 5, maxHp = 20, atk = 1 }) },
+      seed = 7,
+    })
+    playOut(f)
+    f.sim.byId[PLAYER].mons[1].hp = 0
+    f.fight.result = "win"
+    f.fight.toLearn = { { mon = f.party[1], move = "BUMP" } }
+    f.fight:exit()
+    return f
+  end
+
+  wipedWin(false)
+  eq(#seen, 1, "a wiped Gen 1 win blacks out once")
+  eq(seen[1].prompts, 1, "and only after the forget prompt is up")
+  ok(seen[1].learn, "the screen on top is that prompt, so the warp waits")
+  ok(not seen[1].world, "the overworld is not what the pump sees")
+  eq(seen[1].ctx, "battle", "solo names the fight a battle")
+  eq(#prompts, 1, "still exactly one prompt")
+
+  seen = {}
+  wipedWin(true)
+  eq(#seen, 1, "a wiped Gold win blacks out once")
+  eq(seen[1].prompts, 1, "after its own pop, and after the prompt")
+  ok(seen[1].learn, "the prompt is on top, so the pop did not take it")
+  ok(not seen[1].world, "and the overworld is underneath, not showing")
+  eq(seen[1].ctx, "battle", "the noun is still a solo battle")
+  eq(#prompts, 1, "still exactly one prompt on Gold")
+  ok(type(prompts[1] and prompts[1].done) == "function",
+     "LearnMove.open still hands MoveLearnMenu its completion callback")
+
+  Coop.blackout = realBlackout
+end)()
+
+;(function()
   -- The engine's own vocabulary on the way out, which is what decides whether
   -- the overworld heals the player and takes half their money.
   eq(Solo.engineResult("loss", "run"), "run",
