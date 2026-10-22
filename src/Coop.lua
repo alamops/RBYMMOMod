@@ -2922,10 +2922,25 @@ function M:onBattleOver(result, game, state, toLearn)
   -- world after the fix rather than the world that needed one.
   local blackout = M.blacksOut(result, game)
 
-  -- Consumed first, while nothing of ours is on the stack. The trainer has
-  -- been fought -- by four of them -- so the script that was waiting in
-  -- front of it carries on and the ordinary 1v1 never runs. Dropping it
-  -- instead would leave that script suspended for the rest of the session.
+  -- Gen 1's onFinish does not pop, so the prompt goes up before the
+  -- finisher, as it always has. The evolution checkParty queues inside the
+  -- finisher lands above it and plays first, on the same table, so the
+  -- prompt names the evolved form when its turn comes. Solo Gen 1 keeps the
+  -- same order.
+  --
+  -- Gold's onDone, which Client aliases onto onFinish, always pops the top
+  -- of the stack and then arms the white return fade. That pop has to run
+  -- before any learn screen goes up: a screen pushed first is what the pop
+  -- removes, and the menu left behind never updates, so the fade stays
+  -- white. An empty toLearn pushes nothing of ours; the finisher's own pop
+  -- is the only one.
+  local gen2 = Gen.generation(game) == 2
+  if not gen2 then self:offerForgets(game, toLearn) end
+
+  -- Consumed, not dropped. The trainer has been fought -- by four of them --
+  -- so the script that was waiting in front of it carries on and the
+  -- ordinary 1v1 never runs. Dropping it instead would leave that script
+  -- suspended for the rest of the session.
   --
   -- Two answers come back, and between them they say who owes the ritual:
   --
@@ -2943,16 +2958,8 @@ function M:onBattleOver(result, game, state, toLearn)
   --     wiped. The engine marked the trainer beaten and ran the rewards, and
   --     deliberately did not black anybody out (see M:consume). Ours.
   --
-  -- Gold's onDone, which Client aliases onto onFinish, always pops the top
-  -- of the stack and then arms the white return fade. That pop has to run
-  -- before any learn screen goes up: a screen pushed first is what the pop
-  -- removes, and the menu left behind never updates, so the fade stays
-  -- white. An empty toLearn pushes nothing of ours; the finisher's own pop
-  -- is the only one. Gen 1's onFinish does not pop.
-  --
   -- The ritual's save writes land immediately. The warp waits until the
-  -- first learn screen is up (see M:pumpBlackout) -- asked from `after`,
-  -- never also from here.
+  -- first learn screen is up (see M:pumpBlackout) -- asked once, below.
   local handled, engineRitual = self:consume(result, blackout)
   -- Invite / menu joiner: no buried BattleState, so consume is a no-op. On a
   -- win, finish the trainer off synthetically from the waiter's npcId --
@@ -2962,17 +2969,26 @@ function M:onBattleOver(result, game, state, toLearn)
     handled = self:syntheticFinish(game, plan, state)
   end
 
-  -- The prompt, then the blackout. Gen 2 evolutions run after the pop and
-  -- defer both until their anims are gone, because the prompt has to name
-  -- the party record the anim left behind. Gen 1 evolutions already ran
-  -- inside the finisher, on the same table.
-  local function after()
-    self:offerForgets(game, toLearn)
+  local function owedBlackout()
     if blackout and not (handled and engineRitual) then
       self:blackout(game)
     end
   end
-  if Gen.generation(game) == 2 then
+  if not gen2 then
+    owedBlackout()
+    return
+  end
+
+  -- Gold: evolutions go up after the pop, and the prompt and the blackout
+  -- wait until their anims are gone, because the prompt has to name the
+  -- party record the anim left behind. Offered only when consume or
+  -- syntheticFinish ran -- the two endings Gen 1 offers from. A joiner with
+  -- neither gets only the fight's own evolution movies, as on Gen 1.
+  local function after()
+    self:offerForgets(game, toLearn)
+    owedBlackout()
+  end
+  if handled then
     M.stampLearnIndex(game, toLearn)
     M.offerEvolutions(game, state and state.leveledUp, result,
       state and state.evoResolved, { onSettled = after })
@@ -2983,12 +2999,13 @@ end
 
 -- Leftovers a monster levelled into but had no room for during a co-op
 -- fight. Free slots already landed mid-battle; this is only the fifth-move
--- case. Opened after the battle's pop, one move per callback, on the white
--- return fade -- a forget menu mid-fight would stall the other humans
--- through the hub's choice timeout, and unlike everything else on that
--- screen this choice only its owner can make and only their own save
--- records. The screen's update holds World:step, so the fade stays white
--- behind the dialog and ticks after the answer.
+-- case, one move per callback, after the fight -- a forget menu mid-fight
+-- would stall the other humans through the hub's choice timeout, and unlike
+-- everything else on that screen this choice only its owner can make and
+-- only their own save records. On Gold it opens after the battle's pop, on
+-- the white return fade; the screen's update holds World:step, so the fade
+-- stays white behind the dialog and ticks after the answer. On Gen 1 it
+-- opens before the finisher, under the evolutions that finisher queues.
 --
 -- 1v1 / wild opens the same prompt mid-award (MediatedBattle + LearnMove.open).
 -- This path is the co-op leftover, plus any 1v1 prompt they left unanswered.
@@ -3002,8 +3019,8 @@ end
 -- keeps the free-slot autofill, or the warn, and continues.
 --
 -- Sessions:offerForgets is the 1v1 leftover twin over the same `{ mon, move }`
--- entries. It does not call Gold's onDone. This one does not either; the
--- pop already happened above.
+-- entries. It does not call Gold's onDone. This one does not either; on
+-- Gold the pop already happened in onBattleOver.
 function M:offerForgets(game, toLearn)
   if not (game and toLearn and #toLearn > 0) then return false end
   local pending = {}

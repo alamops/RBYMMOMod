@@ -1265,8 +1265,13 @@ end
 -- what that pop took. Gen 2 evolutions wait for the same moment: a screen
 -- pushed inside `finishBuriedBattle` is what `onDone` removes, so they run
 -- after `settleStack`, and the prompt is their `onSettled`. Who pops is a
--- property of the callback. Generation 2 is what moves the evolution offer,
--- because only that anim replaces the party slot the prompt has to name.
+-- property of the callback; where the evolution goes is a property of the
+-- generation, because only Gold's anim replaces the party slot the prompt has
+-- to name. So on Gold the tail is finish, settle, evolve, prompt whichever
+-- callback runs: a Gold battle whose finisher does not pop is still owed the
+-- evolution `finishBuriedBattle` no longer offers. The offer is made only when
+-- the ritual actually ran. A battle left buried under a pile is still owed a
+-- real fight, and was never offered an evolution from here.
 --
 -- ------- and the prediction is checked rather than trusted
 --
@@ -1412,10 +1417,11 @@ function M:_ended(result, toLearn)
   end
 
   -- Steps 5 and 6, in whichever order the buried battle's own pop allows.
-  if ritualPops then
+  -- Gold takes one order for both callbacks; see the header.
+  if Gen.generation(game) == 2 then
     finishEngine()
     settleStack()
-    if Gen.generation(game) == 2 then
+    if handled then
       Coop.stampLearnIndex(game, toLearn)
       Coop.offerEvolutions(game, levelled, outcome, evoResolved, {
         onSettled = function()
@@ -1427,6 +1433,11 @@ function M:_ended(result, toLearn)
       offerForgets()
       afterPrompts()
     end
+  elseif ritualPops then
+    finishEngine()
+    settleStack()
+    offerForgets()
+    afterPrompts()
   else
     offerForgets()
     finishEngine()

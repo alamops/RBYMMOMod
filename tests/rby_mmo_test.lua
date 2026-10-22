@@ -31114,6 +31114,46 @@ end)()
     eq(#learned, 1, "onDone opens the prompt")
     eq(learned[1].mon, moth, "on the evolved party record")
     eq(g16.stack:top(), learned[1], "which is left on top")
+
+    -- (17) Gen 1 walk-in: the prompt goes up before the finisher, so the
+    -- evolution checkParty queues there lands above it and plays first.
+    local evolver = worm()
+    local g17 = harness({ evolver })
+    g17.generation = 1
+    g17.stack = stackOf({ { isOverworld = true } })
+    local order17 = {}
+    local evo17 = { evo1 = true }
+    Evolution1.checkParty = function(game)
+      order17[#order17 + 1] = "evolve:" .. #menus
+      game.stack:push(evo17)
+      return 1
+    end
+    local holder17 = side({
+      onFinish = function() order17[#order17 + 1] = "finish:" .. #menus end,
+    })
+    holder17:onBattleOver("win", g17, { leveledUp = { [evolver] = true } },
+      { { mon = evolver, move = "DUST_E" } })
+    Evolution1.checkParty = realCheck
+    eq(#menus, 1, "Gen 1 opens one MoveLearnMenu")
+    eq(menus[1] and menus[1].mon, evolver,
+       "on the party table checkParty evolves in place")
+    eq(order17[1], "evolve:1",
+       "the menu was already up when the finisher queued the evolution")
+    eq(order17[2], "finish:1", "and when onFinish ran")
+    eq(g17.stack:top(), evo17, "so the evolution is on top and plays first")
+    eq(g17.stack.states[2], menus[1], "with the menu under it, over the world")
+
+    -- (18) A Gold joiner with no buried battle and no npcId ran neither
+    -- ending Gen 1 offers evolutions from, so none is offered here either,
+    -- and the prompt opens at once on the banked table.
+    local roamer = worm()
+    local g18 = harness({ roamer })
+    g18.stack = stackOf({ { isOverworld = true } })
+    side(nil):onBattleOver("win", g18, { leveledUp = { [roamer] = true } },
+      { { mon = roamer, move = "DUST_E" } })
+    eq(#anims, 0, "a Gold joiner with nothing finished pushes no evolution anim")
+    eq(#learned, 1, "and opens the prompt at once")
+    eq(learned[1] and learned[1].mon, roamer, "on the banked party table")
   end
 
   local okCoop, errCoop = pcall(coopCases)
@@ -31193,6 +31233,97 @@ end)()
   local okSolo, errSolo = pcall(soloCase)
   restoreHooks()
   check(okSolo, "solo Gen 2 ending: " .. tostring(errSolo))
+
+  -- Solo Gold whatever the finisher does: one order, and an evolution only
+  -- when the ritual ran. `extra` is how many screens sit above the battle.
+  local function soloGold(engine, extra)
+    local learned, anims, warns = {}, {}, {}
+    local moth = {
+      species = "MOTH", level = 7, hp = 30, stats = { hp = 30 },
+      moves = fourMoves(),
+    }
+    stubMod.log.warn = function(_, fmt, ...)
+      local ok, line = pcall(string.format, fmt, ...)
+      warns[#warns + 1] = ok and line or tostring(fmt)
+    end
+    stubMod.ui = {
+      push = function(game, screen, opts)
+        if screen ~= "Gen2EvolutionAnim" then return nil end
+        if type(opts) == "table" and type(opts.index) == "number" then
+          game.save.party[opts.index] = moth
+        end
+        local marker = { evo = true }
+        game.stack:push(marker)
+        anims[#anims + 1] = opts.onDone
+        return marker
+      end,
+    }
+    local w = worm()
+    local states = { { isOverworld = true }, engine }
+    for _ = 1, extra or 0 do states[#states + 1] = { pile = true } end
+    local game = {
+      generation = 2,
+      stack = stackOf(states),
+      save = { party = { w }, money = 0 },
+      data = evoData,
+      learnMoveOn = function(self, mon, moveId, done)
+        local marker = { learn = true, mon = mon, moveId = moveId, done = done }
+        learned[#learned + 1] = marker
+        self.stack:push(marker)
+      end,
+    }
+    local levels = {}
+    levels[w] = 6
+    local solo = setmetatable({
+      game = game,
+      sim = { byId = {} },
+      save = game.save,
+      levels = levels,
+      engine = engine,
+      ui = { say = function() end },
+    }, { __index = need("SoloBattle") })
+    solo:_ended("win", { { mon = w, move = "DUST_E" } })
+    return {
+      game = game, worm = w, moth = moth,
+      learned = learned, anims = anims, warns = warns,
+    }
+  end
+
+  local function soloEdgeCases()
+    -- A Gold battle whose finisher does not pop. finishBuriedBattle no
+    -- longer offers Gen 2 evolutions, so this ending has to.
+    local finished, donePopped = false, false
+    local quiet = {}
+    quiet.onDone = function() donePopped = true end
+    quiet.onFinish = function() finished = true end
+    local r = soloGold(quiet)
+    check(finished, "a non-popping Gold finisher still gets the result")
+    check(not donePopped, "through onFinish, not the popping onDone")
+    eq(#r.anims, 1, "and the evolution is still offered")
+    eq(#r.learned, 0, "before the prompt")
+    eq(r.game.stack:top() and r.game.stack:top().evo, true,
+       "the anim is what is on top")
+    if type(r.anims[1]) == "function" then r.anims[1]() end
+    eq(#r.learned, 1, "its onDone opens the prompt")
+    eq(r.learned[1] and r.learned[1].mon, r.moth, "on the evolved party record")
+
+    -- A pile too deep to unwind leaves the battle buried and unfinished.
+    -- No evolution is offered over it; the prompt goes up as it did.
+    local called = false
+    local buried = {}
+    buried.onDone = function() called = true end
+    buried.onFinish = buried.onDone
+    r = soloGold(buried, 20)
+    check(not called, "a battle the unwind could not reach is not finished")
+    eq(#r.anims, 0, "and no evolution is offered over it")
+    eq(#r.learned, 1, "the prompt still opens")
+    eq(r.learned[1] and r.learned[1].mon, r.worm, "on the banked party table")
+    eq(#r.warns, 1, "the unwind that gave up is said once")
+  end
+
+  local okEdge, errEdge = pcall(soloEdgeCases)
+  restoreHooks()
+  check(okEdge, "solo Gen 2 finisher shapes: " .. tostring(errEdge))
 end)()
 
 T.finish("rby_mmo")
